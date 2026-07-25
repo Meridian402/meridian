@@ -15,7 +15,7 @@
 // the mention job.
 import { GatewayClient } from "@openhermit/sdk";
 import { searchTweets, postReply, type FoundTweet } from "./src/social/xClient.js";
-import { cleanReply, forbiddenReason, isJunk, similarity, repeatedStat } from "./src/social/postGuards.js";
+import { cleanReply, forbiddenReason, isJunk, isSkip, similarity, repeatedStat } from "./src/social/postGuards.js";
 import { dataPath } from "./src/dataDir.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -49,16 +49,29 @@ for (let i = 0; i < watchlist.length; i += 8) {
 }
 const isWatched = (handle: string) => watchlist.some((w) => w.toLowerCase() === handle.toLowerCase());
 
-type State = { replied: Record<string, number>; authors: Record<string, number> };
+type Attempt = { n: number; at: number };
+type State = { replied: Record<string, number>; authors: Record<string, number>; failed: Record<string, Attempt> };
 const statePath = dataPath("merd-outreach-state.json");
-const load = (): State => { try { return existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { replied: {}, authors: {} }; } catch { return { replied: {}, authors: {} }; } };
+const EMPTY = (): State => ({ replied: {}, authors: {}, failed: {} });
+const load = (): State => {
+  try {
+    return existsSync(statePath) ? { ...EMPTY(), ...JSON.parse(readFileSync(statePath, "utf8")) } : EMPTY();
+  } catch {
+    return EMPTY();
+  }
+};
 const save = (s: State) => { try { writeFileSync(statePath, JSON.stringify(s)); } catch {} };
 const state = load();
+// How many failed post attempts before a tweet is abandoned. Low on purpose:
+// each attempt costs a model call, and a persistent failure is not going to
+// resolve itself on attempt 14.
+const MAX_ATTEMPTS = Number(process.env.MERD_OUTREACH_MAX_ATTEMPTS ?? 2);
 
 // Prune anything older than a week so the state file cannot grow forever.
 const weekAgo = Date.now() - 7 * 864e5;
 for (const [k, v] of Object.entries(state.replied)) if (v < weekAgo) delete state.replied[k];
 for (const [k, v] of Object.entries(state.authors)) if (v < weekAgo) delete state.authors[k];
+for (const [k, v] of Object.entries(state.failed)) if (v.at < weekAgo) delete state.failed[k];
 
 // --- Find candidates --------------------------------------------------------
 const seen = new Map<string, FoundTweet>();
@@ -68,7 +81,8 @@ for (const q of QUERIES) {
 
 const authorCooldownMs = AUTHOR_COOLDOWN_H * 3600_000;
 const candidates = [...seen.values()].filter((t) => {
-  if (state.replied[t.id]) return false;                                   // never reply twice
+  if (state.replied[t.id]) return false;                                   // never reply twice (or re-decide a skip)
+  if ((state.failed[t.id]?.n ?? 0) >= MAX_ATTEMPTS) return false;          // stop hammering a tweet that will not accept a reply
   const last = state.authors[t.authorHandle.toLowerCase()];
   if (last && Date.now() - last < authorCooldownMs) return false;          // don't hound one person
   if (t.text.trim().length < 40) return false;                             // nothing to engage with
@@ -131,8 +145,11 @@ If you reply: one natural sentence, sometimes two. Human, warm, specific, a litt
   const resp = await gw.agent("merd").postMessageSync(sessionId, { text: prompt }, { timeout: 90000 }).catch(() => null);
   const reply = cleanReply(resp?.text ?? "");
 
-  if (!resp || /^skip\b/i.test(reply) || reply.length < 15) {
+  if (!resp || isSkip(reply) || reply.length < 15) {
     console.log(`[skip] @${t.authorHandle}: ${t.text.replace(/\n/g, " ").slice(0, 70)}`);
+    // A decision not to engage is still a decision about this tweet. Record it,
+    // or the next pass re-asks about the same tweet and pays for the same answer.
+    state.replied[t.id] = Date.now();
     continue;
   }
   const bad = forbiddenReason(reply);
@@ -170,6 +187,17 @@ If you reply: one natural sentence, sometimes two. Human, warm, specific, a litt
     state.authors[t.authorHandle.toLowerCase()] = Date.now();
     sentThisPass.push(reply);
     replied++;
+  } else {
+    // A FAILED post used to leave the tweet eligible forever, because state was
+    // only written on success. With X returning 403 on every reply, the same
+    // three tweets were re-attempted 14 times each — 165 attempts across 35
+    // tweets, each one a fresh model call. Count the failures and stop after a
+    // couple, so a transient error still gets a retry but a persistent one
+    // cannot burn the budget in a loop.
+    const f = (state.failed[t.id] ??= { n: 0, at: 0 });
+    f.n += 1;
+    f.at = Date.now();
+    if (f.n >= MAX_ATTEMPTS) console.log(`  giving up on this tweet after ${f.n} failed attempts`);
   }
 }
 

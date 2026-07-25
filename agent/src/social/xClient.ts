@@ -71,9 +71,10 @@ export async function postTweet(text: string): Promise<PostResult> {
     appendLedger("x-posts.jsonl", { at: Date.now(), mode: "live", posted: true, id: res.data.id, text: trimmed });
     return { posted: true, id: res.data.id, text: trimmed };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    appendLedger("x-posts.jsonl", { at: Date.now(), mode: "live", posted: false, error: msg.slice(0, 200), text: trimmed });
-    return { posted: false, reason: `post failed: ${msg.slice(0, 160)}`, text: trimmed };
+    const { message, status, detail } = describeXError(err);
+    appendLedger("x-posts.jsonl", { at: Date.now(), mode: "live", posted: false, error: message.slice(0, 200), status, detail, text: trimmed });
+    console.error(`[x] post failed: ${status ?? "?"} ${detail ?? message}`.slice(0, 300));
+    return { posted: false, reason: `post failed: ${(detail ?? message).slice(0, 160)}`, text: trimmed };
   }
 }
 
@@ -199,6 +200,32 @@ export async function searchTweets(query: string, maxResults = 25): Promise<Foun
 }
 
 /**
+ * X's real explanation for a failed write.
+ *
+ * `err.message` from twitter-api-v2 is just "Request failed with code 403",
+ * which is why 165 consecutive reply failures were logged with no way to tell
+ * WHICH 403 it was — a duplicate, a reply-restricted tweet, a suspended target,
+ * a missing scope, and a rate cap all look identical. The API's actual payload
+ * lives on `err.data` (title/detail/errors) and the HTTP status on `err.code`;
+ * capture both so a repeat failure is diagnosable from the ledger alone.
+ */
+function describeXError(err: unknown): { message: string; status?: number; detail?: string } {
+  const e = err as { message?: string; code?: number; data?: unknown; rateLimit?: { reset?: number } };
+  const message = e?.message ?? String(err);
+  let detail: string | undefined;
+  try {
+    const d = e?.data as { title?: string; detail?: string; reason?: string; errors?: Array<{ message?: string }> } | undefined;
+    if (d) {
+      const parts = [d.title, d.detail, d.reason, ...(d.errors ?? []).map((x) => x?.message)].filter(Boolean);
+      detail = parts.length ? parts.join(" | ") : JSON.stringify(d);
+    }
+  } catch {
+    /* non-serialisable payload — the message and status still tell us something */
+  }
+  return { message, status: e?.code, detail: detail?.slice(0, 400) };
+}
+
+/**
  * Reply to a specific tweet. Same draft-first gate as postTweet: only
  * actually posts when X_LIVE === "true", otherwise logs what would have
  * been said and returns without posting.
@@ -229,9 +256,19 @@ export async function postReply(text: string, inReplyToId: string): Promise<Post
     appendLedger("x-replies.jsonl", { at: Date.now(), mode: "live", posted: true, id: res.data.id, inReplyToId, text: trimmed });
     return { posted: true, id: res.data.id, text: trimmed };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    appendLedger("x-replies.jsonl", { at: Date.now(), mode: "live", posted: false, error: msg.slice(0, 200), inReplyToId, text: trimmed });
-    return { posted: false, reason: `reply failed: ${msg.slice(0, 160)}`, text: trimmed };
+    const { message, status, detail } = describeXError(err);
+    appendLedger("x-replies.jsonl", {
+      at: Date.now(),
+      mode: "live",
+      posted: false,
+      error: message.slice(0, 200),
+      status,
+      detail, // X's own words — the difference between a diagnosable failure and 165 identical mysteries
+      inReplyToId,
+      text: trimmed,
+    });
+    console.error(`[x] reply to ${inReplyToId} failed: ${status ?? "?"} ${detail ?? message}`.slice(0, 300));
+    return { posted: false, reason: `reply failed: ${(detail ?? message).slice(0, 160)}`, text: trimmed };
   }
 }
 

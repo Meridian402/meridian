@@ -51,6 +51,38 @@ export function cleanReply(raw: string): string {
 }
 
 /**
+ * Did the model DECLINE to reply, however it phrased it?
+ *
+ * The prompts ask for the literal token "SKIP", and the callers only tested
+ * /^skip\b/. But a model asked to decide often narrates the decision instead of
+ * emitting the token — "I'm skipping this one. It's pure price hype and
+ * whale-tracking bait." Twenty-one of those were sent to X as REAL REPLIES,
+ * publicly telling people their post wasn't worth answering. Only an unrelated
+ * API failure stopped them from publishing.
+ *
+ * Scoped to the opening of the reply: a genuine reply may well use the word
+ * ("you can skip the manual step"), but the decision to decline is always
+ * stated up front.
+ */
+export function isSkip(reply: string): boolean {
+  const text = (reply ?? "").trim();
+  if (!text) return true;
+  const head = text.slice(0, 140).toLowerCase();
+  // Match the SUBJECT of the skipping, not the word. "I'm skipping this one" is
+  // a decision; "you can skip the manual retry" is ordinary English inside a
+  // real reply, and an earlier version of this guard suppressed exactly that.
+  if (/^\s*skip\b/.test(head)) return true;                                   // the literal token the prompt asks for
+  if (/^\s*\(?\s*(post|reply|response)\s+skipp?ed\b/.test(head)) return true; // "(Post skipped: pure price hype)"
+  if (/\b(i'?m|i am|i'?ll|i will|i'?d|i would|going to|gonna)\s+(just\s+)?skipp?(ing|ed)?\b/.test(head)) return true;
+  if (/\bskipping this\b|\bskip this one\b|\bskip criteria\b/.test(head)) return true;
+  // Decision-narration without the word: the model explaining, in the third
+  // person, which rule the tweet trips instead of writing to the human.
+  if (/\bfalls under\b|\bdoes not (meet|clear) the bar\b|\bnothing (genuinely )?(useful|new|of value) to add\b/.test(head)) return true;
+  if (/\bi'?ll pass\b|\bno reply\b/.test(head)) return true;
+  return false;
+}
+
+/**
  * Hard content boundaries. The prompt asks the model not to write these; this
  * is what catches it when the model is wrong, which is the only case that
  * matters. Phrase-based on purpose: a bare /token/ would false-positive on

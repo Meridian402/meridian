@@ -12,7 +12,7 @@
 // than the post job — replies are time-sensitive).
 import { GatewayClient } from "@openhermit/sdk";
 import { getMentions, postReply } from "./src/social/xClient.js";
-import { cleanReply, forbiddenReason } from "./src/social/postGuards.js";
+import { cleanReply, forbiddenReason, isSkip } from "./src/social/postGuards.js";
 import { dataPath } from "./src/dataDir.js";
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 
@@ -101,7 +101,7 @@ Reply in your own voice. Human, warm, specific, a little funny when it genuinely
   const resp = await gw.agent("merd").postMessageSync(sessionId, { text: prompt }, { timeout: 90000 }).catch(() => null);
   const reply = cleanReply(resp?.text ?? "");
 
-  if (!resp || /^skip\b/i.test(reply) || reply.length < 5) {
+  if (!resp || isSkip(reply) || reply.length < 5) {
     console.log(`[skip] @${m.authorHandle}: ${m.text.slice(0, 60)}`);
     continue;
   }
