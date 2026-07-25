@@ -33,6 +33,12 @@ const FILES = [
   "lp-guard-state.json",
   "lp-opportunities.jsonl",
   "lp-positions.jsonl",
+  // Merd's continuity. The journal IS his memory — losing it resets him to a
+  // stranger who happens to share a voice doc. x-posts is what the cadence floor
+  // and the similarity dedupe read, so losing that means stacked or repeated
+  // posts, not just a gap.
+  "merd-journal.jsonl",
+  "x-posts.jsonl",
   "position-state.json",
   "reservations.jsonl",
   "revenue.jsonl",
