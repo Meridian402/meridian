@@ -191,7 +191,14 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
 
       case "proof": {
         const p = await marketMakingProof();
-        if (p.positions.length === 0) return ["no open market-making position to measure right now"];
+        // "nothing to measure" and "we hold positions we can't measure" are very
+        // different states — never let the second read as the first.
+        const unmeasuredLines = p.unmeasured.map((u) => `  ${u.symbol}/USDG #${u.tokenId} — not measured: ${u.reason}`);
+        if (p.positions.length === 0) {
+          return p.unmeasured.length
+            ? ["holding positions we cannot measure against cost right now:", "", ...unmeasuredLines]
+            : ["no open market-making position to measure right now"];
+        }
         const lines = [
           "market-making proof — fees minus impermanent loss minus gas, vs simply holding:",
           "",
@@ -201,6 +208,11 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
           lines.push(`    fees earned:      +$${pos.feesTotalUsd.toFixed(2)}  ($${pos.feesCollectedUsd.toFixed(2)} collected, $${pos.feesUncollectedUsd.toFixed(2)} accruing)`);
           lines.push(`    impermanent loss:  $${pos.impermanentLossUsd.toFixed(2)}`);
           lines.push(`    NET vs holding:    $${pos.netVsHoldUsd.toFixed(2)}  ${pos.profitable ? "→ profitable" : "→ underwater"}`);
+        }
+        if (unmeasuredLines.length) {
+          lines.push("");
+          lines.push("excluded from the totals above:");
+          lines.push(...unmeasuredLines);
         }
         lines.push("");
         lines.push(`lifetime fees collected: $${p.lifetimeFeesCollectedUsd.toFixed(2)} · every figure reproducible on-chain.`);

@@ -32,6 +32,17 @@ interface PositionProof {
   profitable: boolean;
 }
 
+/**
+ * A position we own but cannot honestly measure against cost. Reported rather
+ * than silently dropped: the wallet's real exposure should never disappear from
+ * the public proof just because our books are thin on it.
+ */
+interface UnmeasuredPosition {
+  tokenId: string;
+  symbol: string;
+  reason: string;
+}
+
 export interface MarketMakingProof {
   asOf: number;
   positions: PositionProof[];
@@ -39,6 +50,7 @@ export interface MarketMakingProof {
   netVsHoldUsd: number;
   lifetimeFeesCollectedUsd: number;
   profitable: boolean;
+  unmeasured: UnmeasuredPosition[];
   note: string;
 }
 
@@ -47,8 +59,19 @@ function poolIdFor(token: Address, fee: number, ts: number): `0x${string}` {
   return keccak256(encodeAbiParameters(parseAbiParameters("address, address, uint24, int24, address"), [c0, c1, fee, ts, NATIVE]));
 }
 
+// Fallback ONLY for legacy rows that predate positions carrying their own pool
+// identity. Guessing the tier from the symbol is wrong for every pool outside
+// the original five, and a wrong tier yields a wrong poolId — which reads some
+// other pool's price and fee growth without erroring. Prefer p.fee/p.tickSpacing.
 const feeTierFor = (symbol: string): { fee: number; ts: number } =>
   symbol === "AAPL" || symbol === "GOOGL" ? { fee: 10000, ts: 200 } : { fee: 3000, ts: 60 };
+
+// feeGrowthInside is a deliberately-wrapping uint256: Uniswap subtracts it
+// unchecked, so `now < last` is normal and means it wrapped past 2^256, not that
+// fees went negative. Plain BigInt subtraction would surface that as a large
+// negative "fee owed". Mask back into the unsigned range, exactly as the pool does.
+const U256 = 1n << 256n;
+const feeGrowthDelta = (now: bigint, last: bigint): bigint => (now - last + U256) % U256;
 
 /** Sum realized fee collections for a symbol after a given time (lp-collect executions). */
 function collectedSince(symbol: string, since: number): number {
@@ -63,11 +86,30 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
   const client = getPublicClient();
   const positions = await openPositionsOnChain();
   const out: PositionProof[] = [];
+  const unmeasured: UnmeasuredPosition[] = [];
 
   for (const p of positions) {
     const token = (INDEX_CONTRACTS.tokens as Record<string, string>)[p.symbol] as Address;
-    if (!token) continue;
-    const { fee, ts } = feeTierFor(p.symbol);
+    if (!token) {
+      unmeasured.push({ tokenId: p.tokenId, symbol: p.symbol, reason: "token not in the known universe — cannot price it" });
+      continue;
+    }
+    // No cost basis => no honest answer to "vs holding". Measuring anyway made
+    // depositUsd and holdNowUsd both 0, so impermanentLoss became +the entire
+    // position value and the position reported as hugely profitable. Chain
+    // discovery finds positions the file registry never recorded, so this is a
+    // routine state, not an anomaly — report it, never estimate through it.
+    if (!p.hasCostBasis) {
+      unmeasured.push({
+        tokenId: p.tokenId,
+        symbol: p.symbol,
+        reason: "no cost basis on record (not minted by this backend, or its ledger row is unsynced)",
+      });
+      continue;
+    }
+    // The position's own pool identity, from chain. Only fall back to the
+    // symbol guess for legacy rows that predate the field.
+    const { fee, ts } = p.fee != null && p.tickSpacing != null ? { fee: p.fee, ts: p.tickSpacing } : feeTierFor(p.symbol);
     const poolId = poolIdFor(token, fee, ts);
     const tokenIsC1 = USDG.toLowerCase() < token.toLowerCase();
 
@@ -87,7 +129,7 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
     const usdgIs0 = tokenIsC1;
     const amt0 = L * Q96 * (1 / sC - 1 / sB), amt1 = (L * (sC - sA)) / Q96;
     const posValue = (usdgIs0 ? amt0 : amt1) / 1e6 + ((usdgIs0 ? amt1 : amt0) / 1e18) * tokenUsd;
-    const fee0 = (Number(now0 - last0) * L) / 2 ** 128, fee1 = (Number(now1 - last1) * L) / 2 ** 128;
+    const fee0 = (Number(feeGrowthDelta(now0, last0)) * L) / 2 ** 128, fee1 = (Number(feeGrowthDelta(now1, last1)) * L) / 2 ** 128;
     const uncollected = (usdgIs0 ? fee0 : fee1) / 1e6 + ((usdgIs0 ? fee1 : fee0) / 1e18) * tokenUsd;
 
     // mint price = geometric center of the range (mintRange centers on spot)
@@ -126,9 +168,15 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
     feesTotalUsd,
     netVsHoldUsd,
     lifetimeFeesCollectedUsd,
-    profitable: netVsHoldUsd > 0,
+    // Only claim profitability off positions we actually measured. With every
+    // position unmeasured, netVsHold is 0 and "profitable" must stay false.
+    profitable: out.length > 0 && netVsHoldUsd > 0,
+    unmeasured,
     note:
       "Net vs hold = fees earned (collected + uncollected) minus impermanent loss minus gas, vs simply holding the deposited assets. " +
-      "The only honest measure of market-making skill; the wallet total mixes in asset price moves. Every figure is reproducible on-chain.",
+      "The only honest measure of market-making skill; the wallet total mixes in asset price moves. Every figure is reproducible on-chain." +
+      (unmeasured.length
+        ? ` ${unmeasured.length} owned position(s) are excluded from these totals because we have no cost basis for them — see "unmeasured".`
+        : ""),
   };
 }

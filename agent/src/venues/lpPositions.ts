@@ -131,6 +131,23 @@ export interface LpPositionRecord {
   tokenIn: number;
   mintedAt: number;
   txHash: string;
+  // The position's OWN pool identity, read from chain alongside it. Carried on
+  // the record so downstream valuation never has to re-guess the fee tier from
+  // the symbol — that guess is wrong for every pool outside the hardcoded
+  // baseline, and a wrong tier means a wrong poolId, which silently reads the
+  // WRONG pool's price and fee growth. Optional only because file-registry rows
+  // written before this existed don't carry it.
+  fee?: number;
+  tickSpacing?: number;
+  /**
+   * True when this position's cost basis (usdgIn/tokenIn/mintedAt) came from the
+   * file registry. Chain discovery finds every position the wallet owns, but the
+   * registry only knows what THIS backend minted — so a position minted from
+   * another machine, or one whose ledger row never synced, has no basis. P&L that
+   * treats a missing basis as "deposited $0" reports the entire position value as
+   * profit, so every consumer must check this before measuring against cost.
+   */
+  hasCostBasis?: boolean;
 }
 
 /**
@@ -229,6 +246,9 @@ export async function mintRange(params: { symbol: string; widthPct: number }): P
     tokenIn,
     mintedAt: Date.now(),
     txHash: hash,
+    fee: k.fee,
+    tickSpacing: k.tickSpacing,
+    hasCostBasis: true,
   };
   appendLedger("lp-positions.jsonl", record);
   recordExecution({ ts: Date.now(), kind: "lp-mint", fromSymbol: "USDG", toSymbol: symbol, amountUsd: usdgIn * 2, success: true, txHash: hash });
@@ -396,6 +416,9 @@ export async function lpPositionsWithValue(): Promise<LpPositionValue[]> {
       tokenIn: m?.tokenIn ?? 0,
       mintedAt: m?.mintedAt ?? 0,
       txHash: m?.txHash ?? "",
+      fee: p.fee,
+      tickSpacing: p.tickSpacing,
+      hasCostBasis: !!m && m.mintedAt > 0,
       inRange: tick >= p.tickLower && tick < p.tickUpper,
       usdgAmount,
       tokenAmount,
@@ -438,6 +461,11 @@ export async function openPositionsOnChain(): Promise<LpPositionRecord[]> {
         tokenIn: m?.tokenIn ?? 0,
         mintedAt: m?.mintedAt ?? 0,
         txHash: m?.txHash ?? "",
+        // Pool identity always comes from CHAIN, never from the registry row —
+        // the position itself is the authority on which pool it is in.
+        fee: p.fee,
+        tickSpacing: p.tickSpacing,
+        hasCostBasis: !!m && m.mintedAt > 0,
       };
     });
 }
@@ -452,8 +480,14 @@ export async function openPositionsOnChain(): Promise<LpPositionRecord[]> {
 export async function uncollectedFeesUsd(p: LpPositionRecord): Promise<number> {
   const k = poolKeyOf(p.symbol);
   const client = getPublicClient();
+  // Use the position's OWN pool identity when it carries one (chain-read). The
+  // symbol lookup resolves to the baseline/qualified config, which is the wrong
+  // pool for a position minted in a different fee tier of the same ticker — and
+  // a wrong poolId reads another pool's fee growth without erroring.
+  const fee = p.fee ?? k.fee;
+  const tickSpacing = p.tickSpacing ?? k.tickSpacing;
   const poolId = keccak256(
-    encodeAbiParameters(parseAbiParameters("address, address, uint24, int24, address"), [k.currency0, k.currency1, k.fee, k.tickSpacing, NATIVE]),
+    encodeAbiParameters(parseAbiParameters("address, address, uint24, int24, address"), [k.currency0, k.currency1, fee, tickSpacing, NATIVE]),
   );
   const salt = `0x${BigInt(p.tokenId).toString(16).padStart(64, "0")}` as Hex;
   const posKey = keccak256(encodePacked(["address", "int24", "int24", "bytes32"], [POSITION_MANAGER, p.tickLower, p.tickUpper, salt]));
@@ -476,8 +510,14 @@ export async function uncollectedFeesUsd(p: LpPositionRecord): Promise<number> {
     args: [poolId],
   });
   const L = Number(liq);
-  const fee0 = (Number(BigInt(now0) - BigInt(last0)) * L) / 2 ** 128;
-  const fee1 = (Number(BigInt(now1) - BigInt(last1)) * L) / 2 ** 128;
+  // feeGrowthInside is a deliberately-wrapping uint256 (the pool subtracts it
+  // unchecked), so `now < last` means it wrapped, not that fees went negative.
+  // Plain BigInt subtraction would report a large negative fee owed — which
+  // would silently suppress auto-collect on a position that IS owed money.
+  const U256 = 1n << 256n;
+  const delta = (now: bigint, last: bigint) => (now - last + U256) % U256;
+  const fee0 = (Number(delta(BigInt(now0), BigInt(last0))) * L) / 2 ** 128;
+  const fee1 = (Number(delta(BigInt(now1), BigInt(last1))) * L) / 2 ** 128;
   const usdgIs0 = k.currency0.toLowerCase() === USDG.toLowerCase();
   const tokenUsd = ((usdgIs0 ? 1 / ((Number(sqrtP) / Q96) ** 2) : (Number(sqrtP) / Q96) ** 2)) * 1e12;
   return (usdgIs0 ? fee0 : fee1) / 1e6 + ((usdgIs0 ? fee1 : fee0) / 1e18) * tokenUsd;
