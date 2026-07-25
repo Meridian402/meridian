@@ -1,6 +1,6 @@
 import { parseAbiItem, type Address } from "viem";
 import type { PaymentReceipt } from "../types.js";
-import type { X402Requirements } from "./PaymentGate.js";
+import { paymentMessage, type X402Requirements } from "./PaymentGate.js";
 import { getPublicClient, getWalletClient, getAgentSigner } from "../venues/signer.js";
 import { config } from "../config.js";
 
@@ -72,6 +72,13 @@ export class X402Client {
     if (!receipt.success || !receipt.reference) {
       throw new Error(`x402 settlement failed: ${receipt.error ?? "no tx reference"}`);
     }
-    return Buffer.from(JSON.stringify({ txHash: receipt.reference })).toString("base64");
+    // Sign the authorization so the proof is ours and no one else's. Without
+    // this the tx hash is a bearer token: it is public on-chain the instant the
+    // payment lands, and whoever presents it first gets the call.
+    if (!signer) throw new Error("x402 settlement needs a signer to authorize the payment proof");
+    const signature = await signer.account.signMessage({
+      message: paymentMessage({ txHash: receipt.reference, resource: accept.resource, treasury: accept.payTo }),
+    });
+    return Buffer.from(JSON.stringify({ txHash: receipt.reference, signature })).toString("base64");
   }
 }
