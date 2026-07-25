@@ -486,12 +486,23 @@ app.get("/api/proof", async (_req: Request, res: Response) => {
   }
 });
 
-// The opportunity scanner: every LP-viable pool ranked by expected net $/day
-// for a given capital, plus a report-only move recommendation. Open, read-only.
-app.get("/api/opportunities", async (req: Request, res: Response) => {
+// The LP opportunity scanner: every LP-viable pool ranked by expected net $/day,
+// plus a report-only move recommendation. Open, read-only.
+//
+// Served at /api/lp-scan, NOT /api/opportunities — this was registered as a
+// second handler on that path, and Express serves the first match, so it had
+// been dead code since the day it was added: the `capital` query silently did
+// nothing and callers got the deterministic snapshot instead. /api/opportunities
+// stays the snapshot (Merd's autopilot consumes that shape).
+//
+// No `capital` query => sized from the wallet's REAL deployable capital. Pass
+// one to ask "what would $X earn"; that answer is explicitly excluded from the
+// cache the autonomous rebalancer reads.
+app.get("/api/lp-scan", async (req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
-    const capital = Math.min(Math.max(Number(req.query.capital) || 160, 10), 100000);
+    const raw = Number(req.query.capital);
+    const capital = Number.isFinite(raw) && raw > 0 ? Math.min(Math.max(raw, 10), 100000) : undefined;
     res.json(await scanOpportunities(capital));
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : "scan unavailable" });

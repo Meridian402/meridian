@@ -22,7 +22,7 @@
 // when signal trading is off. The practical consequence: any process holding
 // AGENT_SIGNER_PRIVATE_KEY is a live guard over the house wallet, so exactly one
 // may run at a time. See the note on getAgentSigner in venues/signer.ts.
-import { openPositionsOnChain, withdrawPosition, mintRange, poolTick, lastMintedPosition, uncollectedFeesUsd, collectFees, type LpPositionRecord } from "./venues/lpPositions.js";
+import { openPositionsOnChain, withdrawPosition, mintRange, poolTick, lastMintedPosition, lastPoolOnChain, uncollectedFeesUsd, collectFees, type LpPositionRecord } from "./venues/lpPositions.js";
 import { realBuyStockFromNative, realSellStockForUsdg, poolPricesUsd, isTradable, isAutoExecutable, poolFeePct } from "./venues/stockPools.js";
 import { getAgentSigner, getPublicClient } from "./venues/signer.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
@@ -181,9 +181,17 @@ async function attemptRecovery(): Promise<void> {
   if (Date.now() - lastRecoveryAt < RECOVERY_COOLDOWN_MS) return;
   if (recoveryFailures >= MAX_RECOVERY_FAILURES) return; // gave up — needs manual attention
 
-  const last = lastMintedPosition();
-  if (!last) return; // never held a position; nothing to recover to
-  const target = last.symbol;
+  // Which pool to re-enter comes from CHAIN first: the wallet still owns the
+  // emptied position NFT, and it knows its own pool. The file registry is only a
+  // fallback for the case where chain discovery can't answer — it knows only
+  // what this backend minted, so trusting it first could re-deploy real capital
+  // into a pool we already left.
+  const target = (await lastPoolOnChain()) ?? lastMintedPosition()?.symbol ?? null;
+  if (!target) return; // never held a position; nothing to recover to
+  if (!isAutoExecutable(target)) {
+    console.error(`[lpGuard] recovery held: ${target} is not auto-executable (no landed mint on record) — manual review.`);
+    return;
+  }
 
   const scan = latestScan() ?? (await scanOpportunities().catch(() => null));
   const opp = scan?.opportunities.find((o) => o.symbol === target);
@@ -287,6 +295,14 @@ async function maybeRebalance(positions: LpPositionRecord[]): Promise<boolean> {
 
   const scan = latestScan() ?? (await scanOpportunities().catch(() => null));
   if (!scan) return false;
+  // Both the gain and the switch cost below scale with capital, so a scan that
+  // isn't sized from the real book cannot price this move. Sitting still is the
+  // safe failure: a nominal-sized scan used to under-price the switch by the
+  // ratio of the real book to $160.
+  if (scan.sizedFrom !== "book") {
+    console.error(`[lpGuard] rebalance skipped: scan sized from "${scan.sizedFrom}", not the real book — cannot price the move.`);
+    return false;
+  }
   // Best AUTO-EXECUTABLE pool — baseline-trusted or with a landed mint on record
   // (isAutoExecutable). NOT scan.best, which can be a discovered-but-unproven
   // pool (e.g. transfer-restricted SPCX: deep + high-volume but reverts on mint).
@@ -302,7 +318,10 @@ async function maybeRebalance(positions: LpPositionRecord[]): Promise<boolean> {
   // pools that's ~2.3%, not 0.6% — the old flat rate made moves look 3x cheaper
   // than they are and churned away thin fee income on burst-noise "gains".
   const roundTripRate = poolFeePct(currentSymbol) / 100 + poolFeePct(best.symbol) / 100 + 0.003;
-  const switchCost = (scan.capitalUsd || 160) * roundTripRate;
+  // scan.capitalUsd is the real book (guaranteed by the sizedFrom check above),
+  // so no `|| 160` fallback — that fallback was the bug, silently pricing a
+  // move on $160 no matter how much was actually at stake.
+  const switchCost = scan.capitalUsd * roundTripRate;
   const paybackDays = gain > 0 ? switchCost / gain : Infinity;
   if (gain < REBALANCE_MIN_GAIN_USD_DAY || paybackDays > REBALANCE_MAX_PAYBACK_DAYS) return false;
 

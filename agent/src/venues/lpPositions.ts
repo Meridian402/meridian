@@ -553,6 +553,35 @@ export async function collectFees(params: { tokenId: string; symbol: string }): 
   return { txHash: hash, usdgCollected, tokenCollected };
 }
 
+/**
+ * The pool we were most recently in, read from CHAIN. withdrawPosition removes
+ * liquidity but does not burn the NFT, so an emptied position is still owned and
+ * still carries its pool identity — and tokenId increases monotonically per mint
+ * on the PositionManager, so the highest one the wallet holds is the latest.
+ *
+ * This is the chain-truth replacement for lastMintedPosition() in the recovery
+ * path. The file registry only knows what THIS backend minted, so after the
+ * migration to chain discovery it could name a pool we are no longer in (or miss
+ * one entirely) — and recovery spends real money on that answer.
+ *
+ * Returns null when it cannot be determined, so the caller can fall back rather
+ * than guess.
+ */
+export async function lastPoolOnChain(): Promise<string | null> {
+  const wallet = getAgentAddress();
+  if (!wallet) return null;
+  try {
+    const positions = await discoverOwnedPositions(wallet);
+    if (positions.length === 0) return null;
+    const latest = positions.reduce((a, b) => (BigInt(a.tokenId) > BigInt(b.tokenId) ? a : b));
+    // A raw address here means the token wasn't in the known universe — not a
+    // symbol we can act on.
+    return latest.symbol.startsWith("0x") ? null : latest.symbol;
+  } catch {
+    return null;
+  }
+}
+
 /** The most recent minted position (open or closed) — tells auto-recovery which pool we were last in and roughly how much was deployed. */
 export function lastMintedPosition(): { symbol: string; depositUsd: number } | null {
   if (!existsSync(POSITIONS_PATH)) return null;

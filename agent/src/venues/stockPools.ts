@@ -449,6 +449,14 @@ export async function realSwapStockToStock(params: {
   if (!fromEntry) throw new Error(`no verified cheap pool for ${fromSymbol}`);
   if (!toEntry) throw new Error(`no verified cheap pool for ${toSymbol}`);
 
+  // A rotation moves the WHOLE position between assets and pays a pool fee on
+  // every hop, so it is the most expensive additive op there is — and it was the
+  // only one the runaway breaker never saw. risk.ts claims to cover "ALL
+  // house-wallet money movement"; this was the hole in that claim, and this exact
+  // path is what churned NVDA->AAPL->NVDA in 2h on 2026-07-13.
+  guardWalletOp(`rotation ${fromSymbol}->${toSymbol} $${amountUsd.toFixed(0)}`);
+  recordWalletOp(amountUsd, "rotation");
+
   const fromPriceUsd = await tokenPriceUsd(fromEntry);
   const signer = getAgentSigner()!;
   const held = await currencyBalance(fromEntry.token, signer.address);

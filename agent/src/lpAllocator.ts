@@ -8,14 +8,25 @@
 // stays a deliberate act (the momentum-churn lesson — never chase on a whim).
 import { keccak256, encodeAbiParameters, parseAbiParameters, parseAbiItem, type Address, type Hex } from "viem";
 import { appendLedger } from "./ledger.js";
-import { getPublicClient } from "./venues/signer.js";
+import { getPublicClient, getAgentAddress } from "./venues/signer.js";
 import { lpScores } from "./signals/lpScore.js";
 import { qualifyDeployablePools } from "./signals/poolQualify.js";
-import { openPositionsOnChain, LP_BASELINE_SYMBOLS } from "./venues/lpPositions.js";
-import { poolCandidates, poolFeePct } from "./venues/stockPools.js";
+import { openPositionsOnChain, lpPositionsWithValue, LP_BASELINE_SYMBOLS } from "./venues/lpPositions.js";
+import { poolCandidates, poolFeePct, poolPricesUsd } from "./venues/stockPools.js";
+import { readStockBalances } from "./venues/positionAccounting.js";
 import { dataPath } from "./dataDir.js";
 
 const BASELINE_SYMBOLS = new Set(LP_BASELINE_SYMBOLS);
+
+// Fallback size for the scan when the wallet's real capital can't be read or is
+// too small to be meaningful. It is ONLY a display default for the read-only
+// ranking — every decision that spends money sizes from the real book (see
+// deployableCapitalUsd), because switch cost is linear in capital and ranking is
+// not: our share of a pool, and therefore expected $/day, is nonlinear in size,
+// so a $160 assumption ranks pools wrongly for a $2k book AND under-prices the
+// move by more than 10x.
+const NOMINAL_CAPITAL_USD = 160;
+const MIN_MEANINGFUL_CAPITAL_USD = 25;
 
 const SV: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
 const MULTICALL3: Address = "0xca11bde05977b3631167028862be2a173976ca11"; // deployed on Robinhood Chain, but not in the viem chain object
@@ -41,6 +52,12 @@ export interface LpOpportunity {
 export interface OpportunityScan {
   ts: number;
   capitalUsd: number;
+  /**
+   * Where capitalUsd came from. Decisions that spend money must only act on a
+   * "book"-sized scan — "nominal" means we could not read the real balance and
+   * fell back to a display figure, which would misprice every switch.
+   */
+  sizedFrom: "explicit" | "book" | "nominal";
   opportunities: LpOpportunity[];
   best: LpOpportunity | null;
   currentSymbol: string | null;
@@ -68,7 +85,60 @@ export function latestScan(): OpportunityScan | null {
   return cache;
 }
 
-export async function scanOpportunities(capitalUsd = 160, widthPct = 2): Promise<OpportunityScan> {
+/**
+ * What the house could actually put to work right now: idle USDG + the value
+ * already sitting in LP positions + stock tokens held between retiles. This is
+ * the size every real decision must be measured at.
+ *
+ * Returns null when it cannot be read (no wallet, RPC failure) so callers fall
+ * back to the nominal display size rather than silently ranking a $0 book —
+ * a zeroed capital makes every pool's expected $/day 0 and the ranking
+ * meaningless.
+ */
+export async function deployableCapitalUsd(): Promise<number | null> {
+  const wallet = getAgentAddress();
+  if (!wallet) return null;
+  try {
+    const client = getPublicClient();
+    const [usdgRaw, balances, prices, positions] = await Promise.all([
+      client.readContract({
+        address: USDG,
+        abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
+        functionName: "balanceOf",
+        args: [wallet],
+      }),
+      readStockBalances(wallet),
+      poolPricesUsd(),
+      lpPositionsWithValue().catch(() => []),
+    ]);
+    const usdg = Number(usdgRaw) / 1e6;
+    const stock = Object.entries(balances).reduce((s, [sym, qty]) => s + qty * (prices[sym] ?? 0), 0);
+    const lp = positions.reduce((s, p) => s + p.valueUsd, 0);
+    return usdg + stock + lp;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rank every LP-viable pool by expected net $/day for a given capital.
+ *
+ * `capitalUsd` omitted => size from the REAL book (deployableCapitalUsd), which
+ * is what the autonomous paths must use. An explicit value is honoured as-is,
+ * for the "what would $X earn" HTTP query.
+ */
+export async function scanOpportunities(capitalUsd?: number, widthPct = 2): Promise<OpportunityScan> {
+  let sizedFrom: "explicit" | "book" | "nominal" = "explicit";
+  if (capitalUsd == null) {
+    const real = await deployableCapitalUsd();
+    if (real != null && real >= MIN_MEANINGFUL_CAPITAL_USD) {
+      capitalUsd = real;
+      sizedFrom = "book";
+    } else {
+      capitalUsd = NOMINAL_CAPITAL_USD;
+      sizedFrom = "nominal";
+    }
+  }
   const client = getPublicClient();
   const score = await lpScores(); // hourly-cached; the expensive part
   const scoreByPool = new Map(score.pools.map((p) => [p.pool, p]));
@@ -124,7 +194,7 @@ export async function scanOpportunities(capitalUsd = 160, widthPct = 2): Promise
   if (!best || !best.viable) {
     recommendation = "no pool is currently fee-positive for our size — sit in cash / wait.";
   } else if (!currentSymbol) {
-    recommendation = `flat. Best opportunity: ${best.pool} at ~$${best.expectedNetPerDayUsd.toFixed(2)}/day for $${capitalUsd}.`;
+    recommendation = `flat. Best opportunity: ${best.pool} at ~$${best.expectedNetPerDayUsd.toFixed(2)}/day for $${capitalUsd.toFixed(0)}.`;
   } else if (best.symbol === currentSymbol) {
     recommendation = `holding the best pool (${best.pool}). No move.`;
   } else {
@@ -142,15 +212,24 @@ export async function scanOpportunities(capitalUsd = 160, widthPct = 2): Promise
   const scan: OpportunityScan = {
     ts: Date.now(),
     capitalUsd,
+    sizedFrom,
     opportunities: opps,
     best,
     currentSymbol,
     recommendation,
-    note: "Expected net $/day = our share of in-range liquidity × the pool's measured (fees − markout)/day. Report-only; moving capital is a deliberate act.",
+    note:
+      `Expected net $/day = our share of in-range liquidity × the pool's measured (fees − markout)/day, for $${capitalUsd.toFixed(0)} ` +
+      `(${sizedFrom === "book" ? "the wallet's real deployable capital" : sizedFrom === "explicit" ? "a caller-supplied size" : "a nominal size — the real balance could not be read"}). ` +
+      `Report-only; moving capital is a deliberate act.`,
   };
-  cache = scan;
+  // Never let a caller-supplied size into the cache the autonomous paths read:
+  // a "what would $50k earn" HTTP query must not become the basis for a real
+  // rebalance decision. Nominal scans are still cached (they save a repeat of an
+  // expensive scan, and pool VIABILITY is capital-independent); consumers that
+  // care about magnitude gate on sizedFrom.
+  if (sizedFrom !== "explicit") cache = scan;
   try {
-    appendLedger("lp-opportunities.jsonl", { ts: scan.ts, best: best?.pool ?? null, bestNet: best?.expectedNetPerDayUsd ?? 0, current: currentSymbol, rec: recommendation });
+    appendLedger("lp-opportunities.jsonl", { ts: scan.ts, capitalUsd, sizedFrom, best: best?.pool ?? null, bestNet: best?.expectedNetPerDayUsd ?? 0, current: currentSymbol, rec: recommendation });
   } catch {}
   return scan;
 }
@@ -163,8 +242,12 @@ export async function scanOpportunities(capitalUsd = 160, widthPct = 2): Promise
 export function startLpAllocator(): NodeJS.Timeout {
   const tick = async () => {
     try {
+      // No argument: size from the real book, so the cached scan the guard reads
+      // reflects what we actually have at risk.
       const scan = await scanOpportunities();
-      console.error(`[lpAllocator] best: ${scan.best?.pool ?? "none"} ($${scan.best?.expectedNetPerDayUsd.toFixed(2)}/day) — ${scan.recommendation}`);
+      console.error(
+        `[lpAllocator] $${scan.capitalUsd.toFixed(0)} (${scan.sizedFrom}) — best: ${scan.best?.pool ?? "none"} ($${scan.best?.expectedNetPerDayUsd.toFixed(2)}/day) — ${scan.recommendation}`,
+      );
     } catch (err) {
       console.error(`[lpAllocator] scan failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
     }
