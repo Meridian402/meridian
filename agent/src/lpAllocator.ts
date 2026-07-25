@@ -11,7 +11,7 @@ import { appendLedger } from "./ledger.js";
 import { getPublicClient, getAgentAddress } from "./venues/signer.js";
 import { lpScores } from "./signals/lpScore.js";
 import { qualifyDeployablePools } from "./signals/poolQualify.js";
-import { openPositionsOnChain, lpPositionsWithValue, LP_BASELINE_SYMBOLS } from "./venues/lpPositions.js";
+import { openPositionsOnChain, lpPositionsWithValue, configuredPool, LP_BASELINE_SYMBOLS } from "./venues/lpPositions.js";
 import { poolCandidates, poolFeePct, poolPricesUsd } from "./venues/stockPools.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { dataPath } from "./dataDir.js";
@@ -27,6 +27,9 @@ const BASELINE_SYMBOLS = new Set(LP_BASELINE_SYMBOLS);
 // move by more than 10x.
 const NOMINAL_CAPITAL_USD = 160;
 const MIN_MEANINGFUL_CAPITAL_USD = 25;
+// Above this share of a pool we would BE the pool, and its measured historical
+// flow no longer describes what we'd earn. See the dead-pool trap below.
+const MAX_TRUSTWORTHY_SHARE_PCT = Number(process.env.LP_MAX_SHARE_PCT ?? 50);
 
 const SV: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
 const MULTICALL3: Address = "0xca11bde05977b3631167028862be2a173976ca11"; // deployed on Robinhood Chain, but not in the viem chain object
@@ -43,11 +46,23 @@ const POOLS = poolCandidates();
 export interface LpOpportunity {
   pool: string;
   symbol: string;
+  /**
+   * The scored pool's OWN identity. The scan ranks per (ticker × fee tier) but
+   * mintRange deploys per symbol, so a consumer that acts on an opportunity must
+   * check these against configuredPool(symbol) — otherwise it scores one pool
+   * and buys another.
+   */
+  fee: number;
+  tickSpacing: number;
+  /** True when a mint for this symbol would land in THIS pool, not a different tier of it. */
+  mintable: boolean;
   ourSharePct: number;
   expectedNetPerDayUsd: number;
   expectedFeesPerDayUsd: number;
   feeTierPct: number;
   viable: boolean;
+  /** Why an otherwise fee-positive pool was ruled out. */
+  reason?: string;
 }
 export interface OpportunityScan {
   ts: number;
@@ -59,7 +74,10 @@ export interface OpportunityScan {
    */
   sizedFrom: "explicit" | "book" | "nominal";
   opportunities: LpOpportunity[];
+  /** Highest-scoring pool overall — may not be deployable. Informative only. */
   best: LpOpportunity | null;
+  /** Highest-scoring pool we could actually mint into today. This is the one to act on. */
+  bestActionable: LpOpportunity | null;
   currentSymbol: string | null;
   recommendation: string;
   note: string;
@@ -174,39 +192,88 @@ export async function scanOpportunities(capitalUsd?: number, widthPct = 2): Prom
     const sc = scoreByPool.get(p.name);
     const netPerDay = sc ? sc.lpNetUsd / score.windowDays : 0;
     const feesPerDay = sc ? sc.feesPerDayUsd : 0;
+
+    // Does a mint for this ticker actually land in THIS pool? The scan covers
+    // every fee tier; the deployer only knows one pool per symbol.
+    const cfg = configuredPool(p.symbol);
+    const mintable = !!cfg && cfg.fee === p.fee && cfg.tickSpacing === p.ts;
+
+    // THE DEAD-POOL TRAP. share is ourL/(poolL+ourL), so a pool holding no
+    // liquidity gives share = 1.0, and multiplying a pool's MEASURED HISTORICAL
+    // flow by a 100% share invents money: you cannot capture yesterday's volume
+    // by being the only LP today — if there is no liquidity now, there is no
+    // flow now. Live this ranked INTC/USDG 0.05% at $1,487/day on a $160 book
+    // (930%/day) and sorted six empty pools above every real one.
+    //
+    // Above this share the historical join stops meaning anything: our own
+    // liquidity would dominate the pool, so the flow that produced the score was
+    // earned under conditions that no longer apply.
+    const tooThin = share * 100 > MAX_TRUSTWORTHY_SHARE_PCT;
+    const reason = tooThin
+      ? `pool too thin for our size — we would be ${(share * 100).toFixed(0)}% of it, so its measured flow does not transfer`
+      : !mintable && cfg
+        ? `scored the ${p.fee / 10000}% tier but a mint for ${p.symbol} lands in the ${cfg.fee / 10000}% pool`
+        : !cfg
+          ? `no deployable pool configured for ${p.symbol}`
+          : undefined;
+
     opps.push({
       pool: p.name,
       symbol: p.symbol,
+      fee: p.fee,
+      tickSpacing: p.ts,
+      mintable,
       ourSharePct: share * 100,
-      expectedNetPerDayUsd: share * netPerDay,
-      expectedFeesPerDayUsd: share * feesPerDay,
+      // Zero out the headline numbers on an untrustworthy pool rather than
+      // reporting a figure nobody should act on.
+      expectedNetPerDayUsd: tooThin ? 0 : share * netPerDay,
+      expectedFeesPerDayUsd: tooThin ? 0 : share * feesPerDay,
       feeTierPct: p.fee / 10000,
-      viable: netPerDay > 0,
+      viable: netPerDay > 0 && !tooThin,
+      reason,
     });
   }
   opps.sort((a, b) => b.expectedNetPerDayUsd - a.expectedNetPerDayUsd);
 
   const best = opps[0] ?? null;
-  const currentSymbol = (await openPositionsOnChain())[0]?.symbol ?? null;
-  const current = opps.find((o) => o.symbol === currentSymbol) ?? null;
+  // What we could actually DEPLOY into today. `best` is informative (it can flag
+  // a pool worth configuring), but recommending a move into a pool that has no
+  // deployable config is advice nobody can take — and on the public console it
+  // reads as an action we're about to make.
+  const bestActionable = opps.find((o) => o.viable && o.mintable) ?? null;
+  const positions = await openPositionsOnChain();
+  const currentSymbol = positions[0]?.symbol ?? null;
+  const currentFee = positions[0]?.fee;
+  const current =
+    opps.find((o) => o.symbol === currentSymbol && (currentFee == null || o.fee === currentFee)) ??
+    opps.find((o) => o.symbol === currentSymbol) ??
+    null;
+
+  // Only mention the unreachable leader when it actually beats what we can take.
+  const footnote =
+    best && bestActionable && best.pool !== bestActionable.pool && best.expectedNetPerDayUsd > bestActionable.expectedNetPerDayUsd
+      ? ` (${best.pool} scores higher at ~$${best.expectedNetPerDayUsd.toFixed(2)}/day but has no deployable pool config — not actionable.)`
+      : "";
 
   let recommendation: string;
-  if (!best || !best.viable) {
-    recommendation = "no pool is currently fee-positive for our size — sit in cash / wait.";
+  if (!bestActionable) {
+    recommendation = best?.viable
+      ? `nothing deployable is fee-positive for our size right now — ${best.pool} leads but we cannot mint it. Sit in cash / wait.`
+      : "no pool is currently fee-positive for our size — sit in cash / wait.";
   } else if (!currentSymbol) {
-    recommendation = `flat. Best opportunity: ${best.pool} at ~$${best.expectedNetPerDayUsd.toFixed(2)}/day for $${capitalUsd.toFixed(0)}.`;
-  } else if (best.symbol === currentSymbol) {
-    recommendation = `holding the best pool (${best.pool}). No move.`;
+    recommendation = `flat. Best deployable: ${bestActionable.pool} at ~$${bestActionable.expectedNetPerDayUsd.toFixed(2)}/day for $${capitalUsd.toFixed(0)}.${footnote}`;
+  } else if (bestActionable.symbol === currentSymbol) {
+    recommendation = `holding the best deployable pool (${bestActionable.pool}). No move.${footnote}`;
   } else {
-    const gain = best.expectedNetPerDayUsd - (current?.expectedNetPerDayUsd ?? 0);
+    const gain = bestActionable.expectedNetPerDayUsd - (current?.expectedNetPerDayUsd ?? 0);
     // Real round-trip: sell current (its fee) + buy target (its fee) + buffer —
     // the flat 0.6% badly understated it for 1% pools.
-    const switchCost = capitalUsd * (poolFeePct(currentSymbol) / 100 + poolFeePct(best.symbol) / 100 + 0.003);
+    const switchCost = capitalUsd * (poolFeePct(currentSymbol) / 100 + poolFeePct(bestActionable.symbol) / 100 + 0.003);
     const paybackDays = gain > 0 ? switchCost / gain : Infinity;
     recommendation =
       paybackDays <= PAYBACK_DAYS_BAR
-        ? `CONSIDER MOVING ${currentSymbol} → ${best.symbol}: +$${gain.toFixed(2)}/day, ~$${switchCost.toFixed(2)} switch cost pays back in ${paybackDays.toFixed(1)}d.`
-        : `hold ${currentSymbol}. ${best.symbol} leads by only $${gain.toFixed(2)}/day — not worth the ~$${switchCost.toFixed(2)} switch.`;
+        ? `CONSIDER MOVING ${currentSymbol} → ${bestActionable.symbol}: +$${gain.toFixed(2)}/day, ~$${switchCost.toFixed(2)} switch cost pays back in ${paybackDays.toFixed(1)}d.${footnote}`
+        : `hold ${currentSymbol}. ${bestActionable.symbol} leads by only $${gain.toFixed(2)}/day — not worth the ~$${switchCost.toFixed(2)} switch.${footnote}`;
   }
 
   const scan: OpportunityScan = {
@@ -215,6 +282,7 @@ export async function scanOpportunities(capitalUsd?: number, widthPct = 2): Prom
     sizedFrom,
     opportunities: opps,
     best,
+    bestActionable,
     currentSymbol,
     recommendation,
     note:

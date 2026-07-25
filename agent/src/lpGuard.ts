@@ -306,12 +306,23 @@ async function maybeRebalance(positions: LpPositionRecord[]): Promise<boolean> {
   // Best AUTO-EXECUTABLE pool — baseline-trusted or with a landed mint on record
   // (isAutoExecutable). NOT scan.best, which can be a discovered-but-unproven
   // pool (e.g. transfer-restricted SPCX: deep + high-volume but reverts on mint).
+  //
+  // `mintable` is the second half of that gate and it is not redundant:
+  // isAutoExecutable answers per SYMBOL, but the scan ranks per (symbol × fee
+  // tier). AAPL is baseline-trusted, so an "AAPL/USDG 0.05%" row passed the
+  // symbol check — and openInPool("AAPL") then mints AAPL's configured 1% pool.
+  // We would have scored one pool and bought a different one.
   const best = scan.opportunities
-    .filter((o) => o.viable && isAutoExecutable(o.symbol))
+    .filter((o) => o.viable && o.mintable && isAutoExecutable(o.symbol))
     .sort((a, b) => b.expectedNetPerDayUsd - a.expectedNetPerDayUsd)[0];
   if (!best || best.symbol === currentSymbol) return false;
 
-  const cur = scan.opportunities.find((o) => o.symbol === currentSymbol);
+  // Compare against the pool we are ACTUALLY in, matched on the position's own
+  // fee tier — not merely the first row sharing its ticker.
+  const curFee = positions[0].fee;
+  const cur =
+    scan.opportunities.find((o) => o.symbol === currentSymbol && (curFee == null || o.fee === curFee)) ??
+    scan.opportunities.find((o) => o.symbol === currentSymbol);
   const gain = best.expectedNetPerDayUsd - (cur?.expectedNetPerDayUsd ?? 0);
   // REAL round-trip cost, not a flat 0.6%: sell the current stock (its pool fee)
   // + buy the target (its pool fee) + a gas/slippage/re-strand buffer. For 1%

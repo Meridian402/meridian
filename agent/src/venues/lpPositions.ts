@@ -79,6 +79,21 @@ function poolKeyOf(symbol: string) {
   return { currency0, currency1, fee: p.fee, tickSpacing: p.tickSpacing, hooks: NATIVE, token: p.token };
 }
 
+/**
+ * The pool params a mint for `symbol` would ACTUALLY use — trusted baseline
+ * first, then the qualified set, exactly as poolKeyOf resolves them.
+ *
+ * Exported because the allocator scores per (ticker × fee tier) while mintRange
+ * deploys per SYMBOL: without this, a scan could rank "AAPL/USDG 0.05%" and the
+ * guard would then mint AAPL's configured 1% pool — scoring one pool and buying
+ * another. Callers compare a candidate's fee/tickSpacing against this before
+ * acting on it.
+ */
+export function configuredPool(symbol: string): { fee: number; tickSpacing: number } | null {
+  const p = LP_POOLS[symbol] ?? cachedQualified().find((x) => x.symbol === symbol);
+  return p ? { fee: p.fee, tickSpacing: p.tickSpacing } : null;
+}
+
 export async function poolTick(symbol: string): Promise<number> {
   return (await slot0(symbol)).tick;
 }
