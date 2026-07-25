@@ -17,6 +17,13 @@ import { dataPath } from "./src/dataDir.js";
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 
 const gw = new GatewayClient({ baseUrl: process.env.OPENHERMIT_GATEWAY_URL, token: process.env.GATEWAY_ADMIN_TOKEN });
+// The X account is the COPYWRITER's job, not the executive's. Merd is the
+// project manager and fund manager (see AGENTS.md); he sets direction and moves
+// money, and must not also be the public voice ingesting stranger text from the
+// timeline. These jobs drove gw.agent("merd") purely by drift: the copywriter
+// persona already existed in _ohsetup.mjs, defined as "Merd's external voice on
+// X, reporting to Merd", and was never wired up.
+const X_AGENT = process.env.MERD_X_AGENT_ID ?? "copywriter";
 const DRY = process.env.DRY_RUN === "1";
 const REPLY_CAP = Number(process.env.MERD_ENGAGE_CAP ?? 3); // never reply more than this many times in one pass
 
@@ -60,7 +67,7 @@ if (!mentions.length) { console.log("No new mentions."); process.exit(0); }
 console.log(`${mentions.length} new mention(s).`);
 
 const sessionId = "x-engage";
-await gw.agent("merd").openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
+await gw.agent(X_AGENT).openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
 
 let replied = 0;
 for (const m of mentions) {
@@ -98,7 +105,7 @@ This is a conversation, not a broadcast, so write like you are talking to one pe
 
 Reply in your own voice. Human, warm, specific, a little funny when it genuinely is. No hashtags, no em dashes, no quotation marks, no pitching Meridian, never open with their handle. If you have nothing true and useful to say, SKIP.`;
 
-  const resp = await gw.agent("merd").postMessageSync(sessionId, { text: prompt }, { timeout: 90000 }).catch(() => null);
+  const resp = await gw.agent(X_AGENT).postMessageSync(sessionId, { text: prompt }, { timeout: 90000 }).catch(() => null);
   const reply = cleanReply(resp?.text ?? "");
 
   if (!resp || isSkip(reply) || reply.length < 5) {

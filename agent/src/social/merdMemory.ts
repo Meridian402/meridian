@@ -1,4 +1,4 @@
-// Merd's continuity.
+// Per-agent continuity.
 //
 // He had none. merd-memory/ was empty, merd-decisions.jsonl was written and
 // never read back, and the only history that reached the prompt was his last 12
@@ -15,7 +15,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendLedger } from "../ledger.js";
 import { dataPath } from "../dataDir.js";
 
-const JOURNAL = "merd-journal.jsonl";
+// One journal per persona. The X voice and the executive are different agents
+// with different jobs, so they must not share a memory: the copywriter
+// remembering a funding decision, or Merd remembering a joke he made about
+// Bloom Energy, would blur exactly the separation this split exists to create.
+const journalFile = (agent: string) => `${agent}-journal.jsonl`;
 
 export interface JournalEntry {
   at: number;
@@ -26,19 +30,19 @@ export interface JournalEntry {
 }
 
 /** Append one cycle's note. Silent on failure — a journal write must never cost a post. */
-export function remember(entry: Omit<JournalEntry, "at">): void {
+export function remember(agent: string, entry: Omit<JournalEntry, "at">): void {
   const note = entry.note.trim().slice(0, 400);
   if (!note) return;
   try {
-    appendLedger(JOURNAL, { at: Date.now(), decision: entry.decision, note });
+    appendLedger(journalFile(agent), { at: Date.now(), decision: entry.decision, note });
   } catch {
     /* non-fatal */
   }
 }
 
 /** The last `limit` notes, oldest first, so the prompt reads as a timeline. */
-export function recall(limit = 8): JournalEntry[] {
-  const path = dataPath(JOURNAL);
+export function recall(agent: string, limit = 8): JournalEntry[] {
+  const path = dataPath(journalFile(agent));
   if (!existsSync(path)) return [];
   const rows: JournalEntry[] = [];
   try {
@@ -61,8 +65,8 @@ export function recall(limit = 8): JournalEntry[] {
  * The journal rendered for a prompt: a timeline of what he has been thinking,
  * with rough ages so "two days ago" is available to him as a thought.
  */
-export function recallForPrompt(limit = 8): string {
-  const rows = recall(limit);
+export function recallForPrompt(agent: string, limit = 8): string {
+  const rows = recall(agent, limit);
   if (!rows.length) return "";
   const now = Date.now();
   const ago = (ts: number) => {

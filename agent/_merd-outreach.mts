@@ -20,6 +20,13 @@ import { dataPath } from "./src/dataDir.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const gw = new GatewayClient({ baseUrl: process.env.OPENHERMIT_GATEWAY_URL, token: process.env.GATEWAY_ADMIN_TOKEN });
+// The X account is the COPYWRITER's job, not the executive's. Merd is the
+// project manager and fund manager (see AGENTS.md); he sets direction and moves
+// money, and must not also be the public voice ingesting stranger text from the
+// timeline. These jobs drove gw.agent("merd") purely by drift: the copywriter
+// persona already existed in _ohsetup.mjs, defined as "Merd's external voice on
+// X, reporting to Merd", and was never wired up.
+const X_AGENT = process.env.MERD_X_AGENT_ID ?? "copywriter";
 const ENABLED = process.env.MERD_OUTREACH_ENABLED === "true";
 const DRY = !ENABLED || process.env.DRY_RUN === "1";
 const REPLY_CAP = Number(process.env.MERD_OUTREACH_CAP ?? 2);
@@ -103,7 +110,7 @@ console.log(`Found ${seen.size} tweet(s), ${candidates.length} worth considering
 if (!candidates.length) { save(state); process.exit(0); }
 
 const sessionId = "x-outreach";
-await gw.agent("merd").openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
+await gw.agent(X_AGENT).openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
 
 let replied = 0;
 // Replies accepted THIS pass. Without this the same talking point lands in
@@ -142,7 +149,7 @@ Skipping is free; a hollow reply costs credibility.
 
 If you reply: one natural sentence, sometimes two. Human, warm, specific, a little dry when it fits. Never promotional, never pitch Meridian, never open with the person's handle. No hashtags, no em dashes, no quotation marks. Never mention any token, launch, ticker, or price prediction. Ground any number in something you actually know.`;
 
-  const resp = await gw.agent("merd").postMessageSync(sessionId, { text: prompt }, { timeout: 90000 }).catch(() => null);
+  const resp = await gw.agent(X_AGENT).postMessageSync(sessionId, { text: prompt }, { timeout: 90000 }).catch(() => null);
   const reply = cleanReply(resp?.text ?? "");
 
   if (!resp || isSkip(reply) || reply.length < 15) {

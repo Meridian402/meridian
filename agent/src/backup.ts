@@ -33,10 +33,12 @@ const FILES = [
   "lp-guard-state.json",
   "lp-opportunities.jsonl",
   "lp-positions.jsonl",
-  // Merd's continuity. The journal IS his memory — losing it resets him to a
-  // stranger who happens to share a voice doc. x-posts is what the cadence floor
-  // and the similarity dedupe read, so losing that means stacked or repeated
-  // posts, not just a gap.
+  // Agent continuity. A journal IS that agent's memory — losing it resets the
+  // persona to a stranger who happens to share a voice doc. One per agent:
+  // the copywriter owns the X account, Merd owns the operation, and they must
+  // not share a memory. x-posts is what the cadence floor and the similarity
+  // dedupe read, so losing that means stacked or repeated posts, not just a gap.
+  "copywriter-journal.jsonl",
   "merd-journal.jsonl",
   "x-posts.jsonl",
   "position-state.json",

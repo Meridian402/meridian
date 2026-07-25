@@ -9,6 +9,13 @@ import { dataPath } from "./src/dataDir.js";
 import { existsSync, readFileSync, appendFileSync } from "node:fs";
 
 const gw = new GatewayClient({ baseUrl: process.env.OPENHERMIT_GATEWAY_URL, token: process.env.GATEWAY_ADMIN_TOKEN });
+// The X account is the COPYWRITER's job, not the executive's. Merd is the
+// project manager and fund manager (see AGENTS.md); he sets direction and moves
+// money, and must not also be the public voice ingesting stranger text from the
+// timeline. These jobs drove gw.agent("merd") purely by drift: the copywriter
+// persona already existed in _ohsetup.mjs, defined as "Merd's external voice on
+// X, reporting to Merd", and was never wired up.
+const X_AGENT = process.env.MERD_X_AGENT_ID ?? "copywriter";
 const API = "https://meridian402-api-production.up.railway.app";
 const DRY = process.env.DRY_RUN === "1";
 
@@ -89,7 +96,7 @@ if (lastPostAt) {
 
 // His own memory (private notes from previous cycles) and the curated feed of
 // what actually shipped -- the two things he had no access to before.
-const journal = recallForPrompt(8);
+const journal = recallForPrompt(X_AGENT, 8);
 const shipped = recentlyShipped(4);
 
 // Merd decides. The script does not pick an angle or force a post.
@@ -127,8 +134,8 @@ Write the tweet like a real, curious, sharp person sharing what is on their mind
 If nothing is genuinely worth saying right now: reply with PASS on the first line, then your NOTE.`;
 
 const sessionId = "x-autopilot";
-await gw.agent("merd").openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
-const resp = await gw.agent("merd").postMessageSync(sessionId, { text: prompt }, { timeout: 90000 });
+await gw.agent(X_AGENT).openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
+const resp = await gw.agent(X_AGENT).postMessageSync(sessionId, { text: prompt }, { timeout: 90000 });
 // Split the private note off BEFORE any public processing, so a NOTE can never
 // reach the timeline. Unlabelled replies fall through as pure tweet text, so a
 // model that ignores the format still posts normally.
@@ -144,7 +151,7 @@ try { appendFileSync(dataPath("merd-decisions.jsonl"), JSON.stringify(logLine) +
 // The journal is the half he reads back. Written on HOLD too: deciding there is
 // nothing worth saying is itself a thought worth keeping, and a cycle that
 // journals nothing is a gap in his continuity.
-remember({ decision: held ? "hold" : "post", note });
+remember(X_AGENT, { decision: held ? "hold" : "post", note });
 if (note) console.log(`  note to self: ${note}`);
 
 if (held) { console.log("Merd chose to hold this cycle."); process.exit(0); }
