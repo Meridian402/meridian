@@ -24,6 +24,22 @@ export const robinhoodChain = {
  * with no human supplying a payer wallet per trade (see agentLoop.ts). Absent
  * this env var, autonomous execution can't run — IndexTrader falls back to
  * its stub (logs intent, doesn't touch the chain), same as with no RPC set.
+ *
+ * EXACTLY ONE RUNNING PROCESS MAY HOLD THIS KEY.
+ *
+ * Setting it does more than enable trading: startLpGuard() runs unconditionally
+ * (it is NOT gated by AGENT_LIVE_TRADING, because position protection must work
+ * even with signal trading off), so every process that can read this key becomes
+ * an independent LP guard over the same wallet. withHouseWalletLock serialises
+ * house-wallet ops WITHIN a process; it is a module-level lock and cannot
+ * coordinate across processes or hosts. Two guards therefore each see the same
+ * position and can each decide to re-center, withdraw, or collect it — a real
+ * double-spend on live capital, and one that stays invisible while the wallet is
+ * empty because there is nothing for either to act on.
+ *
+ * So: set it on the ONE host that should manage the book, and nowhere else. A
+ * second box that only needs to read (portfolio, console, valuations) sets
+ * MERIDIAN_WALLET_ADDRESS instead — see getAgentAddress below.
  */
 let cached: { account: ReturnType<typeof privateKeyToAccount>; address: Address } | null = null;
 
@@ -39,9 +55,13 @@ export function getAgentSigner() {
 
 /**
  * The wallet address for READ paths (portfolio, console, valuations).
- * Read-only deployments (the public cloud instance) carry no private key —
- * they set MERIDIAN_WALLET_ADDRESS instead, so every balance/position read
- * works while nothing on the box can sign.
+ * A read-only deployment carries no private key — it sets
+ * MERIDIAN_WALLET_ADDRESS instead, so every balance/position read works while
+ * nothing on the box can sign, and it never becomes a competing LP guard.
+ *
+ * This is the setting for any instance that is NOT the one managing the book.
+ * (It is not currently the cloud: as deployed, Railway holds the signer key and
+ * is the guard. Whichever host is the guard, the others should use this.)
  */
 export function getAgentAddress(): `0x${string}` | null {
   const signer = getAgentSigner();

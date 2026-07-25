@@ -15,7 +15,13 @@
 //   weekday-off     → hold as-is; off-hours moves are informed, don't chase.
 //
 // State is derived from the clock and each position's own tick span, so a
-// guard restart (tsx watch on the operator machine) loses nothing.
+// guard restart loses nothing.
+//
+// This starts UNCONDITIONALLY (see index.ts) — it is not gated by
+// AGENT_LIVE_TRADING, because protecting an open position must keep working
+// when signal trading is off. The practical consequence: any process holding
+// AGENT_SIGNER_PRIVATE_KEY is a live guard over the house wallet, so exactly one
+// may run at a time. See the note on getAgentSigner in venues/signer.ts.
 import { openPositionsOnChain, withdrawPosition, mintRange, poolTick, lastMintedPosition, uncollectedFeesUsd, collectFees, type LpPositionRecord } from "./venues/lpPositions.js";
 import { realBuyStockFromNative, realSellStockForUsdg, poolPricesUsd, isTradable, isAutoExecutable, poolFeePct } from "./venues/stockPools.js";
 import { getAgentSigner, getPublicClient } from "./venues/signer.js";

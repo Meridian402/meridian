@@ -49,24 +49,57 @@ the engine to trade. Neither wallet needs the other's key.
 
 ## Operator levers (fund manager)
 
-The trading engine ships **idle**. Taking it from idle to live is two deliberate
-steps, both in Railway, both the fund manager's call:
+The engine ships **idle**. There are two separate businesses here with different
+switches, and conflating them wastes time:
 
-1. **Fund the trading signer wallet** with ETH (gas) plus the capital it should
-   trade. Its address is the `AGENT_SIGNER_PRIVATE_KEY` wallet (also mirrored in
-   `MERIDIAN_WALLET_ADDRESS`). Move funds from the treasury into it.
-2. **Set `AGENT_LIVE_TRADING=true`** and redeploy. It defaults to `false`; while
-   false, the strategy loop logs its decisions but signs nothing.
+### Market-making (LP) — what the agent actually does
 
-Both conditions are required. An unfunded wallet or `AGENT_LIVE_TRADING=false`
-means no autonomous trades, regardless of the other.
+`AGENT_LIVE_TRADING` is **not** involved. `startLpGuard()` runs unconditionally.
+
+1. **Fund the signer wallet** with ETH (gas) *and* USDG (capital). Its address is
+   the `AGENT_SIGNER_PRIVATE_KEY` wallet. Without ETH it cannot pay gas even when
+   it holds USDG, so both are required.
+2. **Open a position** — nothing auto-deploys idle cash:
+   `POST /api/lp-open {"symbol":"NVDA"}` with the `MERIDIAN_MCP_TOKEN` bearer.
+   Tradable: NVDA / TSLA / META (0.3%), AAPL / GOOGL (1%).
+
+The guard then manages it: tight ±1% in market hours, wide ±4% over weekends,
+auto-collect above `MERIDIAN_COLLECT_THRESHOLD_USD`.
+
+**To stop:** close the position (`POST /api/lp-close`). Clearing
+`AGENT_LIVE_TRADING` does *not* stop the LP guard.
+
+### Directional / momentum trading — retired, off
+
+3. **Set `AGENT_LIVE_TRADING=true`** and redeploy to re-enable the rotation loop.
+   It defaults to `false`; while false, the loop logs decisions and signs
+   nothing. This is the strategy behind the 2026-07-13 churn incident; leaving it
+   off is the deliberate posture.
 
 **To stop:** set `AGENT_LIVE_TRADING=false` and redeploy.
+
+### Exactly one host may hold the signer key
+
+Setting `AGENT_SIGNER_PRIVATE_KEY` makes that process an LP guard over the house
+wallet. The house-wallet lock is in-process only and cannot coordinate across
+machines, so two key-holding processes each manage the same position
+independently — a genuine double-spend path. It stays invisible while the wallet
+is empty. Any additional instance that only needs to read sets
+`MERIDIAN_WALLET_ADDRESS` instead. **As deployed today the key is in Railway, so
+the cloud is the guard** — which also means `/api/sync-state` must not be used to
+push local ledgers over it (whole-file replace).
 
 **Guardrails** (Railway, lower to tighten — do not raise casually): per-trade and
 daily caps `AGENT_MAX_TRADE_USD` / `AGENT_MAX_DAILY_USD`, and the house-wallet
 circuit breakers `MERIDIAN_MAX_DAILY_NOTIONAL_USD` /
 `MERIDIAN_MAX_DAILY_WALLET_OPS`.
+
+`MERIDIAN_MAX_RECOVERY_USD` is the ceiling on unattended redeployment: if a
+retile fails or a weekend drift-pull leaves the wallet flat, the guard re-enters
+the same pool on its own, but never above this. It is a **ceiling, not a target**,
+and it must exceed the book — set below the deployable balance it silently never
+fires, so a flat wallet stays flat and out of the market. `0` disables recovery
+entirely. Every knob here reads `Number(...)`, so `0` is a real value, not "unset".
 
 **One caveat, so "trading off" is not misread as "nothing moves":** the LP guard
 is position protection, not signal trading, and it runs *even with*

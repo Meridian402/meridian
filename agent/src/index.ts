@@ -433,11 +433,21 @@ app.post("/api/index-trade", async (req: Request, res: Response) => {
   res.json(outcome);
 });
 
-// State sync from the operator machine (the Mac that holds the key and runs
-// the LP guard). The cloud instance is read-only: it can't mint or trade, so
-// its LP/execution ledgers would go stale without this push. Bearer-gated,
-// strict filename allowlist, whole-file replace (source of truth stays on
-// the operator side).
+// Ledger sync between a key-holding operator machine and a read-only instance.
+//
+// WHICH SIDE IS AUTHORITATIVE FOLLOWS THE SIGNER KEY, NOT THE HOSTNAME. Whoever
+// has AGENT_SIGNER_PRIVATE_KEY runs the LP guard (startLpGuard is unconditional)
+// and therefore writes the real lp-positions/executions rows; the other side is
+// the one that goes stale and needs this push.
+//
+// As deployed today the KEY IS SET IN RAILWAY, so the cloud is the guard and the
+// cloud's ledgers are the truth. In that topology this route must NOT be used to
+// push a laptop's copies up: it is a whole-file REPLACE, so a stale local file
+// would silently overwrite prod's real position and execution history — the same
+// history /api/proof and /api/lp-pnl compute from. scripts-pushState.sh does
+// exactly that and is deliberately left unscheduled.
+//
+// Bearer-gated, strict filename allowlist.
 const SYNCABLE_FILES = new Set(["lp-positions.jsonl", "executions.jsonl", "equity-snapshots.jsonl"]);
 app.post("/api/sync-state", (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) {
