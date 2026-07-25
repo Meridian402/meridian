@@ -12,6 +12,27 @@ rules exist so it doesn't again.
 | Money, live config, project direction, fund movements | **OpenHermit Merd** (project manager / fund manager) | **Railway** environment |
 | Backend code, bug fixes, tests, documentation | **Claude Code** (engineering, in the editor) | **git `main`** |
 
+### The agents on the gateway
+
+Four personas are provisioned by `agent/_ohsetup.mjs`, and they are not
+interchangeable. The split exists so the agent that decides about money is not
+also the agent reading untrusted text off a public timeline.
+
+| Agent | Job | Driven by |
+| --- | --- | --- |
+| `merd` | The operation and the money: reads the book, decides allocation, sets risk posture, directs the others | Conversation; the ops surfaces |
+| `copywriter` | Owns @Meridian402 — posts, mentions, outreach. **Not** Merd. | `_merd-autopilot` / `_merd-engage` / `_merd-outreach`, via `MERD_X_AGENT_ID` |
+| `trader` | Market-making strategy, reporting to Merd | Not yet scheduled |
+| `researcher` | RWA universe and basis research, reporting to Merd | Not yet scheduled |
+
+The X jobs drove `merd` for a long stretch purely by drift — the `copywriter`
+persona existed from the start and was never wired up. If you are changing who
+posts, change `MERD_X_AGENT_ID`, not the persona.
+
+**Journals are per-agent** (`<agent>-journal.jsonl`, mirrored to Postgres). An
+agent's journal IS its memory and its continuity; they must not be shared or
+swapped between personas.
+
 The trading engine in `agent/` is an execution layer. It signs and market-makes
 with capital it has been handed. The **treasury is separate**: revenue and funds
 live in the fund manager's wallet, which funds the trading wallet when it wants
@@ -43,9 +64,19 @@ the engine to trade. Neither wallet needs the other's key.
 
 - Railway does **not** auto-deploy on git push. Code changes go live via
   `railway up -s meridian402-api --detach` from `agent/`. Config-only changes
-  take effect on the next redeploy.
+  take effect on the next redeploy. `railway` resolves its project link
+  **per-directory** and is only linked inside `agent/` — run it from there or it
+  reports "No linked project found."
 - The public track record (`/api/performance`) and the site are outward-facing.
   Treat changes to them as publishing: confirm before they go out.
+- **The X jobs are not deployed at all.** They run on the operator's machine via
+  launchd (`com.meridian.merdx` / `merdengage` / `merdoutreach`), executing `tsx`
+  against the working tree — so a code change there is live on the next tick with
+  no deploy step, and a broken edit is live just as fast.
+- Piping a git command into `tail` hides its exit code (a pipeline reports the
+  last command's status), so `git pull --rebase | tail && git push` will push even
+  when the rebase failed. Don't chain them that way; rule 1 is only enforced if
+  the failure is visible.
 
 ## Operator levers (fund manager)
 
