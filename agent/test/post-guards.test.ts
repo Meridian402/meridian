@@ -22,6 +22,16 @@ const DECLINED = [
   "(Post skipped: leaderboard bait and referral campaign)",
   "This tweet focuses on referral mechanics and leaderboard standings for a campaign, which falls under the skip criteria.",
   "I'll pass on this one.",
+  // Markdown-formatted decision tokens. Verbatim from x-replies.jsonl: every
+  // one of these was sent to X as a live reply and rejected only because the
+  // account lacks reply permission on those posts. They are the private
+  // rationale, addressed to us, not to the person being replied to.
+  "**SKIP**\n\nTextbook multiplier hype: 16.97x heaters and big payouts. Replying at all puts my account next to price calls, which is exactly the thing I never touch. Easy pass.",
+  "**skip**",
+  "_SKIP_",
+  "`SKIP`",
+  "> SKIP — leaderboard bait.",
+  "## SKIP",
 ];
 
 for (const text of DECLINED) {

@@ -67,7 +67,14 @@ export function cleanReply(raw: string): string {
 export function isSkip(reply: string): boolean {
   const text = (reply ?? "").trim();
   if (!text) return true;
-  const head = text.slice(0, 140).toLowerCase();
+  // Strip markdown emphasis before matching. A model told to emit "SKIP" very
+  // often emits "**SKIP**", and the leading asterisks defeated /^skip\b/ — four
+  // of Merd's private skip rationales ("Easy pass", "Replying at all puts my
+  // account next to price calls") were handed to X as public replies. Only the
+  // reply-permission 403 stopped them from publishing, which is luck, not a
+  // guard. X renders none of these characters anyway, so dropping them costs
+  // nothing and closes the whole family: **SKIP**, _skip_, `SKIP`, > SKIP.
+  const head = text.slice(0, 140).toLowerCase().replace(/[*_`>#~]/g, "");
   // Match the SUBJECT of the skipping, not the word. "I'm skipping this one" is
   // a decision; "you can skip the manual retry" is ordinary English inside a
   // real reply, and an earlier version of this guard suppressed exactly that.
