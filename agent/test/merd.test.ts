@@ -57,10 +57,11 @@ test("the treasury is not the deploying key", () => {
 });
 
 test("the salt is the mined value, not a placeholder", () => {
-  // Re-mined when the treasury consolidated onto 0x475C: the treasury is a
-  // constructor argument, so it is part of the init code hash and therefore
-  // part of the address. The previous salt (200179) is void.
-  assert.equal(BigInt(MERD_SALT), 21540n);
+  // Re-mined twice: once when the treasury consolidated onto 0x475C, and
+  // again when the token gained its zero-treasury and zero-supply guards. The
+  // address is a hash of the CONSTRUCTOR ARGS AND THE BYTECODE, so editing the
+  // contract at all moves it. Both earlier salts (200179, 21540) are void.
+  assert.equal(BigInt(MERD_SALT), 7905n);
 });
 
 // ── wallet topology ──────────────────────────────────────────────────────────
@@ -87,4 +88,29 @@ test("the retired wallet is not wired into any live role", async () => {
   for (const [role, addr] of Object.entries(WALLET_ROLES)) {
     assert.notEqual(addr.toLowerCase(), RETIRED_WALLET.toLowerCase(), `${role} points at the retired wallet`);
   }
+});
+
+// ── the launch tax schedule ──────────────────────────────────────────────────
+
+test("the fee schedule opens at 10% and floors at 3%, both ways", async () => {
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  assert.equal(s.buyStartBps, 1000);
+  assert.equal(s.sellStartBps, 1000);
+  assert.equal(s.buyEndBps, 300);
+  assert.equal(s.sellEndBps, 300);
+});
+
+test("the schedule only ever falls", async () => {
+  // A rate that rises on holders after they buy is the hostile configuration;
+  // the hook rejects it at construction and this catches it a step earlier.
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  assert.ok(s.buyEndBps <= s.buyStartBps, "buy fee must not rise");
+  assert.ok(s.sellEndBps <= s.sellStartBps, "sell fee must not rise");
+});
+
+test("the decay is fast, and within the contract's cap", async () => {
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  assert.equal(s.decaySeconds, 15n);
+  // MAX_FEE_BPS in the hook is 1000; anything above it fails to deploy.
+  assert.ok(s.buyStartBps <= 1000 && s.sellStartBps <= 1000, "opening rate must be within the hook's cap");
 });

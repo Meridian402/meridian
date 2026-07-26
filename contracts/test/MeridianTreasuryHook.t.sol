@@ -56,7 +56,7 @@ contract MeridianTreasuryHookTest is Test {
         address target = address(flags | (uint160(0x4444) << 20));
         deployCodeTo(
             "MeridianTreasuryHook.sol:MeridianTreasuryHook",
-            abi.encode(IPoolManager(address(pm)), treasury, owner, uint16(1000), uint16(300), uint16(1000), uint16(300), uint64(48 hours)),
+            abi.encode(IPoolManager(address(pm)), treasury, owner, uint16(1000), uint16(300), uint16(1000), uint16(300), uint64(15)),
             target
         );
         hook = MeridianTreasuryHook(target);
@@ -115,16 +115,17 @@ contract MeridianTreasuryHookTest is Test {
         assertEq(buy, 1000, "still the full opening rate at the first trade");
     }
 
-    function test_decaysLinearlyToThreePercent() public {
+    function test_decaysToThreePercentInFifteenSeconds() public {
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
         uint256 t0 = block.timestamp;
 
-        vm.warp(t0 + 24 hours); // halfway
+        vm.warp(t0 + 7); // roughly halfway through the 15s window
         (uint16 mid,) = hook.currentFeeBps();
-        assertEq(mid, 650, "halfway between 10% and 3%");
+        // 1000 - (700 * 7) / 15 with integer division: 4900/15 = 326, so 674.
+        assertEq(mid, 674, "on the straight line between 10% and 3%");
 
-        vm.warp(t0 + 48 hours); // the floor
+        vm.warp(t0 + 15); // the floor
         (uint16 endBuy, uint16 endSell) = hook.currentFeeBps();
         assertEq(endBuy, 300);
         assertEq(endSell, 300);
@@ -145,7 +146,7 @@ contract MeridianTreasuryHookTest is Test {
         (, int128 first) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
         assertEq(uint128(first), 100_000, "10% at launch");
 
-        vm.warp(block.timestamp + 48 hours);
+        vm.warp(block.timestamp + 15);
         vm.prank(address(pm));
         (, int128 later) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
         assertEq(uint128(later), 30_000, "3% once decayed");
@@ -180,12 +181,12 @@ contract MeridianTreasuryHookTest is Test {
         // A rate that goes UP on holders after they buy is the most hostile
         // thing this contract could be configured to do.
         vm.expectRevert(MeridianTreasuryHook.EndAboveStart.selector);
-        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 300, 1000, 300, 300, 48 hours);
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 300, 1000, 300, 300, 15);
     }
 
     function test_anOpeningRateAboveTheCapCannotBeDeployed() public {
         vm.expectRevert(abi.encodeWithSelector(MeridianTreasuryHook.FeeAboveCap.selector, uint16(1001), uint16(1000)));
-        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 1001, 300, 300, 300, 48 hours);
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 1001, 300, 300, 300, 15);
     }
 
     function test_theOnlyLeverMakesTradingCheaper() public {

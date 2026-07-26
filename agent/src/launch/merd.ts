@@ -18,10 +18,10 @@ import type { TokenDeployment } from "./deployToken.js";
  * neither M nor R exists in that alphabet at any mining cost. The symbol is
  * what wallets display; the address only ever carries the chain id.
  */
-export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000005424"; // 21540
+export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000001ee1"; // 7905
 
 /** Where MERD lands. Deterministic, and verified before any broadcast. */
-export const MERD_ADDRESS: Address = "0x4663964e902e4fD11dee12229Bb22263919Ca10B";
+export const MERD_ADDRESS: Address = "0x4663e0FE6D659A83C81AEAc0088a81b3072a8e9D";
 
 /**
  * Receives the entire supply, and separately receives x402 revenue. One
@@ -33,6 +33,28 @@ export const MERD_ADDRESS: Address = "0x4663964e902e4fD11dee12229Bb22263919Ca10B
  * the deploying key.
  */
 export const MERD_TREASURY: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
+
+/**
+ * The pool's launch tax, fixed at hook construction and unchangeable after.
+ *
+ * Opens at 10% each way and reaches 3% fifteen seconds after the FIRST trade.
+ * Fifteen seconds is deliberate: block.timestamp moves in whole seconds, so the
+ * curve gets fifteen discrete steps of 0.47%, covering roughly 149 blocks at
+ * this chain's ~0.101s block time.
+ *
+ * Be clear-eyed about what that buys. It taxes the opening block and the
+ * seconds either side of it, which is exactly where snipers operate and where
+ * no ordinary buyer is. It is NOT sustained protection — anyone arriving a
+ * minute late pays the 3% floor like everybody else. That is the intended
+ * trade: punish the bots, then get out of the way.
+ */
+export const MERD_FEE_SCHEDULE = {
+  buyStartBps: 1000, // 10.00%
+  buyEndBps: 300, // 3.00%
+  sellStartBps: 1000,
+  sellEndBps: 300,
+  decaySeconds: 15n,
+} as const;
 
 export const MERD: TokenDeployment = {
   name: "Meridian",
