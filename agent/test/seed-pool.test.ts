@@ -8,7 +8,7 @@ import {
   buildSeedTransactions,
   openingPrice,
 } from "../src/launch/seedPool.js";
-import { MERD_ADDRESS } from "../src/launch/merd.js";
+import { MERD_ADDRESS, MERD, MERD_SEED, MERD_HOOK_ADDRESS } from "../src/launch/merd.js";
 import { V4_POSITION_MANAGER, PERMIT2, NATIVE_ETH } from "../src/launch/v4Pool.js";
 
 /**
@@ -136,4 +136,44 @@ test("the opening price in the creation call matches the amounts being seeded", 
   const [, price] = decoded.args as [unknown, bigint];
   assert.equal(price, sqrtPriceX96);
   assert.equal(price, sqrtPriceX96For(plan.ethWei, plan.merdWei), "price must be derived from the seed, not guessed");
+});
+
+// ── the launch shape as decided ──────────────────────────────────────────────
+
+test("the whole supply goes into the pool, against one ETH", () => {
+  // A fair launch by construction: nothing held back means no treasury
+  // overhang, and no allocation anyone has to be trusted not to dump.
+  assert.equal(MERD_SEED.merdWei, MERD.supply * 10n ** 18n, "every token is in the pool");
+  assert.equal(MERD_SEED.ethWei, parseEther("1"));
+});
+
+test("opening FDV equals the ETH seeded, because the whole supply is priced by it", () => {
+  // With every token in a full-range position, the MERD side is worth exactly
+  // the ETH side, so FDV is the ETH in. This is arithmetic, not a target — but
+  // it is the number people will read off a screen, so it gets asserted.
+  const { merdPerEth } = openingPrice(MERD_SEED.ethWei, MERD_SEED.merdWei);
+  const ethPerMerd = 1 / merdPerEth;
+  const fdvInEth = ethPerMerd * Number(MERD.supply);
+  assert.ok(Math.abs(fdvInEth - 1) < 1e-9, `FDV should be 1 ETH, got ${fdvInEth}`);
+});
+
+test("the seed produces a valid price at whole-supply magnitudes", () => {
+  // 1e27 against 1e18 is the widest ratio this will ever see, and it has to
+  // stay inside v4's sqrt price bounds or the pool cannot be created at all.
+  const s = sqrtPriceX96For(MERD_SEED.ethWei, MERD_SEED.merdWei);
+  const MIN_SQRT_PRICE = 4295128739n;
+  const MAX_SQRT_PRICE = 1461446703485210103287273052203988822378723970342n;
+  assert.ok(s > MIN_SQRT_PRICE && s < MAX_SQRT_PRICE, `sqrtPriceX96 ${s} outside v4 bounds`);
+});
+
+test("the pinned seed builds against the pinned hook", () => {
+  const { key, txs } = buildSeedTransactions(MERD_SEED);
+  assert.equal(key.hooks, MERD_HOOK_ADDRESS);
+  assert.equal(txs[3].value, MERD_SEED.ethWei.toString());
+});
+
+test("the LP position — which is the entire supply — goes to the cold treasury", () => {
+  // The NFT this mints holds all of MERD. It must not land on a hot key, and
+  // it must be locked before anyone is invited to trade against it.
+  assert.equal(MERD_SEED.recipient, MERD.treasury);
 });

@@ -119,6 +119,38 @@ export const MERD_HOOK: HookDeployment = {
 export const MERD_HOOK_ADDRESS: Address = "0x9f67875975D518AD71864A7164A1a788411F0044";
 
 /**
+ * What goes into the pool on day one.
+ *
+ * THE WHOLE SUPPLY, against one ETH. Nothing is held back — no treasury
+ * allocation, no team tranche, no vesting cliff, because there is nothing left
+ * to allocate. That is the entire argument for this shape: the most common
+ * reason a launch dies is the 90% sitting in a treasury that everyone can see
+ * and nobody can predict, and this structure does not have one.
+ *
+ * The price that follows is arithmetic, not a target: with every token in the
+ * pool and a full-range position worth the same on both sides, the opening FDV
+ * is exactly the ETH seeded. One ETH in means an FDV of one ETH. Price
+ * discovery starts at the floor and goes wherever buyers take it.
+ *
+ * THE COST, stated plainly: at this depth a $500 buy moves the price about 60%.
+ * That is not a flaw to be fixed, it is the deal — early buyers are paid for
+ * being early, which is what a fair launch is. It is also exactly what a sniper
+ * would farm, which is what the 10% opening tax is in the hook to prevent.
+ *
+ * WHAT THIS MAKES TRUE OF THE LP POSITION: it holds the entire supply. The NFT
+ * minted by the fourth transaction is, for practical purposes, all of MERD. An
+ * unlocked position here is not a risk, it is a rug with extra steps — locking
+ * it is not optional, and MeridianManagedLocker is what it exists for.
+ */
+export const MERD_SEED = {
+  ethWei: 1_000_000_000_000_000_000n, // 1 ETH
+  merdWei: 1_000_000_000n * 10n ** 18n, // the entire supply
+  /** Receives the LP position NFT. Cold, and the only wallet holding supply. */
+  recipient: MERD_TREASURY,
+  hook: MERD_HOOK_ADDRESS,
+} as const;
+
+/**
  * The pool MERD will trade in. `hooks` is part of the pool's IDENTITY — a pool
  * created with the wrong hook, or with none, is a different pool that can never
  * be given one later, so this defaults to the mined address rather than making
