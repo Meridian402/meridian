@@ -26,9 +26,20 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 //   liquidity, which is the only version that survives the pool succeeding.
 //
 //   A v4 pool's hook is fixed at creation and cannot be added later, so this
-//   has to exist at launch or never. It therefore ships DISABLED: feeBps starts
-//   at 0 and the pool behaves exactly as if there were no hook until someone
-//   deliberately turns it on.
+//   has to exist at launch or never. It therefore ships DISABLED: both rates
+//   start at 0 and the pool behaves exactly as if there were no hook until
+//   someone deliberately turns them on. The launch config is 3% buy / 3% sell,
+//   made permanent by renouncing ownership afterwards.
+//
+// WHY NOT A TRANSFER TAX IN THE TOKEN:
+//   Because it would not work. Every v4 swap settles through the PoolManager
+//   singleton, and a token that delivers less than the amount recorded in the
+//   delta desyncs that settlement — the classic fee-on-transfer failure, which
+//   also breaks the PositionManager and would stop us seeding our own pool. A
+//   plain ERC-20 also cannot tell a buy from a sell; it sees only from and to,
+//   so charging 3% one way and something else the other needs the token to know
+//   the pool, which needs a setter, which needs an owner. Doing it here instead
+//   keeps the token ownerless and leaves wallet-to-wallet transfers untaxed.
 //
 // THE CAP IS THE POINT:
 //   MAX_FEE_BPS is a constant. No owner, no governance, no upgrade path can
@@ -48,17 +59,22 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 // ─────────────────────────────────────────────────────────────────────────────
 
 contract MeridianTreasuryHook is IHooks {
-    /// Hard ceiling on the protocol fee, in basis points. Compiled in, forever.
-    uint16 public constant MAX_FEE_BPS = 100; // 1.00%
+    /// Hard ceiling on either side of the trade, in basis points. Compiled in,
+    /// with no setter anywhere, so it is the worst case for the life of the
+    /// pool. Set at 5% to leave room above the 3/3 we intend without ever
+    /// admitting the double-digit rates that make a token untradeable.
+    uint16 public constant MAX_FEE_BPS = 500; // 5.00%
 
     IPoolManager public immutable POOL_MANAGER;
     address public immutable TREASURY;
 
-    /// Starts at zero: the pool opens with no protocol fee at all.
-    uint16 public feeBps;
+    /// Both start at zero: the pool opens with no protocol fee at all, and
+    /// someone has to deliberately turn it on.
+    uint16 public buyFeeBps;
+    uint16 public sellFeeBps;
     address public owner;
 
-    event FeeChanged(uint16 previousBps, uint16 newBps);
+    event FeesChanged(uint16 previousBuyBps, uint16 previousSellBps, uint16 newBuyBps, uint16 newSellBps);
     event OwnerChanged(address indexed previous, address indexed next);
     event FeeTaken(Currency indexed currency, uint256 amount);
 
@@ -124,7 +140,13 @@ contract MeridianTreasuryHook is IHooks {
         BalanceDelta delta,
         bytes calldata
     ) external onlyPoolManager returns (bytes4, int128) {
-        uint16 bps = feeBps;
+        // Direction. Our pool is native ETH / MERD, and native ETH is
+        // address(0), which always sorts to currency0 — so swapping currency0
+        // for currency1 is buying MERD, and the reverse is selling it. That
+        // holds for any ETH-paired pool, which is the only kind this hook is
+        // deployed for. Attach it to some other pool and the two labels swap
+        // over; the fee still reaches the treasury, it is just named backwards.
+        uint16 bps = params.zeroForOne ? buyFeeBps : sellFeeBps;
         if (bps == 0) return (IHooks.afterSwap.selector, 0);
 
         // Which side is "unspecified" is the same expression core uses to map
@@ -156,10 +178,15 @@ contract MeridianTreasuryHook is IHooks {
     // ─────────────────────────────────────────────────────────────────────────
     // Fee control. Bounded by a constant, so the worst case is readable.
     // ─────────────────────────────────────────────────────────────────────────
-    function setFeeBps(uint16 next) external onlyOwner {
-        if (next > MAX_FEE_BPS) revert FeeAboveCap(next, MAX_FEE_BPS);
-        emit FeeChanged(feeBps, next);
-        feeBps = next;
+    /// Both sides at once, so buy and sell can never drift apart by accident —
+    /// a pool that is cheap to enter and expensive to leave is a trap, and it
+    /// should take a deliberate act to build one.
+    function setFees(uint16 buyBps, uint16 sellBps) external onlyOwner {
+        if (buyBps > MAX_FEE_BPS) revert FeeAboveCap(buyBps, MAX_FEE_BPS);
+        if (sellBps > MAX_FEE_BPS) revert FeeAboveCap(sellBps, MAX_FEE_BPS);
+        emit FeesChanged(buyFeeBps, sellFeeBps, buyBps, sellBps);
+        buyFeeBps = buyBps;
+        sellFeeBps = sellBps;
     }
 
     function transferOwnership(address next) external onlyOwner {
@@ -167,7 +194,8 @@ contract MeridianTreasuryHook is IHooks {
         owner = next;
     }
 
-    /// One-way. Freezes the fee at its current value for the life of the pool.
+    /// One-way, and the only way these rates become permanent. After this the
+    /// buy and sell fees can never move again, by anyone, for any reason.
     function renounceOwnership() external onlyOwner {
         emit OwnerChanged(owner, address(0));
         owner = address(0);
