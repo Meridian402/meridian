@@ -56,6 +56,10 @@ export function composeMerdTweets(s: MerdSignals): string[] {
     // postGuards learned this the same way; it is the second time in this file's
     // history that a whole-word verb has let something through.
     const falling = /fall|down|declin|cool|soften|eas(e|ing|ed)|slip|fad/i.test(s.topYield.trend ?? "");
+    // Direction is a CLAIM, and with a single sample there is no trend to
+    // claim. "And climbing." used to be the fallback for an unknown trend,
+    // which meant the very first post of a fresh run asserted a rise nothing
+    // had measured. Say nothing unless the data says something.
     out.push(
       clip(
         `Best accessible yield on my board right now: ${s.topYield.label} at ${s.topYield.aprPct.toFixed(0)}% implied APR.` +
@@ -63,7 +67,9 @@ export function composeMerdTweets(s: MerdSignals): string[] {
             ? ` That's volume-driven and it swings hard, so I read it with a raised eyebrow, not a victory lap.`
             : falling
               ? ` Cooling from its highs, but still the one to beat.`
-              : ` And climbing.`),
+              : /ris|climb|up\b|grow/i.test(s.topYield.trend ?? "")
+                ? ` And climbing.`
+                : ``),
       ),
     );
     covered.add("yield");

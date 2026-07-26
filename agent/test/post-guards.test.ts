@@ -178,3 +178,14 @@ test("a cooling yield is never announced as climbing", async () => {
   const [rising] = composeMerdTweets({ topYield: { label: "syrupUSDG carry", aprPct: 11.4, trend: "rising" } });
   assert.ok(/climbing/i.test(rising), "a genuinely rising yield should still say so");
 });
+
+test("an unknown trend claims no direction at all", async () => {
+  // With a single sample there is no trend, and "And climbing." was the
+  // fallback — so the first post of any fresh run asserted a rise that nothing
+  // had measured. Direction is a claim, same as a number.
+  const { composeMerdTweets } = await import("../src/social/merdVoice.js");
+  for (const trend of ["", undefined, "unknown"]) {
+    const [t] = composeMerdTweets({ topYield: { label: "$INDEX distributions", aprPct: 34, trend } });
+    assert.ok(!/climbing|cooling/i.test(t), `claimed a direction with no data: ${t}`);
+  }
+});
