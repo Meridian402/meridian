@@ -28,15 +28,21 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 //   A v4 pool's hook is fixed at creation and cannot be added later, so this
 //   has to exist at launch or never.
 //
-// THE SCHEDULE, AND WHY IT DECAYS:
-//   Opens at 10% each way and falls linearly to 3% over a fixed window. The
-//   opening rate exists to make the first minutes unprofitable for snipers —
-//   the bots that buy the opening block and dump into the first real buyers.
-//   Taxing that window heavily costs an ordinary buyer little, because ordinary
-//   buyers are not trying to round-trip a position in ninety seconds.
+// THE SCHEDULE — THREE PHASES:
+//   1. RAMP     10% each way, falling to 3% over the first ten minutes. This
+//               window exists to make the open unprofitable for snipers: the
+//               bots that buy the first block and dump into the first real
+//               buyers. It costs an ordinary buyer little, because ordinary
+//               buyers are not round-tripping a position inside ten minutes.
+//   2. PLATEAU  a flat 3% for the rest of the first day, so the token has one
+//               settled, quotable number through the period everybody is
+//               actually looking at it, rather than a rate sliding all week.
+//   3. TAPER    3% down to a permanent 1% over the following day, and 1% for
+//               the life of the pool thereafter.
 //
-//   The floor is where it settles for the life of the pool. Everything between
-//   is arithmetic on the clock.
+//   The floor matters more than the opening rate. It is the number a trader
+//   compares against every other token forever, long after the launch window is
+//   a memory, so it settles at 1% rather than staying where the launch left it.
 //
 // WHY NOT A TRANSFER TAX IN THE TOKEN:
 //   Because it would not work. Every v4 swap settles through the PoolManager
@@ -49,7 +55,7 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 //   keeps the token ownerless and leaves wallet-to-wallet transfers untaxed.
 //
 // NOBODY CAN CHANGE IT:
-//   The schedule is five immutables set at construction. There is no setter for
+//   The schedule is nine immutables set at construction. There is no setter for
 //   any of them — not for the owner, not for governance, not through an upgrade,
 //   because the contract is not upgradeable and the storage does not exist. The
 //   fee is a pure function of how long the pool has been trading.
@@ -75,14 +81,33 @@ contract MeridianTreasuryHook is IHooks {
     IPoolManager public immutable POOL_MANAGER;
     address public immutable TREASURY;
 
-    // ── the decay schedule. All immutable: the fee is a pure function of time,
-    //    and there is no code anywhere that can change its shape. ────────────
-    uint16 public immutable BUY_START_BPS;
-    uint16 public immutable BUY_END_BPS;
-    uint16 public immutable SELL_START_BPS;
-    uint16 public immutable SELL_END_BPS;
-    /// Seconds from the first swap until the rate reaches its floor.
-    uint64 public immutable DECAY_SECONDS;
+    // ── the schedule. Three phases, all immutable: the fee is a pure function
+    //    of time, and no code anywhere can change its shape. ─────────────────
+    //
+    //    1. LAUNCH RAMP   opening rate falls to the plateau over RAMP_SECONDS.
+    //                     This is the anti-sniper window.
+    //    2. PLATEAU       flat at the plateau rate until PLATEAU_UNTIL, giving
+    //                     the token a settled, predictable cost through its
+    //                     first day rather than a number that moves all week.
+    //    3. TAPER         plateau falls to the permanent floor over
+    //                     TAPER_SECONDS, and stays there for good.
+    //
+    //    Monotonically non-increasing throughout, enforced at construction: the
+    //    rate a holder faces can only ever get cheaper than the one they bought
+    //    into.
+    uint16 public immutable BUY_LAUNCH_BPS;
+    uint16 public immutable BUY_PLATEAU_BPS;
+    uint16 public immutable BUY_FLOOR_BPS;
+    uint16 public immutable SELL_LAUNCH_BPS;
+    uint16 public immutable SELL_PLATEAU_BPS;
+    uint16 public immutable SELL_FLOOR_BPS;
+
+    /// Seconds from the first swap for the opening ramp to reach the plateau.
+    uint64 public immutable RAMP_SECONDS;
+    /// Seconds from the first swap at which the plateau ends and the taper begins.
+    uint64 public immutable PLATEAU_UNTIL;
+    /// Seconds the taper takes to fall from the plateau to the floor.
+    uint64 public immutable TAPER_SECONDS;
 
     /**
      * When the clock started. Set by the FIRST swap this hook ever sees, then
@@ -117,6 +142,7 @@ contract MeridianTreasuryHook is IHooks {
     error HookNotImplemented();
     error EndAboveStart();
     error ZeroDecayWindow();
+    error PlateauBeforeRamp();
 
     modifier onlyPoolManager() {
         if (msg.sender != address(POOL_MANAGER)) revert NotPoolManager();
@@ -128,34 +154,45 @@ contract MeridianTreasuryHook is IHooks {
         _;
     }
 
-    constructor(
-        IPoolManager poolManager,
-        address treasury,
-        address owner_,
-        uint16 buyStartBps,
-        uint16 buyEndBps,
-        uint16 sellStartBps,
-        uint16 sellEndBps,
-        uint64 decaySeconds
-    ) {
+    struct Schedule {
+        uint16 buyLaunchBps;
+        uint16 buyPlateauBps;
+        uint16 buyFloorBps;
+        uint16 sellLaunchBps;
+        uint16 sellPlateauBps;
+        uint16 sellFloorBps;
+        uint64 rampSeconds;
+        uint64 plateauUntil;
+        uint64 taperSeconds;
+    }
+
+    constructor(IPoolManager poolManager, address treasury, address owner_, Schedule memory s) {
         if (address(poolManager) == address(0) || treasury == address(0) || owner_ == address(0)) revert ZeroAddress();
-        if (buyStartBps > MAX_FEE_BPS || sellStartBps > MAX_FEE_BPS) {
-            revert FeeAboveCap(buyStartBps > sellStartBps ? buyStartBps : sellStartBps, MAX_FEE_BPS);
+        if (s.buyLaunchBps > MAX_FEE_BPS || s.sellLaunchBps > MAX_FEE_BPS) {
+            revert FeeAboveCap(s.buyLaunchBps > s.sellLaunchBps ? s.buyLaunchBps : s.sellLaunchBps, MAX_FEE_BPS);
         }
-        // The curve only ever goes down. An "end" above "start" would be a rate
-        // that RISES on holders after they have bought in, which is the single
-        // most hostile thing this contract could be configured to do.
-        if (buyEndBps > buyStartBps || sellEndBps > sellStartBps) revert EndAboveStart();
-        if (decaySeconds == 0) revert ZeroDecayWindow();
+        // Monotonically non-increasing, both sides. A rate that RISES on holders
+        // after they have bought in is the single most hostile thing this
+        // contract could be configured to do, so it is rejected outright rather
+        // than left to whoever fills in the deploy script.
+        if (s.buyPlateauBps > s.buyLaunchBps || s.buyFloorBps > s.buyPlateauBps) revert EndAboveStart();
+        if (s.sellPlateauBps > s.sellLaunchBps || s.sellFloorBps > s.sellPlateauBps) revert EndAboveStart();
+        if (s.rampSeconds == 0 || s.taperSeconds == 0) revert ZeroDecayWindow();
+        // The plateau cannot end before the ramp that feeds it has finished.
+        if (s.plateauUntil < s.rampSeconds) revert PlateauBeforeRamp();
 
         POOL_MANAGER = poolManager;
         TREASURY = treasury;
         owner = owner_;
-        BUY_START_BPS = buyStartBps;
-        BUY_END_BPS = buyEndBps;
-        SELL_START_BPS = sellStartBps;
-        SELL_END_BPS = sellEndBps;
-        DECAY_SECONDS = decaySeconds;
+        BUY_LAUNCH_BPS = s.buyLaunchBps;
+        BUY_PLATEAU_BPS = s.buyPlateauBps;
+        BUY_FLOOR_BPS = s.buyFloorBps;
+        SELL_LAUNCH_BPS = s.sellLaunchBps;
+        SELL_PLATEAU_BPS = s.sellPlateauBps;
+        SELL_FLOOR_BPS = s.sellFloorBps;
+        RAMP_SECONDS = s.rampSeconds;
+        PLATEAU_UNTIL = s.plateauUntil;
+        TAPER_SECONDS = s.taperSeconds;
         // Fails the deployment if the mined address does not carry the exact
         // permission bits below. Without this, a bad salt yields a hook that is
         // simply never called and a pool that quietly earns nothing.
@@ -208,7 +245,7 @@ contract MeridianTreasuryHook is IHooks {
         if (startedAt == 0) {
             startedAt = uint64(block.timestamp);
             decayStartedAt = startedAt;
-            emit DecayStarted(startedAt, startedAt + DECAY_SECONDS);
+            emit DecayStarted(startedAt, startedAt + PLATEAU_UNTIL + TAPER_SECONDS);
         }
 
         uint16 bps = _feeBpsAt(params.zeroForOne, startedAt, block.timestamp);
@@ -260,21 +297,30 @@ contract MeridianTreasuryHook is IHooks {
      */
     function _feeBpsAt(bool isBuy, uint64 startedAt, uint256 nowTs) internal view returns (uint16) {
         if (feesDisabledForever) return 0;
-        uint16 startBps = isBuy ? BUY_START_BPS : SELL_START_BPS;
-        uint16 endBps = isBuy ? BUY_END_BPS : SELL_END_BPS;
-        if (startedAt == 0) return startBps;
+        uint16 launchBps = isBuy ? BUY_LAUNCH_BPS : SELL_LAUNCH_BPS;
+        uint16 plateauBps = isBuy ? BUY_PLATEAU_BPS : SELL_PLATEAU_BPS;
+        uint16 floorBps = isBuy ? BUY_FLOOR_BPS : SELL_FLOOR_BPS;
+        if (startedAt == 0) return launchBps;
 
         uint256 elapsed = nowTs - startedAt;
-        if (elapsed >= DECAY_SECONDS) return endBps;
 
-        // Interpolate on the DROP rather than on the rate, so the arithmetic
-        // cannot underflow: endBps <= startBps is enforced at construction.
-        uint256 drop = uint256(startBps - endBps);
-        // Cannot truncate: elapsed < DECAY_SECONDS is guaranteed above, so the
-        // subtracted term is strictly less than drop, leaving a result between
-        // endBps and startBps — both uint16 by declaration.
+        // Phase 1 — the anti-sniper ramp.
+        if (elapsed < RAMP_SECONDS) {
+            uint256 drop = uint256(launchBps - plateauBps);
+            // forge-lint: disable-next-line(unsafe-typecast)
+            return uint16(launchBps - (drop * elapsed) / RAMP_SECONDS);
+        }
+
+        // Phase 2 — flat, so the token has one settled number through its first
+        // day instead of a rate that moves under everyone all week.
+        if (elapsed < PLATEAU_UNTIL) return plateauBps;
+
+        // Phase 3 — the long taper to the permanent floor.
+        uint256 intoTaper = elapsed - PLATEAU_UNTIL;
+        if (intoTaper >= TAPER_SECONDS) return floorBps;
+        uint256 taperDrop = uint256(plateauBps - floorBps);
         // forge-lint: disable-next-line(unsafe-typecast)
-        return uint16(startBps - (drop * elapsed) / DECAY_SECONDS);
+        return uint16(plateauBps - (taperDrop * intoTaper) / TAPER_SECONDS);
     }
 
     /// What a trade costs right now, for the UI and for anyone checking.
@@ -285,9 +331,10 @@ contract MeridianTreasuryHook is IHooks {
     }
 
     /// When the rate reaches its floor. Zero until the first swap starts the clock.
+    /// When the rate reaches its permanent floor. Zero until the first swap.
     function decayEndsAt() external view returns (uint64) {
         uint64 startedAt = decayStartedAt;
-        return startedAt == 0 ? 0 : startedAt + DECAY_SECONDS;
+        return startedAt == 0 ? 0 : startedAt + PLATEAU_UNTIL + TAPER_SECONDS;
     }
 
     /**

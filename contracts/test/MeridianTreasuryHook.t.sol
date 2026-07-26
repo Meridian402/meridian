@@ -56,7 +56,7 @@ contract MeridianTreasuryHookTest is Test {
         address target = address(flags | (uint160(0x4444) << 20));
         deployCodeTo(
             "MeridianTreasuryHook.sol:MeridianTreasuryHook",
-            abi.encode(IPoolManager(address(pm)), treasury, owner, uint16(1000), uint16(300), uint16(1000), uint16(300), uint64(15)),
+            abi.encode(IPoolManager(address(pm)), treasury, owner, _schedule()),
             target
         );
         hook = MeridianTreasuryHook(target);
@@ -106,38 +106,63 @@ contract MeridianTreasuryHookTest is Test {
         assertEq(hook.decayStartedAt(), 0);
         assertEq(hook.decayEndsAt(), 0);
 
-        vm.warp(block.timestamp + 30 days); // a long, irrelevant delay
+        vm.warp(5_000_000); // a long, irrelevant delay before the pool opens
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
 
-        assertEq(hook.decayStartedAt(), uint64(block.timestamp));
+        assertEq(hook.decayStartedAt(), uint64(5_000_000));
         (uint16 buy,) = hook.currentFeeBps();
         assertEq(buy, 1000, "still the full opening rate at the first trade");
     }
 
-    function test_decaysToThreePercentInFifteenSeconds() public {
+    function test_theThreePhases() public {
+        // Absolute timestamps, never a cached `block.timestamp`. Under the
+        // optimizer a local holding block.timestamp gets rematerialized at each
+        // use — legal, because in real execution the value cannot change inside
+        // a transaction — so vm.warp silently invalidates it and every later
+        // comparison reads the wrong time.
+        uint256 t0 = 1_000_000;
+        vm.warp(t0);
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
-        uint256 t0 = block.timestamp;
+        assertEq(hook.decayStartedAt(), uint64(t0), "clock starts on the first swap");
 
-        vm.warp(t0 + 7); // roughly halfway through the 15s window
+        // Phase 1 — the ramp. Halfway through ten minutes is halfway to 3%.
+        vm.warp(t0 + 5 minutes);
         (uint16 mid,) = hook.currentFeeBps();
-        // 1000 - (700 * 7) / 15 with integer division: 4900/15 = 326, so 674.
-        assertEq(mid, 674, "on the straight line between 10% and 3%");
+        assertEq(mid, 650, "halfway down the opening ramp");
 
-        vm.warp(t0 + 15); // the floor
-        (uint16 endBuy, uint16 endSell) = hook.currentFeeBps();
-        assertEq(endBuy, 300);
-        assertEq(endSell, 300);
+        // Phase 2 — the plateau, flat for the rest of the first day.
+        vm.warp(t0 + 10 minutes);
+        (uint16 atPlateau,) = hook.currentFeeBps();
+        assertEq(atPlateau, 300, "the ramp lands on the plateau");
+
+        vm.warp(t0 + 12 hours);
+        (uint16 midDay,) = hook.currentFeeBps();
+        assertEq(midDay, 300, "still 3% twelve hours in");
+
+        vm.warp(t0 + 24 hours - 1);
+        (uint16 endOfDay,) = hook.currentFeeBps();
+        assertEq(endOfDay, 300, "3% right up to the 24h mark");
+
+        // Phase 3 — the taper to the permanent floor.
+        vm.warp(t0 + 36 hours);
+        (uint16 midTaper,) = hook.currentFeeBps();
+        assertEq(midTaper, 200, "halfway between 3% and 1%");
+
+        vm.warp(t0 + 48 hours);
+        (uint16 floorBuy, uint16 floorSell) = hook.currentFeeBps();
+        assertEq(floorBuy, 100, "1% floor");
+        assertEq(floorSell, 100);
     }
 
     function test_neverDecaysBelowTheFloor() public {
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
-        vm.warp(block.timestamp + 3650 days); // ten years later
+        vm.warp(3650 days); // ten years later
         (uint16 buy, uint16 sell) = hook.currentFeeBps();
-        assertEq(buy, 300, "3% is the floor, forever");
-        assertEq(sell, 300);
+        assertEq(buy, 100, "1% is the permanent floor");
+        assertEq(sell, 100);
     }
 
     function test_theRateChargedMatchesTheCurve() public {
@@ -146,10 +171,15 @@ contract MeridianTreasuryHookTest is Test {
         (, int128 first) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
         assertEq(uint128(first), 100_000, "10% at launch");
 
-        vm.warp(block.timestamp + 15);
+        vm.warp(10 minutes + 1);
         vm.prank(address(pm));
-        (, int128 later) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
-        assertEq(uint128(later), 30_000, "3% once decayed");
+        (, int128 onPlateau) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(uint128(onPlateau), 30_000, "3% on the plateau");
+
+        vm.warp(48 hours + 1);
+        vm.prank(address(pm));
+        (, int128 atFloor) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(uint128(atFloor), 10_000, "1% at the floor");
     }
 
     function test_sellsAreChargedOnTheirOwnSchedule() public {
@@ -181,12 +211,16 @@ contract MeridianTreasuryHookTest is Test {
         // A rate that goes UP on holders after they buy is the most hostile
         // thing this contract could be configured to do.
         vm.expectRevert(MeridianTreasuryHook.EndAboveStart.selector);
-        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 300, 1000, 300, 300, 15);
+        MeridianTreasuryHook.Schedule memory bad = _schedule();
+        bad.buyPlateauBps = 5000; // plateau ABOVE the launch rate
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, bad);
     }
 
     function test_anOpeningRateAboveTheCapCannotBeDeployed() public {
         vm.expectRevert(abi.encodeWithSelector(MeridianTreasuryHook.FeeAboveCap.selector, uint16(1001), uint16(1000)));
-        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 1001, 300, 300, 300, 15);
+        MeridianTreasuryHook.Schedule memory bad = _schedule();
+        bad.buyLaunchBps = 1001;
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, bad);
     }
 
     function test_theOnlyLeverMakesTradingCheaper() public {
@@ -205,6 +239,22 @@ contract MeridianTreasuryHookTest is Test {
         vm.prank(stranger);
         vm.expectRevert(MeridianTreasuryHook.NotOwner.selector);
         hook.disableFeesForever();
+    }
+
+
+    /// The launch config: 10% -> 3% over 10 min, flat 3% to 24h, then 3% -> 1%.
+    function _schedule() internal pure returns (MeridianTreasuryHook.Schedule memory) {
+        return MeridianTreasuryHook.Schedule({
+            buyLaunchBps: 1000,
+            buyPlateauBps: 300,
+            buyFloorBps: 100,
+            sellLaunchBps: 1000,
+            sellPlateauBps: 300,
+            sellFloorBps: 100,
+            rampSeconds: 10 minutes,
+            plateauUntil: 24 hours,
+            taperSeconds: 24 hours
+        });
     }
 
     function _exactInZeroForOne() internal pure returns (SwapParams memory) {

@@ -90,27 +90,35 @@ test("the retired wallet is not wired into any live role", async () => {
   }
 });
 
-// ── the launch tax schedule ──────────────────────────────────────────────────
+// ── the fee schedule ─────────────────────────────────────────────────────────
 
-test("the fee schedule opens at 10% and floors at 3%, both ways", async () => {
+test("the schedule is 10% -> 3% -> 1% across three phases", async () => {
   const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
-  assert.equal(s.buyStartBps, 1000);
-  assert.equal(s.sellStartBps, 1000);
-  assert.equal(s.buyEndBps, 300);
-  assert.equal(s.sellEndBps, 300);
+  assert.equal(s.buyLaunchBps, 1000);
+  assert.equal(s.buyPlateauBps, 300);
+  assert.equal(s.buyFloorBps, 100);
+  assert.equal(s.sellLaunchBps, 1000);
+  assert.equal(s.sellPlateauBps, 300);
+  assert.equal(s.sellFloorBps, 100);
 });
 
 test("the schedule only ever falls", async () => {
-  // A rate that rises on holders after they buy is the hostile configuration;
-  // the hook rejects it at construction and this catches it a step earlier.
+  // A rate that rises on holders after they buy is the hostile configuration.
+  // The hook rejects it at construction; this catches it a step earlier.
   const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
-  assert.ok(s.buyEndBps <= s.buyStartBps, "buy fee must not rise");
-  assert.ok(s.sellEndBps <= s.sellStartBps, "sell fee must not rise");
+  assert.ok(s.buyPlateauBps <= s.buyLaunchBps && s.buyFloorBps <= s.buyPlateauBps, "buy fee must not rise");
+  assert.ok(s.sellPlateauBps <= s.sellLaunchBps && s.sellFloorBps <= s.sellPlateauBps, "sell fee must not rise");
 });
 
-test("the decay is fast, and within the contract's cap", async () => {
+test("the plateau covers the whole first day and cannot end before the ramp", async () => {
   const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
-  assert.equal(s.decaySeconds, 15n);
-  // MAX_FEE_BPS in the hook is 1000; anything above it fails to deploy.
-  assert.ok(s.buyStartBps <= 1000 && s.sellStartBps <= 1000, "opening rate must be within the hook's cap");
+  assert.equal(s.rampSeconds, 600n, "10 minute opening ramp");
+  assert.equal(s.plateauUntil, 86_400n, "3% holds for 24 hours");
+  assert.ok(s.plateauUntil > s.rampSeconds, "the plateau cannot end before the ramp feeding it");
+});
+
+test("the opening rate is within the hook's hard cap", async () => {
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  // MAX_FEE_BPS in the hook is 1000; above it the deployment reverts.
+  assert.ok(s.buyLaunchBps <= 1000 && s.sellLaunchBps <= 1000);
 });

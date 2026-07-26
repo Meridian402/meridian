@@ -35,25 +35,32 @@ export const MERD_ADDRESS: Address = "0x4663e0FE6D659A83C81AEAc0088a81b3072a8e9D
 export const MERD_TREASURY: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
 
 /**
- * The pool's launch tax, fixed at hook construction and unchangeable after.
+ * The pool's fee schedule, fixed at hook construction and unchangeable after.
  *
- * Opens at 10% each way and reaches 3% fifteen seconds after the FIRST trade.
- * Fifteen seconds is deliberate: block.timestamp moves in whole seconds, so the
- * curve gets fifteen discrete steps of 0.47%, covering roughly 149 blocks at
- * this chain's ~0.101s block time.
+ *   phase 1  10% -> 3% over the first 10 minutes   (anti-sniper ramp)
+ *   phase 2  flat 3% until 24h from the first swap (a settled, quotable rate)
+ *   phase 3  3% -> 1% over the following 24h, then 1% forever
  *
- * Be clear-eyed about what that buys. It taxes the opening block and the
- * seconds either side of it, which is exactly where snipers operate and where
- * no ordinary buyer is. It is NOT sustained protection — anyone arriving a
- * minute late pays the 3% floor like everybody else. That is the intended
- * trade: punish the bots, then get out of the way.
+ * The clock starts on the FIRST SWAP, not at deployment, so a gap between
+ * deploying and opening the pool cannot burn the protection before anyone can
+ * trade.
+ *
+ * The floor is the number that matters most. It is what a trader compares
+ * against every other token forever, long after the launch window is a memory —
+ * which is why it settles at 1% rather than staying wherever the launch left it.
+ * Meteora's default schedule (50% opening, decaying to 0.25% over two hours)
+ * makes the same bet: monetise the launch, then compete on being cheap.
  */
 export const MERD_FEE_SCHEDULE = {
-  buyStartBps: 1000, // 10.00%
-  buyEndBps: 300, // 3.00%
-  sellStartBps: 1000,
-  sellEndBps: 300,
-  decaySeconds: 15n,
+  buyLaunchBps: 1000, // 10.00%
+  buyPlateauBps: 300, // 3.00%
+  buyFloorBps: 100, // 1.00%
+  sellLaunchBps: 1000,
+  sellPlateauBps: 300,
+  sellFloorBps: 100,
+  rampSeconds: 600n, // 10 minutes
+  plateauUntil: 86_400n, // 24 hours from the first swap
+  taperSeconds: 86_400n, // and 24 hours more to reach the floor
 } as const;
 
 export const MERD: TokenDeployment = {
