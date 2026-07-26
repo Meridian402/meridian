@@ -204,8 +204,8 @@ contract MeridianPositionLock {
 
     function _send(address currency, address to, uint256 amount) private {
         if (currency == address(0)) {
-            (bool ok,) = to.call{value: amount}("");
-            if (!ok) revert EthTransferFailed(to);
+            (bool sent,) = to.call{value: amount}("");
+            if (!sent) revert EthTransferFailed(to);
             return;
         }
         // Tolerates tokens that return nothing as well as those returning bool,
