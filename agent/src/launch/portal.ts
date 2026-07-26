@@ -1,19 +1,21 @@
-// Token launching on Robinhood Chain via Flap's Portal.
+// Token launching on Robinhood Chain, through the launchpad Portal already
+// deployed there.
 //
-// We do NOT deploy a token factory. Flap's launchpad is already live on chain
-// 4663 (and testnet 46630) and is battle-tested elsewhere; our contribution is
-// making it agent-native, which nobody has done on this chain. Portal is a
+// We do NOT deploy a token factory. The Portal is live on chain 4663 (and
+// testnet 46630) and battle-tested on other chains; our contribution is making
+// it agent-native, which nobody has done here. It is a
 // TransparentUpgradeableProxy whose implementation source is NOT verified on
-// Blockscout, so every shape here is taken from Flap's published docs and must
-// be proven by simulation before anything is signed. Never broadcast a launch
-// that has not simulated clean — that rule is the whole safety story.
+// Blockscout, so every struct shape below is derived from the protocol's
+// published docs rather than an audited ABI, and must be proven by simulation
+// before anything is signed. Never broadcast a launch that has not simulated
+// clean — that rule is the whole safety story.
 //
-// SIGNING: this module never signs and never holds funds. newTokenV6 is payable
-// and msg.value is the CREATOR's own initial buy, so the user signs from their
-// own wallet and the on-chain TokenCreated event records them as creator. That
-// keeps the "moves no funds, self-custody" invariant the user-agent system is
-// built on, and keeps us off the hook as deployer of record for whatever
-// someone decides to launch.
+// SIGNING: this module never signs and never holds funds. Both entry points are
+// payable and msg.value is the CREATOR's own initial buy, so the transaction can
+// only originate from their wallet, and the on-chain TokenCreated event records
+// them as creator. That keeps the "moves no funds, self-custody" invariant the
+// user-agent system is built on, and keeps us off the hook as deployer of record
+// for whatever someone decides to launch.
 import {
   createPublicClient,
   http,
@@ -28,8 +30,8 @@ import {
   type Hex,
 } from "viem";
 
-/** Chain-specific Flap deployment. Same addresses on both Robinhood networks. */
-export interface FlapDeployment {
+/** Chain-specific launchpad deployment. Same addresses on both Robinhood networks. */
+export interface LaunchpadDeployment {
   chainId: number;
   rpcUrl: string;
   portal: Address;
@@ -40,7 +42,7 @@ export interface FlapDeployment {
   explorer: string;
 }
 
-export const FLAP_ROBINHOOD_MAINNET: FlapDeployment = {
+export const LAUNCHPAD_ROBINHOOD_MAINNET: LaunchpadDeployment = {
   chainId: 4663,
   rpcUrl: "https://rpc.mainnet.chain.robinhood.com",
   portal: "0x26605f322f7fF986f381bB9A6e3f5DAb0bEaEb09",
@@ -49,7 +51,7 @@ export const FLAP_ROBINHOOD_MAINNET: FlapDeployment = {
   explorer: "https://robinhoodchain.blockscout.com",
 };
 
-export const FLAP_ROBINHOOD_TESTNET: FlapDeployment = {
+export const LAUNCHPAD_ROBINHOOD_TESTNET: LaunchpadDeployment = {
   chainId: 46630,
   rpcUrl: "https://rpc.testnet.chain.robinhood.com",
   portal: "0x26605f322f7fF986f381bB9A6e3f5DAb0bEaEb09",
@@ -59,11 +61,11 @@ export const FLAP_ROBINHOOD_TESTNET: FlapDeployment = {
 };
 
 /** Testnet until a launch has been proven end-to-end there. */
-export function flapDeployment(): FlapDeployment {
-  return process.env.FLAP_NETWORK === "mainnet" ? FLAP_ROBINHOOD_MAINNET : FLAP_ROBINHOOD_TESTNET;
+export function launchpadDeployment(): LaunchpadDeployment {
+  return process.env.LAUNCH_NETWORK === "mainnet" ? LAUNCHPAD_ROBINHOOD_MAINNET : LAUNCHPAD_ROBINHOOD_TESTNET;
 }
 
-// --- enum values, by declaration order in Flap's IPortal. Encoded as uint8, so
+// --- enum values, by declaration order in the Portal interface. Encoded as uint8, so
 // an off-by-one here silently launches something other than what was asked for
 // (a different curve threshold, or worse, a different migrator). Kept as named
 // constants precisely so a reader can check them against the docs.
@@ -90,9 +92,9 @@ export const ROBINHOOD_SUPPORTED_VERSIONS = [TokenVersion.V2_PERMIT, TokenVersio
 /**
  * Struct field ORDER is consensus-critical — these are positional on the wire.
  *
- * Two entry points, and picking the wrong one is not a soft failure. Flap's
- * general docs call newTokenV6 "the recommended unified entry point for all
- * token types", but Robinhood Chain does not implement the non-tax path there:
+ * Two entry points, and picking the wrong one is not a soft failure. The
+ * protocol's general docs call newTokenV6 "the recommended unified entry point
+ * for all token types", but Robinhood Chain does not implement it that way:
  * newTokenV6 with tokenVersion=TOKEN_V2_PERMIT reverts with FeatureDisabled()
  * (0xac5f6092). Verified by simulation on testnet 46630, which is the only
  * reason we know. On this chain:
@@ -222,10 +224,10 @@ export interface MinedSalt {
 }
 
 /**
- * Mine a salt whose predicted address carries Flap's required vanity suffix
- * (8888 standard, 7777 tax). A 4-hex suffix is ~65k expected iterations, which
- * measures at well under two seconds — cheap enough to do inline on a request
- * rather than as a background job.
+ * Mine a salt whose predicted address carries the vanity suffix the Portal
+ * requires (8888 standard, 7777 tax). A 4-hex suffix is ~65k expected
+ * iterations, which measures at well under two seconds — cheap enough to do
+ * inline on a request rather than as a background job.
  *
  * maxIterations is a guard, not a tuning knob: if the predicted addresses never
  * match, the bytecode or impl address is wrong and we want a clear error rather
@@ -251,10 +253,10 @@ export interface LaunchRequest {
   name: string;
   symbol: string;
   /**
-   * IPFS CID from Flap's upload API. Optional — the chain accepts an empty
-   * string and Flap's own Robinhood example passes one — but a token launched
-   * without it has no image or description anywhere a trader would look, since
-   * their indexer cannot fetch files that were never pinned to their gateway.
+   * IPFS CID from the launchpad's upload API. Optional — the chain accepts an
+   * empty string, and the protocol's own Robinhood example passes one — but a
+   * token launched without it has no image or description anywhere a trader
+   * would look, since the indexer cannot fetch files never pinned to its gateway.
    */
   meta?: string;
   /** The creator's initial buy, in wei. Must equal msg.value. 0n is allowed. */
@@ -282,7 +284,7 @@ export interface BuiltLaunch {
  * any revenue story built on this must say "tax tokens" out loud.
  */
 function commissionReceiver(): Address {
-  const a = process.env.FLAP_COMMISSION_RECEIVER;
+  const a = process.env.LAUNCH_COMMISSION_RECEIVER;
   return a && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as Address) : ZERO;
 }
 
@@ -299,7 +301,7 @@ const MAX_SYMBOL = 16;
  * value from holders. Those deserve an explicit, informed decision rather than
  * an agent picking defaults on someone's behalf.
  */
-export function buildStandardLaunch(req: LaunchRequest, dep: FlapDeployment = flapDeployment()): BuiltLaunch {
+export function buildStandardLaunch(req: LaunchRequest, dep: LaunchpadDeployment = launchpadDeployment()): BuiltLaunch {
   const name = req.name.trim();
   const symbol = req.symbol.trim();
   if (!name || name.length > MAX_NAME) throw new Error(`name must be 1-${MAX_NAME} chars`);
@@ -327,7 +329,7 @@ export function buildStandardLaunch(req: LaunchRequest, dep: FlapDeployment = fl
     lpFeeProfile: V3LPFeeProfile.STANDARD,
     // Tax-only fields, unused at taxRate 0. antiFarmerDuration still applies:
     // it's the post-graduation window during which transfers to pools other
-    // than mainPool are blocked. Flap's own Robinhood example uses 1 day.
+    // than mainPool are blocked. The protocol's own Robinhood example uses 1 day.
     taxDuration: 0n,
     antiFarmerDuration: BigInt(24 * 60 * 60),
     mktBps: 0,
@@ -379,7 +381,7 @@ const YEAR = 365n * 24n * 60n * 60n;
 const DAY = 24n * 60n * 60n;
 
 /**
- * A ceiling of our own, not the protocol's. Flap's own interface offers 1/3/5/10%
+ * A ceiling of our own, not the protocol's. Its own interface offers 1/3/5/10%
  * tiers, and a token that taxes a third of every trade is a mechanism for
  * extracting from holders rather than funding anything. An agent acting for a
  * user should not be able to build one by fumbling a number, so 10% is the cap
@@ -442,7 +444,7 @@ export const DIVIDEND_SELF = "0xfEEDFEEDfeEDFEedFEEdFEEDFeEdfEEdFeEdFEEd" as con
 /**
  * Floor on dividend eligibility, required by the Portal whenever dividendBps > 0
  * — below it the launch reverts MinimumShareBalanceTooLow() (0x6b9099a1), which
- * is how we found it. Supply is fixed at 1e9 tokens for every Flap launch, so
+ * is how we found it. Supply is fixed at 1e9 tokens for every launch on this protocol, so
  * 10k tokens is 0.001% of supply: a dust filter, not a real barrier.
  */
 export const MIN_SHARE_BALANCE = 10_000n * 10n ** 18n;
@@ -486,7 +488,7 @@ export interface TaxLaunchRequest extends LaunchRequest {
 }
 
 /**
- * Build an UNSIGNED tax-token launch (FlapTaxTokenV3) via newTokenV6.
+ * Build an UNSIGNED tax-token launch (tax-token V3 implementation) via newTokenV6.
  *
  * Tax tokens are the only path on this chain where commissionReceiver exists,
  * so this is also the only path that earns us anything — worth being honest
@@ -494,7 +496,7 @@ export interface TaxLaunchRequest extends LaunchRequest {
  * aligned here. The tax rates are the user's to choose, capped, and never
  * raised on their behalf.
  */
-export function buildTaxLaunch(req: TaxLaunchRequest, dep: FlapDeployment = flapDeployment()): BuiltLaunch {
+export function buildTaxLaunch(req: TaxLaunchRequest, dep: LaunchpadDeployment = launchpadDeployment()): BuiltLaunch {
   const name = req.name.trim();
   const symbol = req.symbol.trim();
   if (!name || name.length > MAX_NAME) throw new Error(`name must be 1-${MAX_NAME} chars`);
@@ -588,7 +590,7 @@ export interface SimulationResult {
  * lie. So on failure we re-run with an overridden balance: if it then passes,
  * the calldata is sound and the report says "underfunded" instead.
  */
-export async function simulateLaunch(built: BuiltLaunch, creator: Address, dep: FlapDeployment = flapDeployment()): Promise<SimulationResult> {
+export async function simulateLaunch(built: BuiltLaunch, creator: Address, dep: LaunchpadDeployment = launchpadDeployment()): Promise<SimulationResult> {
   const client = createPublicClient({ transport: http(dep.rpcUrl) });
   // Dispatch on whichever entry point the build chose — newTokenV5 for standard,
   // newTokenV6 for tax. Hardcoding one silently mis-simulates the other.

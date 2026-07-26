@@ -12,14 +12,14 @@ import {
   TokenVersion,
   LAUNCH_STYLES,
   MIN_SHARE_BALANCE,
-  FLAP_ROBINHOOD_TESTNET as DEP,
-} from "../src/launch/flapPortal.js";
+  LAUNCHPAD_ROBINHOOD_TESTNET as DEP,
+} from "../src/launch/portal.js";
 
 /**
  * These cover the failures that are silent — the ones where the code runs, the
  * transaction sends, and the wrong thing happens on-chain.
  *
- * The expensive lesson is baked into the first test: Flap's general docs call
+ * The expensive lesson is baked into the first test: the protocol's general docs call
  * newTokenV6 the "unified entry point for all token types", but on Robinhood
  * Chain the non-tax path is not implemented there and reverts FeatureDisabled()
  * (0xac5f6092). Only a testnet simulation caught it. A unit test cannot reach
@@ -35,7 +35,7 @@ test("standard launches go through newTokenV5, not newTokenV6", () => {
   assert.equal(decoded.functionName, "newTokenV5");
 });
 
-test("the predicted address carries the 8888 vanity suffix Flap requires", () => {
+test("the predicted address carries the 8888 vanity suffix the Portal requires", () => {
   const built = buildStandardLaunch(req, DEP);
   assert.ok(built.predictedToken.toLowerCase().endsWith("8888"), `got ${built.predictedToken}`);
 });
@@ -76,7 +76,7 @@ test("Robinhood-mandated parameters are pinned", () => {
   assert.equal(params.beneficiary, CREATOR); // never us
 });
 
-test("enum values match Flap's declaration order", () => {
+test("enum values match the Portal's declaration order", () => {
   // Encoded as uint8; an off-by-one here launches something else entirely.
   assert.equal(DexThresh.FOUR_FIFTHS, 1);
   assert.equal(MigratorType.V2, 1);
@@ -171,7 +171,7 @@ test("durations are bounded the way the contract bounds them", () => {
 });
 
 test("meta is optional — the chain accepts an empty metadata URI", () => {
-  // Flap's own Robinhood example passes meta = "". A launch without it is
+  // The protocol's own Robinhood example passes meta = "". A launch without it is
   // valid on-chain but invisible in terminals, which is a warning to surface
   // to the user, not a reason to refuse to build the transaction.
   const built = buildStandardLaunch({ ...req, meta: undefined }, DEP);

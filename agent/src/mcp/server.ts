@@ -10,7 +10,7 @@ import { basisSnapshot } from "../signals/basis.js";
 import { carryQuote } from "../signals/carry.js";
 import { perpSnapshot } from "../signals/perpFeed.js";
 import { lpScores } from "../signals/lpScore.js";
-import { buildStandardLaunch, buildTaxLaunch, simulateLaunch, flapDeployment, LAUNCH_STYLES, DIVIDEND_SELF } from "../launch/flapPortal.js";
+import { buildStandardLaunch, buildTaxLaunch, simulateLaunch, launchpadDeployment, LAUNCH_STYLES, DIVIDEND_SELF } from "../launch/portal.js";
 import { parseEther, formatEther } from "viem";
 
 const CHAIN_IDS = ["solana", "ethereum", "base", "polygon", "robinhood"] as const;
@@ -393,14 +393,14 @@ export function buildServer(): McpServer {
    *
    * The user signs. newTokenV5 is payable and msg.value is the creator's own
    * initial buy, so the transaction can only ever originate from their wallet,
-   * and Flap's TokenCreated event records THEM as creator — not us.
+   * and the Portal's TokenCreated event records THEM as creator — not us.
    */
   server.registerTool(
     "meridian_launch_token",
     {
       title: "Prepare a token launch on Robinhood Chain",
       description:
-        "Prepare a token launch on Robinhood Chain via Flap's Portal, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet — this tool never signs, never holds funds, and never spends. The token address is deterministic (CREATE2) and is reported before signing. Choose a style: 'standard' is a plain ERC-20 with no tax; the tax styles ('marketing', 'dividend', 'deflationary', 'liquidity') take a percentage of every trade and route it differently. Tokens trade on a bonding curve and graduate to a Uniswap V2 pair at ~80% of supply sold; before graduation, transfers to or from any pool are blocked by the protocol.",
+        "Prepare a token launch on Robinhood Chain via the on-chain launchpad, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet — this tool never signs, never holds funds, and never spends. The token address is deterministic (CREATE2) and is reported before signing. Choose a style: 'standard' is a plain ERC-20 with no tax; the tax styles ('marketing', 'dividend', 'deflationary', 'liquidity') take a percentage of every trade and route it differently. Tokens trade on a bonding curve and graduate to a Uniswap V2 pair at ~80% of supply sold; before graduation, transfers to or from any pool are blocked by the protocol.",
       inputSchema: {
         name: z.string().min(1).max(64).describe("Token name, e.g. 'Meridian Test'"),
         symbol: z.string().min(1).max(16).describe("Ticker, e.g. MTEST"),
@@ -423,7 +423,7 @@ export function buildServer(): McpServer {
         meta: z
           .string()
           .optional()
-          .describe("IPFS CID from Flap's upload API. Without it the token has no image or description in any terminal."),
+          .describe("IPFS CID from the launchpad's upload API. Without it the token has no image or description in any terminal."),
         buyTaxPct: z.number().min(0).max(10).optional().describe("Tax styles only. Percent taken on buys, max 10."),
         sellTaxPct: z.number().min(0).max(10).optional().describe("Tax styles only. Percent taken on sells, max 10."),
         taxDurationDays: z.number().int().min(1).max(36500).optional().describe("Tax styles only. How long the tax stays on."),
@@ -434,7 +434,7 @@ export function buildServer(): McpServer {
       },
     },
     async ({ name, symbol, creator, style, initialBuyEth, meta, buyTaxPct, sellTaxPct, taxDurationDays, dividendsInOwnToken }) => {
-      const dep = flapDeployment();
+      const dep = launchpadDeployment();
       const common = { name, symbol, meta, creator: creator as `0x${string}`, quoteAmt: parseEther(String(initialBuyEth ?? 0)) };
       let built;
       try {
