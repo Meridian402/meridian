@@ -27,11 +27,27 @@ contract MockPoolManager {
     address public lastTakeTo;
     uint256 public lastTakeAmount;
     Currency public lastTakeCurrency;
+    mapping(address => uint256) public taken;
+    uint256 public donated;
+    /// Lets a test put the pool in the state where donate() legitimately fails:
+    /// nothing in range to receive it, which a swap can genuinely produce.
+    bool public donateReverts;
+
+    function setDonateReverts(bool v) external {
+        donateReverts = v;
+    }
 
     function take(Currency currency, address to, uint256 amount) external {
         lastTakeCurrency = currency;
         lastTakeTo = to;
         lastTakeAmount = amount;
+        taken[to] += amount;
+    }
+
+    function donate(PoolKey memory, uint256 amount0, uint256 amount1, bytes calldata) external returns (BalanceDelta) {
+        require(!donateReverts, "NoLiquidityToReceiveFees");
+        donated += amount0 + amount1;
+        return toBalanceDelta(0, 0);
     }
 }
 
@@ -242,6 +258,73 @@ contract MeridianTreasuryHookTest is Test {
     }
 
 
+
+    // ── the fee split ────────────────────────────────────────────────────────
+
+    function test_referrerFromHookDataIsPaid() public {
+        address partner = address(0xBEEF01);
+        vm.prank(address(pm));
+        (, int128 d) = hook.afterSwap(
+            stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), abi.encode(partner)
+        );
+        // Opening rate is 10% of 1,000,000 = 100,000. 20% of that to the partner.
+        assertEq(uint128(d), 100_000, "the trader still pays exactly the schedule");
+        assertEq(pm.taken(partner), 20_000, "referrer gets 20% of OUR fee");
+        assertEq(pm.donated(), 20_000, "LPs get 20%");
+        assertEq(pm.taken(treasury), 60_000, "treasury keeps the rest");
+    }
+
+    function test_noReferrerMeansTheTreasuryKeepsThatShare() public {
+        vm.prank(address(pm));
+        hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(pm.donated(), 20_000);
+        assertEq(pm.taken(treasury), 80_000, "no referrer, so the treasury keeps that slice too");
+    }
+
+    function test_theSplitNeverChangesWhatTheTraderPays() public {
+        // The whole safety property of the split: it moves OUR money around and
+        // is invisible to the person swapping.
+        vm.prank(address(pm));
+        (, int128 withRef) = hook.afterSwap(
+            stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), abi.encode(address(0xBEEF01))
+        );
+        vm.prank(address(pm));
+        (, int128 without) =
+            hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(withRef, without, "a referrer must not change the trader's cost");
+    }
+
+    function test_junkHookDataCannotBrickThePool() public {
+        // hookData is attacker-controlled on every swap. abi.decode on a
+        // wrong-length payload reverts, which would let anyone kill the pool.
+        bytes[4] memory junk = [bytes(""), bytes(hex"00"), bytes(hex"deadbeef"), bytes(new bytes(1000))];
+        for (uint256 i = 0; i < junk.length; i++) {
+            vm.prank(address(pm));
+            (, int128 d) =
+                hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), junk[i]);
+            assertEq(uint128(d), 100_000, "junk hookData must be ignored, not fatal");
+        }
+    }
+
+    function test_aFailedDonationFallsBackToTheTreasuryInsteadOfKillingTheSwap() public {
+        // donate() reverts when nothing is in range, and a swap can end with the
+        // price outside every position. That must never take the swap with it.
+        pm.setDonateReverts(true);
+        vm.prank(address(pm));
+        (, int128 d) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(uint128(d), 100_000, "the swap still succeeds");
+        assertEq(pm.donated(), 0);
+        assertEq(pm.taken(treasury), 100_000, "the LP slice falls back to the treasury");
+    }
+
+    function test_sharesCannotExceedTheFee() public {
+        MeridianTreasuryHook.Schedule memory bad = _schedule();
+        bad.referralShareBps = 6000;
+        bad.lpShareBps = 5000; // 110% of the fee
+        vm.expectRevert(MeridianTreasuryHook.SharesExceedFee.selector);
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, bad);
+    }
+
     /// The launch config: 10% -> 3% over 10 min, flat 3% to 24h, then 3% -> 1%.
     function _schedule() internal pure returns (MeridianTreasuryHook.Schedule memory) {
         return MeridianTreasuryHook.Schedule({
@@ -253,7 +336,9 @@ contract MeridianTreasuryHookTest is Test {
             sellFloorBps: 100,
             rampSeconds: 10 minutes,
             plateauUntil: 24 hours,
-            taperSeconds: 24 hours
+            taperSeconds: 24 hours,
+            referralShareBps: 2000, // 20% of our fee to whoever routed the swap
+            lpShareBps: 2000 // 20% donated to in-range LPs
         });
     }
 

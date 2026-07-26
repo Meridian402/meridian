@@ -109,6 +109,33 @@ contract MeridianTreasuryHook is IHooks {
     /// Seconds the taper takes to fall from the plateau to the floor.
     uint64 public immutable TAPER_SECONDS;
 
+    // ── how the fee is split. Shares OF THE FEE, not of the trade: changing
+    //    these moves where our slice goes and never changes what a trader
+    //    pays. Immutable, so the split is as fixed as the schedule. ──────────
+
+    /**
+     * Paid to whoever routed the swap, named in hookData. This is what makes
+     * any third-party agent, bot or frontend a distribution channel: send
+     * volume to this pool and earn on it automatically, with no agreement and
+     * no permission needed.
+     *
+     * Anyone can name themselves, which makes this equally a rebate for whoever
+     * integrates directly. That is deliberate — the share is kept modest enough
+     * that self-referral is not an arbitrage worth building for, while still
+     * being worth a real partner's while.
+     */
+    uint16 public immutable REFERRAL_SHARE_BPS;
+
+    /**
+     * Donated to whoever is providing liquidity in range at that moment.
+     *
+     * The point is to make this the most attractive pool on the chain to LP
+     * into. Our own position dilutes as outsiders join, and paying them instead
+     * of resenting them is the version where deeper liquidity is a win rather
+     * than a loss.
+     */
+    uint16 public immutable LP_SHARE_BPS;
+
     /**
      * When the clock started. Set by the FIRST swap this hook ever sees, then
      * never again.
@@ -133,7 +160,9 @@ contract MeridianTreasuryHook is IHooks {
     event DecayStarted(uint64 startedAt, uint64 endsAt);
     event FeesDisabledForever();
     event OwnerChanged(address indexed previous, address indexed next);
-    event FeeTaken(Currency indexed currency, uint256 amount);
+    event FeeTaken(Currency indexed currency, uint256 toTreasury, uint256 toReferrer, uint256 toLps);
+    event ReferralPaid(address indexed referrer, Currency indexed currency, uint256 amount);
+    event LpDonationSkipped(uint256 amount);
 
     error NotPoolManager();
     error NotOwner();
@@ -143,6 +172,7 @@ contract MeridianTreasuryHook is IHooks {
     error EndAboveStart();
     error ZeroDecayWindow();
     error PlateauBeforeRamp();
+    error SharesExceedFee();
 
     modifier onlyPoolManager() {
         if (msg.sender != address(POOL_MANAGER)) revert NotPoolManager();
@@ -164,6 +194,8 @@ contract MeridianTreasuryHook is IHooks {
         uint64 rampSeconds;
         uint64 plateauUntil;
         uint64 taperSeconds;
+        uint16 referralShareBps;
+        uint16 lpShareBps;
     }
 
     constructor(IPoolManager poolManager, address treasury, address owner_, Schedule memory s) {
@@ -180,6 +212,10 @@ contract MeridianTreasuryHook is IHooks {
         if (s.rampSeconds == 0 || s.taperSeconds == 0) revert ZeroDecayWindow();
         // The plateau cannot end before the ramp that feeds it has finished.
         if (s.plateauUntil < s.rampSeconds) revert PlateauBeforeRamp();
+        // The two shares come out of OUR fee, so together they cannot exceed it.
+        // Allowing 100% is fine (the treasury simply keeps nothing); allowing
+        // more would underflow the treasury's remainder inside the swap path.
+        if (uint256(s.referralShareBps) + s.lpShareBps > 10_000) revert SharesExceedFee();
 
         POOL_MANAGER = poolManager;
         TREASURY = treasury;
@@ -193,6 +229,8 @@ contract MeridianTreasuryHook is IHooks {
         RAMP_SECONDS = s.rampSeconds;
         PLATEAU_UNTIL = s.plateauUntil;
         TAPER_SECONDS = s.taperSeconds;
+        REFERRAL_SHARE_BPS = s.referralShareBps;
+        LP_SHARE_BPS = s.lpShareBps;
         // Fails the deployment if the mined address does not carry the exact
         // permission bits below. Without this, a bad salt yields a hook that is
         // simply never called and a pool that quietly earns nothing.
@@ -232,7 +270,7 @@ contract MeridianTreasuryHook is IHooks {
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
-        bytes calldata
+        bytes calldata hookData
     ) external onlyPoolManager returns (bytes4, int128) {
         // Direction. Our pool is native ETH / MERD, and native ETH is
         // address(0), which always sorts to currency0 — so swapping currency0
@@ -272,16 +310,59 @@ contract MeridianTreasuryHook is IHooks {
         uint256 fee = (magnitude * bps) / 10_000;
         if (fee == 0) return (IHooks.afterSwap.selector, 0); // dust: not worth a transfer
 
-        // Claim the credit core just created for us and move it out in the same
-        // call, so the hook never carries a balance between transactions.
-        POOL_MANAGER.take(currency, TREASURY, fee);
-        emit FeeTaken(currency, fee);
+        // Split OUR fee three ways and move every part out in this same call, so
+        // the hook never carries a balance between transactions. None of this
+        // changes what the trader paid — that was fixed above.
+        uint256 toReferrer;
+        address referrer = _referrerFrom(hookData);
+        if (referrer != address(0) && REFERRAL_SHARE_BPS > 0) {
+            toReferrer = (fee * REFERRAL_SHARE_BPS) / 10_000;
+            if (toReferrer > 0) {
+                POOL_MANAGER.take(currency, referrer, toReferrer);
+                emit ReferralPaid(referrer, currency, toReferrer);
+            }
+        }
+
+        uint256 toLps = (fee * LP_SHARE_BPS) / 10_000;
+        if (toLps > 0) {
+            // donate() reverts when nothing is in range to receive it, and a
+            // swap can end with the price outside every position. An unguarded
+            // revert would take down a swap that is otherwise perfectly valid,
+            // so a failed donation falls back to the treasury rather than
+            // failing the trade. The fee split is never worth breaking trading
+            // over, and catching here is what makes that true.
+            (uint256 amount0, uint256 amount1) =
+                Currency.unwrap(currency) == Currency.unwrap(key.currency0) ? (toLps, uint256(0)) : (uint256(0), toLps);
+            try POOL_MANAGER.donate(key, amount0, amount1, "") {
+                // donated; the delta it created is covered by the return below
+            } catch {
+                emit LpDonationSkipped(toLps);
+                toLps = 0;
+            }
+        }
+
+        uint256 toTreasury = fee - toReferrer - toLps;
+        if (toTreasury > 0) POOL_MANAGER.take(currency, TREASURY, toTreasury);
+        emit FeeTaken(currency, toTreasury, toReferrer, toLps);
 
         // Cannot truncate: fee is magnitude * bps / 10000 with bps capped at
         // MAX_FEE_BPS (1000), so fee <= magnitude / 10, and magnitude is at most
         // int128.max. A tenth of int128.max is comfortably inside int128.
         // forge-lint: disable-next-line(unsafe-typecast)
         return (IHooks.afterSwap.selector, int128(uint128(fee)));
+    }
+
+
+    /**
+     * Read a referrer out of hookData, tolerating anything.
+     *
+     * hookData is attacker-controlled on every swap, so this must never revert:
+     * abi.decode on a wrong-length payload does revert, which would let anyone
+     * brick the pool by passing junk. Wrong length simply means no referrer.
+     */
+    function _referrerFrom(bytes calldata hookData) internal pure returns (address) {
+        if (hookData.length != 32) return address(0);
+        return address(uint160(uint256(bytes32(hookData[0:32]))));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

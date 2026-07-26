@@ -61,6 +61,13 @@ export const MERD_FEE_SCHEDULE = {
   rampSeconds: 600n, // 10 minutes
   plateauUntil: 86_400n, // 24 hours from the first swap
   taperSeconds: 86_400n, // and 24 hours more to reach the floor
+
+  // Shares OF THE FEE, not of the trade. Neither changes what a trader pays;
+  // they only decide where our slice lands, which is why they are safe to have
+  // in the swap path at all.
+  referralShareBps: 2000, // 20% to whoever routed the swap, named in hookData
+  lpShareBps: 2000, // 20% donated to whoever is LPing in range
+  // treasury keeps the remaining 60%
 } as const;
 
 export const MERD: TokenDeployment = {

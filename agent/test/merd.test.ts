@@ -122,3 +122,12 @@ test("the opening rate is within the hook's hard cap", async () => {
   // MAX_FEE_BPS in the hook is 1000; above it the deployment reverts.
   assert.ok(s.buyLaunchBps <= 1000 && s.sellLaunchBps <= 1000);
 });
+
+test("the fee split leaves the treasury a majority and cannot exceed the fee", async () => {
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  assert.equal(s.referralShareBps, 2000);
+  assert.equal(s.lpShareBps, 2000);
+  const total = s.referralShareBps + s.lpShareBps;
+  assert.ok(total <= 10_000, "shares come out of our fee and cannot exceed it");
+  assert.ok(10_000 - total >= 5_000, "the treasury should keep the majority of its own fee");
+});
