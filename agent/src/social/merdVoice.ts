@@ -49,12 +49,18 @@ export function composeMerdTweets(s: MerdSignals): string[] {
 
   // 3. Yield note — honest about the trend, never a shill.
   if (s.topYield?.label && s.topYield.aprPct != null) {
-    const falling = /fall|down|declin/i.test(s.topYield.trend ?? "");
+    // "cooling" is the word the yield logger actually uses for a falling trend,
+    // and it matched none of these — so a cooling yield was being announced as
+    // "And climbing.", which is the one thing this composer must never do.
+    // Stems, not whole words — "easing" is eas+ing, so /ease/ never matches it.
+    // postGuards learned this the same way; it is the second time in this file's
+    // history that a whole-word verb has let something through.
+    const falling = /fall|down|declin|cool|soften|eas(e|ing|ed)|slip|fad/i.test(s.topYield.trend ?? "");
     out.push(
       clip(
         `Best accessible yield on my board right now: ${s.topYield.label} at ${s.topYield.aprPct.toFixed(0)}% implied APR.` +
           (s.topYield.aprPct > 150
-            ? ` That's volume-driven and it swings hard, so i read it with a raised eyebrow, not a victory lap.`
+            ? ` That's volume-driven and it swings hard, so I read it with a raised eyebrow, not a victory lap.`
             : falling
               ? ` Cooling from its highs, but still the one to beat.`
               : ` And climbing.`),

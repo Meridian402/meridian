@@ -23,6 +23,7 @@ import { provisionResearchFleet, triggerResearchRun } from "./research/orchestra
 import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad } from "./chatLimits.js";
 import { pendingLaunchFor, clearPendingLaunch } from "./launch/pendingLaunches.js";
 import { ResearchStrategy } from "./strategy/ResearchStrategy.js";
+import { startMerdCadence } from "./social/cadence.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { walletOps24h } from "./risk.js";
 import { securityHeaders, globalRateLimit, authRateLimit } from "./httpGuards.js";
@@ -1130,6 +1131,31 @@ app.delete("/mcp", replaySessionRequest);
 // IdleStrategy — the latter is a deliberate no-op kept as a drop-in kill switch
 // after an uncontrolled re-entry bought 68,702.5 $INDEX with real ETH.
 startAgentLoop(market, new ResearchStrategy(), decisionLog, config.agentThinkIntervalMs);
+
+// Merd talking about Meridian on his own, a few times a week. DRAFT-FIRST:
+// candidates are written to x-posts.jsonl and nothing publishes unless X_LIVE
+// is explicitly "true". Every candidate is filtered by postGuards first, which
+// blocks the unlaunched token, contract addresses and launch mechanics — a
+// probe found all nine plausible launch sentences passed the guards as they
+// were before those rules were added.
+startMerdCadence(() => {
+  const latest = decisionLog.recent(1)[0];
+  const y = yieldSummary() as { latest?: { measuredSyrupAprPct?: number | null; indexImpliedAprPct?: number | null } | null };
+  const syrup = y?.latest?.measuredSyrupAprPct;
+  const index = y?.latest?.indexImpliedAprPct;
+  // Whichever of the two measured yields is actually the better one today.
+  const best =
+    syrup != null && (index == null || syrup >= index)
+      ? { label: "syrupUSDG carry", aprPct: syrup }
+      : index != null
+        ? { label: "$INDEX distributions", aprPct: index }
+        : null;
+  return {
+    decision: latest ? { action: latest.action, reason: latest.reason, thoughts: latest.thoughts } : null,
+    topYield: best,
+  };
+});
+
 startLpGuard();
 startLpAllocator();
 startEquitySnapshotter();

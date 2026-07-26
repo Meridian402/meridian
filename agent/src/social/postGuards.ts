@@ -110,6 +110,25 @@ const FORBIDDEN: Array<[RegExp, string]> = [
     /\blaunchpad\b|\blaunch styles?\b|\b(launch|deploy|mint|creat|spin)\w*\s+(a|an|your|their|our|his|her|its|my|new|own)\s+(own\s+)?(token|coin|memecoin)\b/i,
     "unannounced launch feature",
   ],
+  // The MERD launch itself. Everything above was written before the token, the
+  // hook, the lock and the buyback existed, and a probe of nine plausible
+  // sentences about them found that ALL NINE passed clean — including a bare
+  // contract address. These close that.
+  //
+  // The ticker cannot be matched case-insensitively: the agent is named Merd,
+  // so /\bmerd\b/i would gag him saying his own name in every post. Case IS the
+  // signal — prose writes "Merd", a ticker shouts "MERD".
+  [/\bMERD\b/, "MERD ticker"],
+  // A 40-hex address has no legitimate reason to appear in a post, ever.
+  [/0x[0-9a-fA-F]{40}\b/, "contract address"],
+  [/\bMeridian(TreasuryHook|PositionLock|Buyback|Token)\b|\btreasury hook\b|\bposition lock\b/i, "contract names"],
+  [/\bbuy ?backs?\b|\bbuy(ing)? back and burn|\bburn(ing|s)? (pons|index|supply)\b|\bdeflationary\b/i, "buyback and burn"],
+  [/\bfair launch\b|\blaunch tax\b|\bdecay(ing)? (tax|fee)\b|\bsniper?s?\b|\banti-?sniper\b/i, "launch mechanics"],
+  [/\b(lp|liquidity) (is )?lock(ed)?\b|\block(ed)? (lp|liquidity)\b|\bno withdraw function\b|\brenounced?\b/i, "liquidity lock claims"],
+  [/\bvanity address\b|\bmin(e|ed|ing) (a |an |the )?(vanity |hook )?address\b|\bcreate2\b|\bsalt\b/i, "deployment internals"],
+  // Naming the mechanism gives the game away as surely as naming the token:
+  // "our v4 hook" tells a reader a launch is being built.
+  [/\b(v4|uniswap|our|the) hook\b|\bhooks?\b.{0,20}\b(fee|tax|swap)\b|\bfee schedule\b/i, "hook mechanics"],
   [/\bunaudited\b|\bvulnerab|\bexploit\b|\bfail.?open\b|\bsecurity (hole|flaw|issue|bug|gap)|\bnot been audited\b/i, "security disclosure"],
   [/@robinhood|\bpartnered? with robinhood|\bpartnership with robinhood|\bbacked by robinhood/i, "implied Robinhood affiliation"],
   [/\bfinancial advice\b|\bguaranteed?\b|\bwill (moon|pump|hit \$)/i, "advice or price promise"],

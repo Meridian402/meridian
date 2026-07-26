@@ -110,3 +110,71 @@ test("the word 'skip' deep in a genuine reply does not suppress it", () => {
     "which means you can skip the manual retry entirely and just let it settle.";
   assert.equal(isSkip(reply), false);
 });
+
+// ── the MERD launch, which none of the original guards knew about ────────────
+//
+// Every rule above predates the token, the hook, the lock and the buyback. A
+// probe of nine plausible sentences about them found ALL NINE passed clean,
+// including one containing a bare contract address. These are that probe,
+// kept as tests.
+
+test("nothing about the unlaunched token can be posted", () => {
+  const leaks = [
+    "Shipped the MERD treasury hook today — 10% launch tax decaying to 1%.",
+    "MERD is live at 0x4663DE6D3b3B84343AFdDB7D6Ab6c06ea412dA48",
+    "5% of every fee buys back and burns PONS and INDEX.",
+    "Our buyback contract burns INDEX on every trade.",
+    "The LP position is locked forever, no withdraw function.",
+    "Fair launch: 100% of supply into the pool, nothing held back.",
+    "Been mining a vanity address all morning.",
+    "MeridianPositionLock is deployed.",
+    "Working on the fee schedule for our v4 hook.",
+  ];
+  for (const text of leaks) {
+    assert.ok(forbiddenReason(text), `LEAKED: ${text}`);
+  }
+});
+
+test("the ticker is caught by CASE, because the agent is named Merd", () => {
+  // A case-insensitive rule would gag him saying his own name in every post,
+  // so the signal is capitalisation: prose writes "Merd", a ticker shouts MERD.
+  assert.ok(forbiddenReason("MERD just crossed a dollar"), "the ticker must be blocked");
+  assert.equal(forbiddenReason("Merd here. Watching the tape."), null, "his own name must survive");
+  assert.equal(forbiddenReason("I'm Merd, an agent that trades tokenized stocks."), null);
+});
+
+test("a bare contract address can never be posted", () => {
+  assert.ok(forbiddenReason("deployed to 0x4663DE6D3b3B84343AFdDB7D6Ab6c06ea412dA48"));
+  assert.ok(forbiddenReason("0xD4b8c25FCC380364D0dB3ce86E02677BF1814044"));
+});
+
+test("ordinary market talk is untouched by the new rules", () => {
+  // The guards are worth nothing if they also silence what he is FOR.
+  const fine = [
+    "Tokenized stocks on Robinhood Chain are quietly getting deeper.",
+    "Watched the ETF launch move NVDA 2% in an hour.",
+    "Ran the numbers on syrupUSDG carry — measured drift, not the published APY.",
+    "Scouted a new tokenized-RWA venue today.",
+    "Liquidity thinned out after the close, as it does.",
+  ];
+  for (const text of fine) {
+    assert.equal(forbiddenReason(text), null, `false positive: ${text}`);
+  }
+});
+
+// ── the composer must not invert a trend ─────────────────────────────────────
+
+test("a cooling yield is never announced as climbing", async () => {
+  // Found in the first real draft run: the yield logger says "cooling from
+  // highs", the falling-trend regex did not match that word, and Merd
+  // confidently posted "And climbing." about a number that was falling. The
+  // whole premise of this composer is that it never states something the data
+  // does not say.
+  const { composeMerdTweets } = await import("../src/social/merdVoice.js");
+  for (const trend of ["cooling from highs", "softening", "easing off", "slipping", "fading", "falling"]) {
+    const [t] = composeMerdTweets({ topYield: { label: "syrupUSDG carry", aprPct: 11.4, trend } });
+    assert.ok(!/climbing/i.test(t), `"${trend}" was reported as climbing: ${t}`);
+  }
+  const [rising] = composeMerdTweets({ topYield: { label: "syrupUSDG carry", aprPct: 11.4, trend: "rising" } });
+  assert.ok(/climbing/i.test(rising), "a genuinely rising yield should still say so");
+});
