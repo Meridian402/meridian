@@ -21,6 +21,7 @@ import { ensureUserAgent, messageUserAgent, userAgentHistory, streamUserAgent, s
 import { vaultStatus, buildVaultSetup, buildVaultRevoke } from "./custody/vault.js";
 import { provisionResearchFleet, triggerResearchRun } from "./research/orchestration.js";
 import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad } from "./chatLimits.js";
+import { pendingLaunchFor, clearPendingLaunch } from "./launch/pendingLaunches.js";
 import { ResearchStrategy } from "./strategy/ResearchStrategy.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { walletOps24h } from "./risk.js";
@@ -698,6 +699,33 @@ app.post("/api/my-agent/stream", async (req: Request, res: Response) => {
     releaseSlot();
     endTurn(address);
   }
+});
+
+// A launch the wallet's agent has prepared and simulated, waiting to be signed.
+//
+// This is the structured-data channel the chat cannot be: the agent's reply is
+// prose, and a transaction is not. The tool stashes the payload keyed by the
+// creator wallet; only that wallet's own session can read it back.
+//
+// Nothing here signs or broadcasts. The worst an agent can do by naming someone
+// else as creator is put a proposal in front of a person who never asked, and
+// they decline it — which is why it is safe for this to be a plain read.
+app.options("/api/my-agent/pending-launch", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/my-agent/pending-launch", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  res.json({ ok: true, launch: pendingLaunchFor(address) });
+});
+
+// Signed, or declined — either way it should stop being offered.
+app.options("/api/my-agent/pending-launch/clear", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post("/api/my-agent/pending-launch/clear", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  clearPendingLaunch(address);
+  res.json({ ok: true });
 });
 
 app.options("/api/my-agent/history", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });

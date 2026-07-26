@@ -11,6 +11,7 @@ import { carryQuote } from "../signals/carry.js";
 import { perpSnapshot } from "../signals/perpFeed.js";
 import { lpScores } from "../signals/lpScore.js";
 import { buildStandardLaunch, buildTaxLaunch, simulateLaunch, launchpadDeployment, LAUNCH_STYLES, DIVIDEND_SELF } from "../launch/portal.js";
+import { recordPendingLaunch } from "../launch/pendingLaunches.js";
 import { parseEther, formatEther } from "viem";
 
 const CHAIN_IDS = ["solana", "ethereum", "base", "polygon", "robinhood"] as const;
@@ -483,38 +484,57 @@ export function buildServer(): McpServer {
       }
 
       const shape = style === "standard" ? null : { ...LAUNCH_STYLES[style], ...(buyTaxPct != null ? { buyTaxRate: Math.round(buyTaxPct * 100) } : {}), ...(sellTaxPct != null ? { sellTaxRate: Math.round(sellTaxPct * 100) } : {}) };
+      const network = dep.chainId === 4663 ? "robinhood-mainnet" : "robinhood-testnet";
+      const economics =
+        shape == null
+          ? { tax: "none", note: "a plain ERC-20 — no tax on any trade" }
+          : {
+              buyTax: `${shape.buyTaxRate / 100}%`,
+              sellTax: `${shape.sellTaxRate / 100}%`,
+              split: {
+                toCreator: `${shape.mktBps / 100}%`,
+                burned: `${shape.deflationBps / 100}%`,
+                toHolders: `${shape.dividendBps / 100}%`,
+                toLiquidity: `${shape.lpBps / 100}%`,
+              },
+              ...(shape.dividendBps > 0 ? { dividendsPaidIn: dividendsInOwnToken ? "the launched token" : "ETH" } : {}),
+            };
+
+      // Hand the payload to the wallet channel. The agent's reply is prose and
+      // cannot carry a signable transaction; this is how the UI gets one.
+      recordPendingLaunch({
+        creator: creator as string,
+        chainId: built.chainId,
+        network,
+        name,
+        symbol,
+        style,
+        tokenAddress: String(sim.token),
+        explorer: `${dep.explorer}/address/${sim.token}`,
+        economics,
+        transaction: { to: built.to, data: built.data, value: String(built.value) },
+      });
+
       return json({
         ok: true,
-        network: dep.chainId === 4663 ? "robinhood-mainnet" : "robinhood-testnet",
+        network,
         chainId: built.chainId,
         style,
         tokenAddress: sim.token,
         addressMatchedPrediction: sim.matchesPrediction,
         explorer: `${dep.explorer}/address/${sim.token}`,
-        // Restate the economics in plain terms. The struct is 26 fields of
-        // basis points; a user signing this deserves to read what it means.
-        economics:
-          shape == null
-            ? { tax: "none", note: "a plain ERC-20 — no tax on any trade" }
-            : {
-                buyTax: `${shape.buyTaxRate / 100}%`,
-                sellTax: `${shape.sellTaxRate / 100}%`,
-                split: {
-                  toCreator: `${shape.mktBps / 100}%`,
-                  burned: `${shape.deflationBps / 100}%`,
-                  toHolders: `${shape.dividendBps / 100}%`,
-                  toLiquidity: `${shape.lpBps / 100}%`,
-                },
-                ...(shape.dividendBps > 0
-                  ? { dividendsPaidIn: dividendsInOwnToken ? "the launched token" : "ETH" }
-                  : {}),
-              },
+        // Restated in plain terms. The struct is 26 fields of basis points; a
+        // user signing this deserves to read what it means.
+        economics,
         // What the user signs. Nothing here is broadcast by us.
         transaction: { to: built.to, data: built.data, value: String(built.value) },
         simulated: true,
+        // The agent is told the wallet has it, so it can say "check the panel"
+        // rather than reciting calldata at someone.
+        awaitingSignature: true,
         note:
-          "Simulated successfully against the live chain. Sign this from the creator wallet to launch. " +
-          "The token trades on a bonding curve and graduates to a Uniswap V2 pair at ~80% of supply sold.",
+          "Simulated successfully against the live chain. The transaction has been sent to the user's wallet panel for review and signing — tell them to check it. " +
+          "Do NOT recite the calldata. The token trades on a bonding curve and graduates to a Uniswap V2 pair at ~80% of supply sold.",
       });
     },
   );
