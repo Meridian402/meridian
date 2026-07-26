@@ -57,12 +57,13 @@ test("the treasury is not the deploying key", () => {
 });
 
 test("the salt is the mined value, not a placeholder", () => {
-  // Re-mined three times now: the treasury consolidating onto 0x475C, the
-  // token gaining its zero-treasury guards, and evm_version moving to cancun.
-  // The address hashes the BYTECODE as well as the constructor args, so the
-  // BUILD CONFIG is part of it too — solc version, optimizer runs and
+  // Re-mined four times now: the treasury consolidating onto 0x475C, the token
+  // gaining its zero-treasury guards, evm_version moving to cancun, and finally
+  // the treasury moving to 0x759D so custody sits with a key the operator
+  // holds. The address hashes the BYTECODE as well as the constructor args, so
+  // the BUILD CONFIG is part of it too — solc version, optimizer runs and
   // evm_version all move it, not just the source. Earlier salts are void.
-  assert.equal(BigInt(MERD_SALT), 334925n);
+  assert.equal(BigInt(MERD_SALT), 29805n);
 });
 
 // ── wallet topology ──────────────────────────────────────────────────────────

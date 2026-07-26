@@ -90,7 +90,7 @@ test("a price outside the range is refused", () => {
 const plan = {
   ethWei: parseEther("5"),
   merdWei: parseEther("100000000"), // 10% of supply
-  recipient: "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4" as const,
+  recipient: "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81" as const,
   hook: HOOK,
 };
 

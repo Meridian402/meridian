@@ -142,7 +142,10 @@ export const config = {
  * "unconfigured" and refuses to quote a price, which fails safe. The failure
  * this catches is a value that is set, plausible, and wrong.
  */
-const RETIRED_TREASURY_ADDRESSES = ["0x76a4ff023faa6ea3e378d9e6d74eb6b2676fb38c"];
+const RETIRED_TREASURY_ADDRESSES = [
+  "0x76a4ff023faa6ea3e378d9e6d74eb6b2676fb38c", // rotated out 2026-07-23
+  "0x475c1fe4d1e7a703eaca6141978b04010e410bf4", // superseded 2026-07-26, custody moved to a key the operator holds
+];
 
 export function assertTreasuryIsLive(address: string = config.treasuryAddress): void {
   if (!address) return; // unconfigured fails safe elsewhere

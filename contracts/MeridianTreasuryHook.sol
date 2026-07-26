@@ -140,6 +140,20 @@ contract MeridianTreasuryHook is IHooks {
     uint16 public immutable LP_SHARE_BPS;
 
     /**
+     * Spent buying PONS and INDEX on the open market and burning both.
+     *
+     * Paid out to BUYBACK as an ordinary take(), exactly like the referral
+     * share. The buying deliberately does NOT happen here: both target pools
+     * belong to other people, and INDEX's liquidity sits behind a third-party
+     * hook, so swapping inside afterSwap would mean their pool draining or
+     * their hook reverting takes every MERD trade down with it. Sending the
+     * share out and letting MeridianBuyback spend it later keeps that failure
+     * survivable.
+     */
+    uint16 public immutable BUYBACK_SHARE_BPS;
+    address public immutable BUYBACK;
+
+    /**
      * When each pool's clock started. Set by the first swap in THAT pool, then
      * never again for it.
      *
@@ -204,10 +218,12 @@ contract MeridianTreasuryHook is IHooks {
         uint64 taperSeconds;
         uint16 referralShareBps;
         uint16 lpShareBps;
+        uint16 buybackShareBps;
     }
 
-    constructor(IPoolManager poolManager, address treasury, address owner_, Schedule memory s) {
+    constructor(IPoolManager poolManager, address treasury, address owner_, address buyback, Schedule memory s) {
         if (address(poolManager) == address(0) || treasury == address(0) || owner_ == address(0)) revert ZeroAddress();
+        if (buyback == address(0) && s.buybackShareBps > 0) revert ZeroAddress();
         if (s.buyLaunchBps > MAX_FEE_BPS || s.sellLaunchBps > MAX_FEE_BPS) {
             revert FeeAboveCap(s.buyLaunchBps > s.sellLaunchBps ? s.buyLaunchBps : s.sellLaunchBps, MAX_FEE_BPS);
         }
@@ -223,7 +239,7 @@ contract MeridianTreasuryHook is IHooks {
         // The two shares come out of OUR fee, so together they cannot exceed it.
         // Allowing 100% is fine (the treasury simply keeps nothing); allowing
         // more would underflow the treasury's remainder inside the swap path.
-        if (uint256(s.referralShareBps) + s.lpShareBps > 10_000) revert SharesExceedFee();
+        if (uint256(s.referralShareBps) + s.lpShareBps + s.buybackShareBps > 10_000) revert SharesExceedFee();
 
         POOL_MANAGER = poolManager;
         TREASURY = treasury;
@@ -239,6 +255,8 @@ contract MeridianTreasuryHook is IHooks {
         TAPER_SECONDS = s.taperSeconds;
         REFERRAL_SHARE_BPS = s.referralShareBps;
         LP_SHARE_BPS = s.lpShareBps;
+        BUYBACK_SHARE_BPS = s.buybackShareBps;
+        BUYBACK = buyback;
         // Fails the deployment if the mined address does not carry the exact
         // permission bits below. Without this, a bad salt yields a hook that is
         // simply never called and a pool that quietly earns nothing.
@@ -350,7 +368,12 @@ contract MeridianTreasuryHook is IHooks {
             }
         }
 
-        uint256 toTreasury = fee - toReferrer - toLps;
+        // Straight out to the buyback contract, in whichever currency the fee
+        // was charged in. It converts and burns on its own schedule.
+        uint256 toBuyback = (fee * BUYBACK_SHARE_BPS) / 10_000;
+        if (toBuyback > 0) POOL_MANAGER.take(currency, BUYBACK, toBuyback);
+
+        uint256 toTreasury = fee - toReferrer - toLps - toBuyback;
         if (toTreasury > 0) POOL_MANAGER.take(currency, TREASURY, toTreasury);
         emit FeeTaken(currency, toTreasury, toReferrer, toLps);
 

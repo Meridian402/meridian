@@ -58,6 +58,7 @@ contract MeridianTreasuryHookTest is Test {
     MeridianTreasuryHook hook;
     MockPoolManager pm;
     address treasury = address(0x7);
+    address buyback = address(0xB0BBB);
     address owner = address(0x0117E);
     address stranger = address(0xBAD);
 
@@ -75,7 +76,7 @@ contract MeridianTreasuryHookTest is Test {
         address target = address(flags | (uint160(0x4444) << 20));
         deployCodeTo(
             "MeridianTreasuryHook.sol:MeridianTreasuryHook",
-            abi.encode(IPoolManager(address(pm)), treasury, owner, _schedule()),
+            abi.encode(IPoolManager(address(pm)), treasury, owner, buyback, _schedule()),
             target
         );
         hook = MeridianTreasuryHook(target);
@@ -232,14 +233,14 @@ contract MeridianTreasuryHookTest is Test {
         vm.expectRevert(MeridianTreasuryHook.EndAboveStart.selector);
         MeridianTreasuryHook.Schedule memory bad = _schedule();
         bad.buyPlateauBps = 5000; // plateau ABOVE the launch rate
-        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, bad);
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, buyback, bad);
     }
 
     function test_anOpeningRateAboveTheCapCannotBeDeployed() public {
         vm.expectRevert(abi.encodeWithSelector(MeridianTreasuryHook.FeeAboveCap.selector, uint16(1001), uint16(1000)));
         MeridianTreasuryHook.Schedule memory bad = _schedule();
         bad.buyLaunchBps = 1001;
-        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, bad);
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, buyback, bad);
     }
 
     function test_theOnlyLeverMakesTradingCheaper() public {
@@ -299,14 +300,14 @@ contract MeridianTreasuryHookTest is Test {
         assertEq(uint128(d), 100_000, "the trader still pays exactly the schedule");
         assertEq(pm.taken(partner), 10_000, "referrer gets 10% of OUR fee");
         assertEq(pm.donated(), 10_000, "LPs get 10%");
-        assertEq(pm.taken(treasury), 80_000, "treasury keeps the rest");
+        assertEq(pm.taken(treasury), 75_000, "treasury keeps the rest");
     }
 
     function test_noReferrerMeansTheTreasuryKeepsThatShare() public {
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
         assertEq(pm.donated(), 10_000);
-        assertEq(pm.taken(treasury), 90_000, "no referrer, so the treasury keeps that slice too");
+        assertEq(pm.taken(treasury), 85_000, "no referrer, so the treasury keeps that slice too, less the buyback");
     }
 
     function test_theSplitNeverChangesWhatTheTraderPays() public {
@@ -342,7 +343,7 @@ contract MeridianTreasuryHookTest is Test {
         (, int128 d) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
         assertEq(uint128(d), 100_000, "the swap still succeeds");
         assertEq(pm.donated(), 0);
-        assertEq(pm.taken(treasury), 100_000, "the LP slice falls back to the treasury");
+        assertEq(pm.taken(treasury), 95_000, "the LP slice falls back to the treasury, less the buyback share");
     }
 
     function test_sharesCannotExceedTheFee() public {
@@ -350,7 +351,7 @@ contract MeridianTreasuryHookTest is Test {
         bad.referralShareBps = 6000;
         bad.lpShareBps = 5000; // 110% of the fee
         vm.expectRevert(MeridianTreasuryHook.SharesExceedFee.selector);
-        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, bad);
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, buyback, bad);
     }
 
     /// The launch config: 10% -> 3% over 10 min, flat 3% to 24h, then 3% -> 1%.
@@ -366,7 +367,8 @@ contract MeridianTreasuryHookTest is Test {
             plateauUntil: 24 hours,
             taperSeconds: 24 hours,
             referralShareBps: 1000, // 10% of our fee to whoever routed the swap
-            lpShareBps: 1000 // 10% donated to in-range LPs
+            lpShareBps: 1000, // 10% donated to in-range LPs
+            buybackShareBps: 500 // 5% buys PONS + INDEX and burns them
         });
     }
 
@@ -478,7 +480,7 @@ contract MeridianTreasuryHookTest is Test {
         assertEq(r, 100, "still the floor a decade later");
     }
 
-    function test_theSplitIsExactlyEightyTenTenAndLosesNoWei() public {
+    function test_theSplitIsExactly10_10_5_75AndLosesNoWei() public {
         // Tested elsewhere as "the trader pays the same either way". Here:
         // where the money actually GOES, to the wei.
         address referrer = address(0xBEEF01);
@@ -496,13 +498,16 @@ contract MeridianTreasuryHookTest is Test {
         uint256 toTreasury = pm.taken(treasury);
         uint256 toLps = pm.donated();
 
+        uint256 toBuyback = pm.taken(buyback);
+
         assertEq(toReferrer, fee / 10, "referral share is exactly 10% of the fee");
         assertEq(toLps, fee / 10, "LP share is exactly 10% of the fee");
-        assertEq(toTreasury, fee - toReferrer - toLps, "the treasury takes the rest");
-        assertEq(toTreasury, fee * 80 / 100, "which is 80%");
+        assertEq(toBuyback, fee / 20, "buyback share is exactly 5% of the fee");
+        assertEq(toTreasury, fee - toReferrer - toLps - toBuyback, "the treasury takes the rest");
+        assertEq(toTreasury, fee * 75 / 100, "which is 75%");
 
-        // Nothing created, nothing destroyed: the three shares ARE the fee.
-        assertEq(toReferrer + toLps + toTreasury, fee, "the split must be conservative");
+        // Nothing created, nothing destroyed: the four shares ARE the fee.
+        assertEq(toReferrer + toLps + toBuyback + toTreasury, fee, "the split must be conservative");
     }
 
     function test_roundingDustIsAccountedForAndNeverEscapes() public {
@@ -514,7 +519,7 @@ contract MeridianTreasuryHookTest is Test {
         );
 
         uint256 fee = uint256(uint128(hookDelta));
-        uint256 sum = pm.taken(address(0xBEEF01)) + pm.taken(treasury) + pm.donated();
+        uint256 sum = pm.taken(address(0xBEEF01)) + pm.taken(treasury) + pm.taken(buyback) + pm.donated();
         assertEq(sum, fee, "every wei of the fee is accounted for");
     }
 

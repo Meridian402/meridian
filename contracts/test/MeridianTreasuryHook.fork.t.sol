@@ -44,6 +44,7 @@ contract MeridianTreasuryHookForkTest is Test, IUnlockCallback {
     PoolKey key;
 
     address treasury = address(0xBEEF);
+    address buyback = address(0xB0BBB);
     address referrer = address(0xCAFE);
     address owner = address(this);
 
@@ -72,6 +73,7 @@ contract MeridianTreasuryHookForkTest is Test, IUnlockCallback {
                 POOL_MANAGER,
                 treasury,
                 owner,
+                buyback,
                 MeridianTreasuryHook.Schedule({
                     buyLaunchBps: 1000,
                     buyPlateauBps: 300,
@@ -83,7 +85,8 @@ contract MeridianTreasuryHookForkTest is Test, IUnlockCallback {
                     plateauUntil: 24 hours,
                     taperSeconds: 24 hours,
                     referralShareBps: 1000,
-                    lpShareBps: 1000
+                    lpShareBps: 1000,
+                    buybackShareBps: 500
                 })
             ),
             hookAddr
@@ -185,8 +188,9 @@ contract MeridianTreasuryHookForkTest is Test, IUnlockCallback {
 
         assertGt(treasuryGot, 0, "treasury received no fee from a real swap");
         assertGt(referrerGot, 0, "referrer named in hookData received nothing");
-        // 80/10 split of the same fee.
-        assertApproxEqRel(treasuryGot, referrerGot * 8, 0.01e18, "split should be 80:10");
+        // 75/10 of the same fee: the buyback now takes 5 off the treasury's share.
+        assertApproxEqRel(treasuryGot * 10, referrerGot * 75, 0.01e18, "split should be 75:10");
+        assertGt(token.balanceOf(buyback), 0, "the buyback share was paid out");
         assertEq(hook.decayStartedAt(key.toId()), uint64(block.timestamp), "first swap starts the clock");
     }
 
@@ -197,13 +201,14 @@ contract MeridianTreasuryHookForkTest is Test, IUnlockCallback {
         _unlock(abi.encode(Op.Swap, uint256(1 ether), true));
         uint256 received = token.balanceOf(address(this)) - before;
 
-        // Only 90% of the fee is READABLE as a balance — the other 10% was
-        // donated into the pool for in-range LPs, where it is not a balance
-        // anyone holds. So the observable slice is 9% of the gross output, and
-        // since the trader keeps 90% of gross, that is exactly a tenth of what
+        // Only the take()n shares are READABLE as balances — the 10% donated to
+        // in-range LPs is not a balance anyone holds. Treasury 75 + referrer 10
+        // + buyback 5 = 90% of the fee, which is 9% of the gross output, and
+        // since the trader keeps 90% of gross that is exactly a tenth of what
         // they received. Getting this wrong is what made the first version of
-        // this assertion report 9.09% and look like a contract bug.
-        uint256 observableFee = token.balanceOf(treasury) + token.balanceOf(referrer);
+        // this assertion report 9.09% and look like a contract bug; forgetting
+        // the buyback leg made it report 8.5% for the same reason.
+        uint256 observableFee = token.balanceOf(treasury) + token.balanceOf(referrer) + token.balanceOf(buyback);
         assertApproxEqRel(observableFee, received / 10, 0.01e18, "about a 10 percent opening rate");
     }
 

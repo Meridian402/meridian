@@ -28,10 +28,10 @@ import {
  * neither M nor R exists in that alphabet at any mining cost. The symbol is
  * what wallets display; the address only ever carries the chain id.
  */
-export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000051c4d"; // 334925
+export const MERD_SALT: Hex = "0x000000000000000000000000000000000000000000000000000000000000746d"; // 29805
 
 /** Where MERD lands. Deterministic, and verified before any broadcast. */
-export const MERD_ADDRESS: Address = "0x4663b8F879484A671B98320808142a722FC7e703";
+export const MERD_ADDRESS: Address = "0x4663DE6D3b3B84343AFdDB7D6Ab6c06ea412dA48";
 
 /**
  * Receives the entire supply, and separately receives x402 revenue. One
@@ -42,7 +42,7 @@ export const MERD_ADDRESS: Address = "0x4663b8F879484A671B98320808142a722FC7e703
  * supply or the revenue. deployToken() refuses outright if the treasury is ever
  * the deploying key.
  */
-export const MERD_TREASURY: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
+export const MERD_TREASURY: Address = "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81";
 
 /**
  * The pool's fee schedule, fixed at hook construction and unchangeable after.
@@ -77,7 +77,8 @@ export const MERD_FEE_SCHEDULE = {
   // in the swap path at all.
   referralShareBps: 1000, // 10% to whoever routed the swap, named in hookData
   lpShareBps: 1000, // 10% donated to whoever is LPing in range
-  // treasury keeps the remaining 80%
+  buybackShareBps: 500, // 5% buys PONS and INDEX on the open market and burns both
+  // treasury keeps the remaining 75%
 } as const;
 
 export const MERD: TokenDeployment = {
@@ -102,6 +103,36 @@ export const MERD: TokenDeployment = {
 export const MERD_HOOK_OWNER: Address = MERD_TREASURY;
 
 /**
+ * The two tokens 5% of every fee is spent buying and burning, and the pools it
+ * buys them in. Both verified live before being written down:
+ *
+ *   PONS   ETH/PONS  2%, spacing 400, no hook     liquidity 2.63e21
+ *   INDEX  ETH/INDEX 1%, spacing 200, hook 0x2cD9 liquidity 5.79e22
+ *
+ * INDEX has NO usable hookless pool — every standard tier is initialized and
+ * empty — so its route runs through a third party's hook, which takes its own
+ * 3%. That dependency is the whole reason the buying happens in a separate
+ * contract instead of inside afterSwap: if their pool drains or their hook
+ * reverts, a buyback fails and is retried, rather than every MERD trade
+ * reverting forever.
+ */
+export const BUYBACK_TARGETS = {
+  pons: "0x39dBED3a2bd333467115dE45665cC57F813C4571" as Address,
+  ponsFee: 20_000,
+  ponsSpacing: 400,
+  ponsHook: NATIVE_ETH, // hookless
+  index: "0x56910D4409F3a0C78C64DD8D0545FF0705389870" as Address,
+  indexFee: 10_000,
+  indexSpacing: 200,
+  indexHook: "0x2cD91bD228ff4c537031d6b8204782090c84c0cC" as Address,
+  /** Half the ETH to each. */
+  ponsShareBps: 5000,
+} as const;
+
+/** Where the buyback lands. Deterministic, and an input to the hook's address. */
+export const MERD_BUYBACK_ADDRESS: Address = "0x6CE0ED8c30C0F0CA86B649D9019b49dd9cEb7A4a";
+
+/**
  * The hook, fully specified. Every field is in the init code, so this object IS
  * the address — change one basis point and the hook lands somewhere else.
  */
@@ -109,6 +140,7 @@ export const MERD_HOOK: HookDeployment = {
   poolManager: V4_POOL_MANAGER,
   treasury: MERD_TREASURY,
   owner: MERD_HOOK_OWNER,
+  buyback: MERD_BUYBACK_ADDRESS,
   schedule: MERD_FEE_SCHEDULE,
 };
 
@@ -124,7 +156,7 @@ export const MERD_HOOK: HookDeployment = {
  * change. This is the tripwire for that: deployHook refuses to broadcast if the
  * fresh mine disagrees with this line, and a test asserts it on every run.
  */
-export const MERD_HOOK_ADDRESS: Address = "0x9f67875975D518AD71864A7164A1a788411F0044";
+export const MERD_HOOK_ADDRESS: Address = "0xD4b8c25FCC380364D0dB3ce86E02677BF1814044";
 
 /**
  * The lock that will hold MERD's position, fully specified.
@@ -148,7 +180,7 @@ export const MERD_LOCK: LockDeployment = {
  * transaction can be built at all, because that transaction names it as the
  * position's owner. A test asserts it still reproduces from the current build.
  */
-export const MERD_LOCK_ADDRESS: Address = "0x184948C404573e2E3940302be9c43FB586193cbd";
+export const MERD_LOCK_ADDRESS: Address = "0xe171056AB66E2F113101Af74441dFEcF1DeEb6B0";
 
 /**
  * What goes into the pool on day one.

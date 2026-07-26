@@ -27,8 +27,24 @@ import type { Address } from "viem";
 /** Merd's own wallet. The only one whose key the running agent needs. */
 export const MERD_AGENT_WALLET: Address = "0xB849aa20b21C015e8F5118Dcf4b631366C2e87bB";
 
-/** x402 revenue in, 1,000,000,000 MERD held. Signs nothing, ever. */
-export const TREASURY_WALLET: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
+/**
+ * x402 revenue in, 1,000,000,000 MERD held, and the hook's one-way fee switch.
+ *
+ * Changed on 2026-07-26 from 0x475C1f to this address, so custody of the funds
+ * sits directly with a key the operator holds rather than one generated here.
+ * Every contract address in the launch is a function of this value — it is a
+ * constructor argument to the token, the hook and the lock — so the change
+ * re-mined all four addresses, including MERD's 0x4663 prefix.
+ */
+export const TREASURY_WALLET: Address = "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81";
+
+/**
+ * The treasury this project used until 2026-07-26, superseded by the address
+ * above. Holds 0.01 ETH and has never signed anything. Kept here, and in
+ * config.ts's retired list, so a stale MERIDIAN_TREASURY_ADDRESS is caught at
+ * startup rather than quietly collecting revenue into it.
+ */
+export const PREVIOUS_TREASURY_WALLET: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
 
 /** Generated for the deployment; key lives only in agent/.env at mode 600. */
 export const DEPLOYER_WALLET: Address = "0x336e91AE16AC31b4DF4AecA51ba8A0c2B5C82b8a";

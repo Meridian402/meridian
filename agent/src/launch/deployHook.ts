@@ -62,6 +62,7 @@ export interface FeeSchedule {
   taperSeconds: bigint;
   referralShareBps: number;
   lpShareBps: number;
+  buybackShareBps: number;
 }
 
 export interface HookDeployment {
@@ -71,6 +72,8 @@ export interface HookDeployment {
   treasury: Address;
   /** Holds disableFeesForever() — an authority that can only make trading cheaper. */
   owner: Address;
+  /** Receives the buyback share; spends it on PONS and INDEX and burns both. */
+  buyback: Address;
   schedule: FeeSchedule;
 }
 
@@ -89,6 +92,8 @@ const HOOK_ABI = parseAbi([
   "function TAPER_SECONDS() view returns (uint64)",
   "function REFERRAL_SHARE_BPS() view returns (uint16)",
   "function LP_SHARE_BPS() view returns (uint16)",
+  "function BUYBACK_SHARE_BPS() view returns (uint16)",
+  "function BUYBACK() view returns (address)",
   "function feesDisabledForever() view returns (bool)",
 ]);
 
@@ -113,11 +118,12 @@ function creationBytecode(): Hex {
 export function hookInitCode(d: HookDeployment): Hex {
   const s = d.schedule;
   const args = encodeAbiParameters(
-    parseAbiParameters("address, address, address, (uint16,uint16,uint16,uint16,uint16,uint16,uint64,uint64,uint64,uint16,uint16)"),
+    parseAbiParameters("address, address, address, address, (uint16,uint16,uint16,uint16,uint16,uint16,uint64,uint64,uint64,uint16,uint16,uint16)"),
     [
       d.poolManager,
       d.treasury,
       d.owner,
+      d.buyback,
       [
         s.buyLaunchBps,
         s.buyPlateauBps,
@@ -130,6 +136,7 @@ export function hookInitCode(d: HookDeployment): Hex {
         s.taperSeconds,
         s.referralShareBps,
         s.lpShareBps,
+        s.buybackShareBps,
       ],
     ],
   );
@@ -164,6 +171,7 @@ export function assertDeployable(d: HookDeployment): void {
     ["poolManager", d.poolManager],
     ["treasury", d.treasury],
     ["owner", d.owner],
+    ["buyback", d.buyback],
   ] as const) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error(`${label} must be an address`);
     if (/^0x0{40}$/.test(value)) throw new Error(`${label} must not be the zero address`);
@@ -181,7 +189,7 @@ export function assertDeployable(d: HookDeployment): void {
   if (s.buyLaunchBps > 1000 || s.sellLaunchBps > 1000) throw new Error("opening rate exceeds the contract's 10% cap");
   if (s.buyLaunchBps < s.buyPlateauBps || s.buyPlateauBps < s.buyFloorBps) throw new Error("buy schedule must be non-increasing");
   if (s.sellLaunchBps < s.sellPlateauBps || s.sellPlateauBps < s.sellFloorBps) throw new Error("sell schedule must be non-increasing");
-  if (s.referralShareBps + s.lpShareBps > 10_000) throw new Error("referral and LP shares exceed the whole fee");
+  if (s.referralShareBps + s.lpShareBps + s.buybackShareBps > 10_000) throw new Error("referral, LP and buyback shares exceed the whole fee");
   if (s.plateauUntil < s.rampSeconds) throw new Error("the plateau cannot end before the ramp reaches it");
 }
 
@@ -278,7 +286,7 @@ export async function deployHook(
   const read = <T>(functionName: HookView) =>
     publicClient.readContract({ address, abi: HOOK_ABI, functionName }) as Promise<T>;
 
-  const [poolManager, treasury, owner, buyLaunch, buyPlateau, buyFloor, sellLaunch, sellPlateau, sellFloor, ramp, plateau, taper, referral, lp, disabled] =
+  const [poolManager, treasury, owner, buyLaunch, buyPlateau, buyFloor, sellLaunch, sellPlateau, sellFloor, ramp, plateau, taper, referral, lp, buybackBps, buybackAddr, disabled] =
     await Promise.all([
       read<Address>("POOL_MANAGER"),
       read<Address>("TREASURY"),
@@ -294,6 +302,8 @@ export async function deployHook(
       read<bigint>("TAPER_SECONDS"),
       read<number>("REFERRAL_SHARE_BPS"),
       read<number>("LP_SHARE_BPS"),
+      read<number>("BUYBACK_SHARE_BPS"),
+      read<Address>("BUYBACK"),
       read<boolean>("feesDisabledForever"),
     ]);
 
@@ -309,12 +319,14 @@ export async function deployHook(
     taperSeconds: taper,
     referralShareBps: referral,
     lpShareBps: lp,
+    buybackShareBps: buybackBps,
   };
 
   const mismatches: string[] = [];
   if (poolManager.toLowerCase() !== d.poolManager.toLowerCase()) mismatches.push(`poolManager ${poolManager} != ${d.poolManager}`);
   if (treasury.toLowerCase() !== d.treasury.toLowerCase()) mismatches.push(`treasury ${treasury} != ${d.treasury}`);
   if (owner.toLowerCase() !== d.owner.toLowerCase()) mismatches.push(`owner ${owner} != ${d.owner}`);
+  if (buybackAddr.toLowerCase() !== d.buyback.toLowerCase()) mismatches.push(`buyback ${buybackAddr} != ${d.buyback}`);
   for (const [k, v] of Object.entries(onChain)) {
     const intended = (d.schedule as unknown as Record<string, number | bigint>)[k];
     if (BigInt(v as number | bigint) !== BigInt(intended)) mismatches.push(`${k} ${v} != ${intended}`);

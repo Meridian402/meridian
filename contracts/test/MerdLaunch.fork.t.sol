@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {MeridianToken} from "../MeridianToken.sol";
 import {MeridianTreasuryHook} from "../MeridianTreasuryHook.sol";
 import {MeridianPositionLock, IPositionManager} from "../MeridianPositionLock.sol";
+import {MeridianBuyback} from "../MeridianBuyback.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
@@ -68,15 +69,15 @@ contract MerdLaunchForkTest is Test, IUnlockCallback {
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     // ── exactly what agent/src/launch pins ───────────────────────────────────
-    address constant TREASURY = 0x475C1fe4d1e7A703eaca6141978b04010e410Bf4;
+    address constant TREASURY = 0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81;
 
-    bytes32 constant MERD_SALT = bytes32(uint256(0x051c4d));
-    address constant EXPECTED_MERD = 0x4663b8F879484A671B98320808142a722FC7e703;
+    bytes32 constant MERD_SALT = bytes32(uint256(0x746d));
+    address constant EXPECTED_MERD = 0x4663DE6D3b3B84343AFdDB7D6Ab6c06ea412dA48;
 
-    bytes32 constant HOOK_SALT = bytes32(uint256(0x9fca));
-    address constant EXPECTED_HOOK = 0x9f67875975D518AD71864A7164A1a788411F0044;
+    bytes32 constant HOOK_SALT = bytes32(uint256(0x1062));
+    address constant EXPECTED_HOOK = 0xD4b8c25FCC380364D0dB3ce86E02677BF1814044;
 
-    address constant EXPECTED_LOCK = 0x184948C404573e2E3940302be9c43FB586193cbd;
+    address constant EXPECTED_LOCK = 0xe171056AB66E2F113101Af74441dFEcF1DeEb6B0;
 
     // MERD_SEED: one ETH against the entire supply.
     uint256 constant SEED_ETH = 1 ether;
@@ -84,12 +85,17 @@ contract MerdLaunchForkTest is Test, IUnlockCallback {
     uint160 constant SEED_SQRT_PRICE = 2505414483750479311864138015696063;
     uint256 constant SEED_LIQUIDITY = 31306548835666955386788;
 
+    address constant PONS = 0x39dBED3a2bd333467115dE45665cC57F813C4571;
+    address constant INDEX = 0x56910D4409F3a0C78C64DD8D0545FF0705389870;
+    address constant INDEX_HOOK = 0x2cD91bD228ff4c537031d6b8204782090c84c0cC;
+
     uint8 constant MINT_POSITION = 0x02;
     uint8 constant SETTLE_PAIR = 0x0d;
 
     MeridianToken merd;
     MeridianTreasuryHook hook;
     MeridianPositionLock lock;
+    MeridianBuyback buyback;
     PoolKey key;
     uint256 positionId;
 
@@ -116,6 +122,33 @@ contract MerdLaunchForkTest is Test, IUnlockCallback {
             _create2(MERD_SALT, abi.encodePacked(type(MeridianToken).creationCode, abi.encode("Meridian", "MERD", SEED_MERD, TREASURY)))
         );
 
+        buyback = MeridianBuyback(
+            payable(
+                _create2(
+                    keccak256("meridian:buyback:v1"),
+                    abi.encodePacked(
+                        type(MeridianBuyback).creationCode,
+                        abi.encode(
+                            POOL_MANAGER,
+                            address(merd),
+                            PONS,
+                            INDEX,
+                            TREASURY, // binder
+                            uint16(5000), // half the ETH to each
+                            MeridianBuyback.Targets({
+                                ponsFee: 20_000,
+                                ponsSpacing: 400,
+                                ponsHook: address(0),
+                                indexFee: 10_000,
+                                indexSpacing: 200,
+                                indexHook: INDEX_HOOK
+                            })
+                        )
+                    )
+                )
+            )
+        );
+
         hook = MeridianTreasuryHook(
             _create2(
                 HOOK_SALT,
@@ -125,6 +158,7 @@ contract MerdLaunchForkTest is Test, IUnlockCallback {
                         POOL_MANAGER,
                         TREASURY,
                         TREASURY,
+                        address(buyback),
                         MeridianTreasuryHook.Schedule({
                             buyLaunchBps: 1000,
                             buyPlateauBps: 300,
@@ -136,7 +170,8 @@ contract MerdLaunchForkTest is Test, IUnlockCallback {
                             plateauUntil: 86_400,
                             taperSeconds: 86_400,
                             referralShareBps: 1000,
-                            lpShareBps: 1000
+                            lpShareBps: 1000,
+                            buybackShareBps: 500
                         })
                     )
                 )
@@ -306,7 +341,13 @@ contract MerdLaunchForkTest is Test, IUnlockCallback {
         uint256 received = merd.balanceOf(address(this)) - before;
         // 90% of the fee is readable as a balance; the other 10% was donated
         // into the pool for in-range LPs and is not a balance anyone holds.
-        uint256 observable = merd.balanceOf(TREASURY) - treasuryBefore;
+        // The take()n shares are readable as balances; the 10% donated to
+        // in-range LPs is not. With no referrer named the treasury keeps that
+        // slice too, so treasury 85 + buyback 5 = 90% of the fee, which is 9%
+        // of gross — exactly a tenth of what the trader received. Leaving the
+        // buyback leg out of this sum is what made it read 8.5% and look like
+        // the schedule was wrong.
+        uint256 observable = (merd.balanceOf(TREASURY) - treasuryBefore) + merd.balanceOf(address(buyback));
         assertApproxEqRel(observable, received / 10, 0.02e18, "about a 10% opening rate");
 
         // Two days later the floor applies, and trading still works.
