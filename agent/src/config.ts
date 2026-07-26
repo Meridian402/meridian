@@ -123,3 +123,33 @@ export const config = {
   scoutMaxDailyTotalUsd: Number(process.env.SCOUT_MAX_DAILY_TOTAL_USD ?? 5),
   scoutMinPayoutUsd: Number(process.env.SCOUT_MIN_PAYOUT_USD ?? 0.5),
 };
+
+/**
+ * Refuse to run pointed at a wallet we have retired.
+ *
+ * treasuryAddress is the `payTo` of the entire x402 rail: it is the address
+ * PaymentGate hands to anyone about to pay us, and the address it then checks
+ * Transfer logs against when verifying that payment. Point it somewhere stale
+ * and nothing errors — callers are quoted the wrong destination, their payments
+ * verify against it happily, and the money lands somewhere we are not watching.
+ *
+ * That is exactly what was configured: MERIDIAN_TREASURY_ADDRESS still held
+ * 0x76a4fF…, a wallet deliberately retired and wired to nothing, while every
+ * comment in the codebase said revenue goes to the cold treasury. It cost
+ * nothing only because the backend had not been deployed yet.
+ *
+ * An empty value stays allowed: PaymentGate already treats that as
+ * "unconfigured" and refuses to quote a price, which fails safe. The failure
+ * this catches is a value that is set, plausible, and wrong.
+ */
+const RETIRED_TREASURY_ADDRESSES = ["0x76a4ff023faa6ea3e378d9e6d74eb6b2676fb38c"];
+
+export function assertTreasuryIsLive(address: string = config.treasuryAddress): void {
+  if (!address) return; // unconfigured fails safe elsewhere
+  if (RETIRED_TREASURY_ADDRESSES.includes(address.toLowerCase())) {
+    throw new Error(
+      `MERIDIAN_TREASURY_ADDRESS is ${address}, a retired wallet. Every x402 payment would be ` +
+        "quoted and verified against an address nobody is watching. Set it to the current treasury.",
+    );
+  }
+}

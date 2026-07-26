@@ -5,7 +5,7 @@ import { dataPath } from "./dataDir.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildServer } from "./mcp/server.js";
-import { config } from "./config.js";
+import { config, assertTreasuryIsLive } from "./config.js";
 import { PaymentGate } from "./payments/PaymentGate.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
@@ -226,6 +226,10 @@ function executeAuthorized(req: Request): boolean {
   return isLoopback(req);
 }
 
+// Before anything can be quoted a price, prove we are not collecting into a
+// wallet we retired. Throwing here stops the process; the alternative is
+// running normally and misdirecting every payment.
+assertTreasuryIsLive();
 const paymentGate = new PaymentGate(config.treasuryAddress, config.x402FacilitatorUrl);
 const revenue = new RevenueLedger();
 
