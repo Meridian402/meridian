@@ -8,6 +8,7 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {BalanceDelta, toBalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
@@ -52,6 +53,8 @@ contract MockPoolManager {
 }
 
 contract MeridianTreasuryHookTest is Test {
+    using PoolIdLibrary for PoolKey;
+
     MeridianTreasuryHook hook;
     MockPoolManager pm;
     address treasury = address(0x7);
@@ -110,7 +113,7 @@ contract MeridianTreasuryHookTest is Test {
     // ── the decay curve ──────────────────────────────────────────────────────
 
     function test_opensAtTenPercentBothWays() public view {
-        (uint16 buy, uint16 sell) = hook.currentFeeBps();
+        (uint16 buy, uint16 sell) = hook.currentFeeBps(key);
         assertEq(buy, 1000, "10% on the first buy");
         assertEq(sell, 1000, "10% on the first sell");
     }
@@ -119,15 +122,15 @@ contract MeridianTreasuryHookTest is Test {
         // The sniper window is measured from the first trade. If the clock ran
         // from deployment, a delay between deploying and opening the pool would
         // burn the protection before anyone could trade.
-        assertEq(hook.decayStartedAt(), 0);
-        assertEq(hook.decayEndsAt(), 0);
+        assertEq(hook.decayStartedAt(key.toId()), 0);
+        assertEq(hook.decayEndsAt(key), 0);
 
         vm.warp(5_000_000); // a long, irrelevant delay before the pool opens
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
 
-        assertEq(hook.decayStartedAt(), uint64(5_000_000));
-        (uint16 buy,) = hook.currentFeeBps();
+        assertEq(hook.decayStartedAt(key.toId()), uint64(5_000_000));
+        (uint16 buy,) = hook.currentFeeBps(key);
         assertEq(buy, 1000, "still the full opening rate at the first trade");
     }
 
@@ -141,33 +144,33 @@ contract MeridianTreasuryHookTest is Test {
         vm.warp(t0);
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
-        assertEq(hook.decayStartedAt(), uint64(t0), "clock starts on the first swap");
+        assertEq(hook.decayStartedAt(key.toId()), uint64(t0), "clock starts on the first swap");
 
         // Phase 1 — the ramp. Halfway through ten minutes is halfway to 3%.
         vm.warp(t0 + 5 minutes);
-        (uint16 mid,) = hook.currentFeeBps();
+        (uint16 mid,) = hook.currentFeeBps(key);
         assertEq(mid, 650, "halfway down the opening ramp");
 
         // Phase 2 — the plateau, flat for the rest of the first day.
         vm.warp(t0 + 10 minutes);
-        (uint16 atPlateau,) = hook.currentFeeBps();
+        (uint16 atPlateau,) = hook.currentFeeBps(key);
         assertEq(atPlateau, 300, "the ramp lands on the plateau");
 
         vm.warp(t0 + 12 hours);
-        (uint16 midDay,) = hook.currentFeeBps();
+        (uint16 midDay,) = hook.currentFeeBps(key);
         assertEq(midDay, 300, "still 3% twelve hours in");
 
         vm.warp(t0 + 24 hours - 1);
-        (uint16 endOfDay,) = hook.currentFeeBps();
+        (uint16 endOfDay,) = hook.currentFeeBps(key);
         assertEq(endOfDay, 300, "3% right up to the 24h mark");
 
         // Phase 3 — the taper to the permanent floor.
         vm.warp(t0 + 36 hours);
-        (uint16 midTaper,) = hook.currentFeeBps();
+        (uint16 midTaper,) = hook.currentFeeBps(key);
         assertEq(midTaper, 200, "halfway between 3% and 1%");
 
         vm.warp(t0 + 48 hours);
-        (uint16 floorBuy, uint16 floorSell) = hook.currentFeeBps();
+        (uint16 floorBuy, uint16 floorSell) = hook.currentFeeBps(key);
         assertEq(floorBuy, 100, "1% floor");
         assertEq(floorSell, 100);
     }
@@ -176,7 +179,7 @@ contract MeridianTreasuryHookTest is Test {
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
         vm.warp(3650 days); // ten years later
-        (uint16 buy, uint16 sell) = hook.currentFeeBps();
+        (uint16 buy, uint16 sell) = hook.currentFeeBps(key);
         assertEq(buy, 100, "1% is the permanent floor");
         assertEq(sell, 100);
     }
@@ -242,7 +245,7 @@ contract MeridianTreasuryHookTest is Test {
     function test_theOnlyLeverMakesTradingCheaper() public {
         vm.prank(owner);
         hook.disableFeesForever();
-        (uint16 buy, uint16 sell) = hook.currentFeeBps();
+        (uint16 buy, uint16 sell) = hook.currentFeeBps(key);
         assertEq(buy, 0);
         assertEq(sell, 0);
 
@@ -258,6 +261,31 @@ contract MeridianTreasuryHookTest is Test {
     }
 
 
+
+
+    function test_anotherPoolCannotStartOurClock() public {
+        // Pool creation in v4 is permissionless, so anyone can point a throwaway
+        // pool at this hook. With a single shared clock, one dust swap in a
+        // worthless pool would burn OUR launch ramp before our pool ever opened
+        // and the real launch would begin at the plateau. The clock is per-pool
+        // precisely so that cannot happen.
+        PoolKey memory theirs = PoolKey({
+            currency0: Currency.wrap(address(0x3333)),
+            currency1: Currency.wrap(address(0x4444)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(hook))
+        });
+
+        vm.prank(address(pm));
+        hook.afterSwap(stranger, theirs, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+
+        assertGt(hook.decayStartedAt(theirs.toId()), 0, "their pool's clock started");
+        assertEq(hook.decayStartedAt(key.toId()), 0, "ours must be untouched");
+
+        (uint16 buy,) = hook.currentFeeBps(key);
+        assertEq(buy, 1000, "our pool still opens at the full 10%");
+    }
 
     // ── the fee split ────────────────────────────────────────────────────────
 

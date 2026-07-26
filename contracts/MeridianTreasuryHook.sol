@@ -9,6 +9,7 @@ import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MeridianTreasuryHook — a launch tax that decays on a fixed schedule.
@@ -73,6 +74,8 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 // ─────────────────────────────────────────────────────────────────────────────
 
 contract MeridianTreasuryHook is IHooks {
+    using PoolIdLibrary for PoolKey;
+
     /// Hard ceiling on either side, compiled in with no setter anywhere. The
     /// opening rate is validated against it at construction, so no deployment
     /// of this contract can ever charge more than this.
@@ -137,16 +140,21 @@ contract MeridianTreasuryHook is IHooks {
     uint16 public immutable LP_SHARE_BPS;
 
     /**
-     * When the clock started. Set by the FIRST swap this hook ever sees, then
-     * never again.
+     * When each pool's clock started. Set by the first swap in THAT pool, then
+     * never again for it.
      *
-     * Deliberately not a constructor argument. Pinning the start at deploy time
-     * means any delay between deploying and opening the pool burns decay before
-     * a single trade happens — and the sniper window the high opening rate
-     * exists to tax is measured from the first trade, not from whenever we got
-     * around to deploying.
+     * PER POOL, and that is not incidental. Pool creation in v4 is
+     * permissionless, so anyone can stand up a throwaway pool pointing at this
+     * hook. With a single shared clock, one dust swap in a worthless pool would
+     * start OUR launch ramp before our pool ever opened, and ten minutes later
+     * the real launch would begin at the plateau instead of the opening rate —
+     * the whole anti-sniper mechanism defeated for the price of one trade.
+     *
+     * Also deliberately not a constructor argument: pinning the start at deploy
+     * time would burn the ramp during any delay between deploying and opening,
+     * and the window this taxes is measured from the first trade.
      */
-    uint64 public decayStartedAt;
+    mapping(PoolId => uint64) public decayStartedAt;
 
     /**
      * One-way kill switch. The owner may permanently zero the fee and can never
@@ -157,7 +165,7 @@ contract MeridianTreasuryHook is IHooks {
     bool public feesDisabledForever;
     address public owner;
 
-    event DecayStarted(uint64 startedAt, uint64 endsAt);
+    event DecayStarted(PoolId indexed poolId, uint64 startedAt, uint64 endsAt);
     event FeesDisabledForever();
     event OwnerChanged(address indexed previous, address indexed next);
     event FeeTaken(Currency indexed currency, uint256 toTreasury, uint256 toReferrer, uint256 toLps);
@@ -278,12 +286,13 @@ contract MeridianTreasuryHook is IHooks {
         // holds for any ETH-paired pool, which is the only kind this hook is
         // deployed for. Attach it to some other pool and the two labels swap
         // over; the fee still reaches the treasury, it is just named backwards.
-        // Start the clock on the first swap, once, then never again.
-        uint64 startedAt = decayStartedAt;
+        // Start THIS pool's clock on its first swap, once, then never again.
+        PoolId poolId = key.toId();
+        uint64 startedAt = decayStartedAt[poolId];
         if (startedAt == 0) {
             startedAt = uint64(block.timestamp);
-            decayStartedAt = startedAt;
-            emit DecayStarted(startedAt, startedAt + PLATEAU_UNTIL + TAPER_SECONDS);
+            decayStartedAt[poolId] = startedAt;
+            emit DecayStarted(poolId, startedAt, startedAt + PLATEAU_UNTIL + TAPER_SECONDS);
         }
 
         uint16 bps = _feeBpsAt(params.zeroForOne, startedAt, block.timestamp);
@@ -404,17 +413,17 @@ contract MeridianTreasuryHook is IHooks {
         return uint16(plateauBps - (taperDrop * intoTaper) / TAPER_SECONDS);
     }
 
-    /// What a trade costs right now, for the UI and for anyone checking.
-    function currentFeeBps() external view returns (uint16 buyBps, uint16 sellBps) {
-        uint64 startedAt = decayStartedAt;
+    /// What a trade in this pool costs right now, for the UI and for anyone checking.
+    function currentFeeBps(PoolKey calldata key) external view returns (uint16 buyBps, uint16 sellBps) {
+        uint64 startedAt = decayStartedAt[key.toId()];
         buyBps = _feeBpsAt(true, startedAt, block.timestamp);
         sellBps = _feeBpsAt(false, startedAt, block.timestamp);
     }
 
     /// When the rate reaches its floor. Zero until the first swap starts the clock.
     /// When the rate reaches its permanent floor. Zero until the first swap.
-    function decayEndsAt() external view returns (uint64) {
-        uint64 startedAt = decayStartedAt;
+    function decayEndsAt(PoolKey calldata key) external view returns (uint64) {
+        uint64 startedAt = decayStartedAt[key.toId()];
         return startedAt == 0 ? 0 : startedAt + PLATEAU_UNTIL + TAPER_SECONDS;
     }
 

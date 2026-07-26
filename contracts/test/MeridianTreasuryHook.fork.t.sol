@@ -9,6 +9,7 @@ import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
@@ -37,6 +38,8 @@ contract MeridianTreasuryHookForkTest is Test, IUnlockCallback {
     IPoolManager constant POOL_MANAGER = IPoolManager(0x8366a39CC670B4001A1121B8F6A443A643e40951);
 
     MeridianToken token;
+    using PoolIdLibrary for PoolKey;
+
     MeridianTreasuryHook hook;
     PoolKey key;
 
@@ -184,7 +187,7 @@ contract MeridianTreasuryHookForkTest is Test, IUnlockCallback {
         assertGt(referrerGot, 0, "referrer named in hookData received nothing");
         // 80/10 split of the same fee.
         assertApproxEqRel(treasuryGot, referrerGot * 8, 0.01e18, "split should be 80:10");
-        assertEq(hook.decayStartedAt(), uint64(block.timestamp), "first swap starts the clock");
+        assertEq(hook.decayStartedAt(key.toId()), uint64(block.timestamp), "first swap starts the clock");
     }
 
     function test_fork_theOpeningRateIsChargedAtTenPercent() public {
