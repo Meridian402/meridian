@@ -84,8 +84,15 @@ test("enum values match Flap's declaration order", () => {
 test("bad input is rejected before any salt is mined", () => {
   assert.throws(() => buildStandardLaunch({ ...req, name: "" }, DEP), /name must be/);
   assert.throws(() => buildStandardLaunch({ ...req, symbol: "" }, DEP), /symbol must be/);
-  assert.throws(() => buildStandardLaunch({ ...req, meta: "  " }, DEP), /meta/);
   assert.throws(() => buildStandardLaunch({ ...req, creator: "nope" as never }, DEP), /creator/);
+});
+
+test("meta is optional — the chain accepts an empty metadata URI", () => {
+  // Flap's own Robinhood example passes meta = "". A launch without it is
+  // valid on-chain but invisible in terminals, which is a warning to surface
+  // to the user, not a reason to refuse to build the transaction.
+  const built = buildStandardLaunch({ ...req, meta: undefined }, DEP);
+  assert.ok(built.predictedToken.toLowerCase().endsWith("8888"));
 });
 
 test("a 4-hex vanity suffix is cheap enough to mine inline", () => {

@@ -10,6 +10,8 @@ import { basisSnapshot } from "../signals/basis.js";
 import { carryQuote } from "../signals/carry.js";
 import { perpSnapshot } from "../signals/perpFeed.js";
 import { lpScores } from "../signals/lpScore.js";
+import { buildStandardLaunch, simulateLaunch, flapDeployment } from "../launch/flapPortal.js";
+import { parseEther, formatEther } from "viem";
 
 const CHAIN_IDS = ["solana", "ethereum", "base", "polygon", "robinhood"] as const;
 
@@ -375,6 +377,89 @@ export function buildServer(): McpServer {
     async ({ submittedBy, venues }) => {
       const result = universe.upsertMany(venues, submittedBy);
       return json({ ok: true, ...result });
+    },
+  );
+
+  /**
+   * Token launching, agent-native.
+   *
+   * Deliberately NOT in EXECUTE_TOOLS, and that is a design statement rather
+   * than an oversight: this tool returns unsigned calldata and holds no signer,
+   * so it is structurally incapable of moving anyone's funds — ours or the
+   * caller's. That is precisely what makes it safe to expose on the
+   * credential-free "meridian-public" registration every user's chat agent
+   * connects through. A gate would add no safety and would lock out the exact
+   * audience the feature is for.
+   *
+   * The user signs. newTokenV5 is payable and msg.value is the creator's own
+   * initial buy, so the transaction can only ever originate from their wallet,
+   * and Flap's TokenCreated event records THEM as creator — not us.
+   */
+  server.registerTool(
+    "meridian_launch_token",
+    {
+      title: "Prepare a token launch on Robinhood Chain",
+      description:
+        "Prepare a standard (non-tax) ERC-20 launch on Robinhood Chain via Flap's Portal, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet — this tool never signs, never holds funds, and never spends. The token address is deterministic (CREATE2) and is reported before signing. Tokens trade on a bonding curve and graduate to a Uniswap V2 pair at ~80% of supply sold; before graduation, transfers to or from any pool are blocked by the protocol.",
+      inputSchema: {
+        name: z.string().min(1).max(64).describe("Token name, e.g. 'Meridian Test'"),
+        symbol: z.string().min(1).max(16).describe("Ticker, e.g. MTEST"),
+        creator: z
+          .string()
+          .regex(/^0x[0-9a-fA-F]{40}$/)
+          .describe("The wallet that will sign, fund and own the launch. Must be the user's own wallet."),
+        initialBuyEth: z
+          .number()
+          .min(0)
+          .max(5)
+          .optional()
+          .describe("Creator's own first buy in ETH, paid as msg.value. Optional; 0 means launch without buying."),
+        meta: z
+          .string()
+          .optional()
+          .describe("IPFS CID from Flap's upload API. Without it the token has no image or description in any terminal."),
+      },
+    },
+    async ({ name, symbol, creator, initialBuyEth, meta }) => {
+      const dep = flapDeployment();
+      let built;
+      try {
+        built = buildStandardLaunch(
+          { name, symbol, meta, creator: creator as `0x${string}`, quoteAmt: parseEther(String(initialBuyEth ?? 0)) },
+          dep,
+        );
+      } catch (e) {
+        return json({ ok: false, error: (e as Error).message });
+      }
+
+      // Simulating is not optional. The Portal implementation's source is
+      // unverified, so this is the only proof the encoding is right before a
+      // user is asked to sign and pay gas.
+      const sim = await simulateLaunch(built, creator as `0x${string}`, dep);
+      if (!sim.ok) {
+        return json({
+          ok: false,
+          network: dep.chainId === 4663 ? "robinhood-mainnet" : "robinhood-testnet",
+          error: sim.error,
+          underfunded: sim.underfunded ?? false,
+          ...(sim.underfunded ? { needsWei: String(sim.requiredWei), needsEth: formatEther(sim.requiredWei ?? 0n) } : {}),
+        });
+      }
+
+      return json({
+        ok: true,
+        network: dep.chainId === 4663 ? "robinhood-mainnet" : "robinhood-testnet",
+        chainId: built.chainId,
+        tokenAddress: sim.token,
+        addressMatchedPrediction: sim.matchesPrediction,
+        explorer: `${dep.explorer}/address/${sim.token}`,
+        // What the user signs. Nothing here is broadcast by us.
+        transaction: { to: built.to, data: built.data, value: String(built.value) },
+        simulated: true,
+        note:
+          "Simulated successfully against the live chain. Sign this from the creator wallet to launch. " +
+          "The token trades on a bonding curve and graduates to a Uniswap V2 pair at ~80% of supply sold.",
+      });
     },
   );
 

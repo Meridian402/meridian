@@ -14,7 +14,19 @@
 // keeps the "moves no funds, self-custody" invariant the user-agent system is
 // built on, and keeps us off the hook as deployer of record for whatever
 // someone decides to launch.
-import { getContractAddress, keccak256, toHex, toBytes, encodeFunctionData, type Address, type Hex } from "viem";
+import {
+  createPublicClient,
+  http,
+  getContractAddress,
+  keccak256,
+  toHex,
+  toBytes,
+  encodeFunctionData,
+  decodeFunctionData,
+  parseEther,
+  type Address,
+  type Hex,
+} from "viem";
 
 /** Chain-specific Flap deployment. Same addresses on both Robinhood networks. */
 export interface FlapDeployment {
@@ -238,8 +250,13 @@ export function mineVanitySalt(suffix: string, tokenImpl: Address, portal: Addre
 export interface LaunchRequest {
   name: string;
   symbol: string;
-  /** IPFS CID from Flap's upload API. Their indexer cannot see unpinned files. */
-  meta: string;
+  /**
+   * IPFS CID from Flap's upload API. Optional — the chain accepts an empty
+   * string and Flap's own Robinhood example passes one — but a token launched
+   * without it has no image or description anywhere a trader would look, since
+   * their indexer cannot fetch files that were never pinned to their gateway.
+   */
+  meta?: string;
   /** The creator's initial buy, in wei. Must equal msg.value. 0n is allowed. */
   quoteAmt: bigint;
   /** Who signs and funds — recorded on-chain as creator. */
@@ -287,7 +304,6 @@ export function buildStandardLaunch(req: LaunchRequest, dep: FlapDeployment = fl
   const symbol = req.symbol.trim();
   if (!name || name.length > MAX_NAME) throw new Error(`name must be 1-${MAX_NAME} chars`);
   if (!symbol || symbol.length > MAX_SYMBOL) throw new Error(`symbol must be 1-${MAX_SYMBOL} chars`);
-  if (!req.meta.trim()) throw new Error("meta (IPFS CID) is required — Flap's indexer cannot show an unpinned token");
   if (req.quoteAmt < 0n) throw new Error("quoteAmt cannot be negative");
   if (!/^0x[0-9a-fA-F]{40}$/.test(req.creator)) throw new Error("creator must be an address");
 
@@ -296,7 +312,7 @@ export function buildStandardLaunch(req: LaunchRequest, dep: FlapDeployment = fl
   const params = {
     name,
     symbol,
-    meta: req.meta.trim(),
+    meta: (req.meta ?? "").trim(),
     dexThresh: DexThresh.FOUR_FIFTHS, // 80% of supply sold => graduate (~5 ETH on this chain)
     salt: mined.salt,
     taxRate: 0, // zero is what makes this the non-tax implementation
@@ -330,4 +346,84 @@ export function buildStandardLaunch(req: LaunchRequest, dep: FlapDeployment = fl
     iterations: mined.iterations,
     chainId: dep.chainId,
   };
+}
+
+export interface SimulationResult {
+  ok: boolean;
+  /** The token address the Portal would actually create. */
+  token?: Address;
+  /** True when the prediction and the simulated result agree. */
+  matchesPrediction?: boolean;
+  error?: string;
+  /** Set when the only thing wrong is the creator's balance, not the launch. */
+  underfunded?: boolean;
+  /** What the creator needs on hand, in wei, when underfunded. */
+  requiredWei?: bigint;
+}
+
+/**
+ * Prove a built launch would succeed before anyone signs it.
+ *
+ * The Portal implementation's source is unverified, so our encoding is derived
+ * from docs rather than an audited ABI — this call is the only thing standing
+ * between a subtly wrong struct and a failed transaction the user paid gas for.
+ * Nothing may be broadcast that has not passed through here.
+ *
+ * Failure is deliberately split in two. A launch that reverts only because the
+ * signer is short on ETH is a fundable problem, not a broken one, and telling
+ * someone "your launch is invalid" when they simply need to top up would be a
+ * lie. So on failure we re-run with an overridden balance: if it then passes,
+ * the calldata is sound and the report says "underfunded" instead.
+ */
+export async function simulateLaunch(built: BuiltLaunch, creator: Address, dep: FlapDeployment = flapDeployment()): Promise<SimulationResult> {
+  const client = createPublicClient({ transport: http(dep.rpcUrl) });
+  const args = decodeFunctionData({ abi: PORTAL_ABI, data: built.data }).args as never;
+
+  const run = async (overrideBalance?: bigint) =>
+    client.simulateContract({
+      address: built.to,
+      abi: PORTAL_ABI,
+      functionName: "newTokenV5",
+      args,
+      value: built.value,
+      account: creator,
+      ...(overrideBalance != null ? { stateOverride: [{ address: creator, balance: overrideBalance }] } : {}),
+    });
+
+  try {
+    const { result } = await run();
+    return {
+      ok: true,
+      token: result as Address,
+      matchesPrediction: String(result).toLowerCase() === built.predictedToken.toLowerCase(),
+    };
+  } catch (err) {
+    const message = describeRevert(err);
+    // Distinguish "needs funding" from "genuinely invalid".
+    try {
+      const { result } = await run(built.value + parseEther("1"));
+      return {
+        ok: false,
+        underfunded: true,
+        requiredWei: built.value,
+        token: result as Address,
+        error: `the launch itself is valid, but ${creator} cannot cover it: ${message}`,
+      };
+    } catch {
+      return { ok: false, error: message };
+    }
+  }
+}
+
+/** Turn a viem revert into something a person (or an agent) can act on. */
+function describeRevert(err: unknown): string {
+  const e = err as { shortMessage?: string; message?: string; cause?: { reason?: string; data?: { errorName?: string } } };
+  const named = e?.cause?.data?.errorName ?? e?.cause?.reason;
+  const base = e?.shortMessage ?? e?.message ?? String(err);
+  // FeatureDisabled() is the one we already walked into: it means this chain
+  // does not implement the entry point / token version being asked for.
+  if (base.includes("0xac5f6092")) {
+    return "Portal reverted FeatureDisabled() — this chain does not support that entry point or token version";
+  }
+  return named ? `${named}: ${base}` : base;
 }

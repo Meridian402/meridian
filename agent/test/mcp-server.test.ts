@@ -134,9 +134,53 @@ test("lists all expected tools", async () => {
     "meridian_submit_research",
     "meridian_index_yield",
     "meridian_index_yield_execute",
+    "meridian_launch_token",
   ]) {
     assert.ok(names.includes(expected), `missing tool: ${expected}`);
   }
+});
+
+/**
+ * launch_token must stay reachable WITHOUT the execute token. It returns
+ * unsigned calldata and holds no signer, so it cannot move funds — which is
+ * exactly why every user's chat agent, connecting through the credential-free
+ * registration, is allowed to call it. If someone later adds it to
+ * EXECUTE_TOOLS "to be safe", the feature silently dies for its entire
+ * audience and this test is the thing that says so.
+ *
+ * Uses invalid input on purpose: validation fails before any network call, so
+ * the assertion stays hermetic and this suite keeps its "free to run" promise.
+ */
+/**
+ * A gated tool fails at the TRANSPORT layer (StreamableHTTPError 401/403)
+ * before dispatch happens at all. Reaching the tool's own schema validation is
+ * therefore the proof that it is NOT gated. The SDK surfaces schema rejection
+ * either as a rejected promise or as an isError result, so accept both shapes
+ * and assert only on the thing that actually matters.
+ */
+async function rejectedWithoutAuthGate(args: Record<string, unknown>) {
+  let transportError: unknown = null;
+  let result: Awaited<ReturnType<Client["callTool"]>> | null = null;
+  try {
+    result = await client.callTool({ name: "meridian_launch_token", arguments: args });
+  } catch (err) {
+    transportError = err;
+  }
+  assert.ok(!(transportError instanceof StreamableHTTPError), "launch_token must not sit behind an auth gate");
+  assert.ok(transportError !== null || result?.isError === true, "expected invalid input to be rejected");
+}
+
+test("launch_token is not gated behind the execute token", async () => {
+  await rejectedWithoutAuthGate({
+    name: "x".repeat(200),
+    symbol: "TST",
+    creator: "0x1111111111111111111111111111111111111111",
+  });
+});
+
+test("launch_token refuses a creator that is not an address", async () => {
+  // Rejected by schema: never mines a salt, never touches the chain.
+  await rejectedWithoutAuthGate({ name: "Test", symbol: "TST", creator: "not-a-wallet" });
 });
 
 test("universe starts empty", async () => {
