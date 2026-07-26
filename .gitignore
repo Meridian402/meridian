@@ -1,5 +1,10 @@
 # Dependencies
 node_modules/
+# Foundry: vendored deps and build output. forge-std is fetched by
+# `forge install foundry-rs/forge-std`, not carried in the repo.
+lib/
+contracts/out/
+cache/
 
 # Build output
 dist/
