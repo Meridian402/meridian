@@ -203,6 +203,18 @@ contract MeridianTokenTest is Test {
         assertEq(token.balanceOf(alice), 100 ether, "a tax would show up here");
     }
 
+
+    function test_rejectsAZeroTreasury() public {
+        // Minting the supply to address(0) burns it on creation. Unrecoverable.
+        vm.expectRevert(MeridianToken.MintToZero.selector);
+        new MeridianToken("Meridian", "MERD", 1_000_000_000 ether, address(0));
+    }
+
+    function test_rejectsAZeroSupply() public {
+        vm.expectRevert(MeridianToken.ZeroSupply.selector);
+        new MeridianToken("Meridian", "MERD", 0, treasury);
+    }
+
     function test_infiniteApprovalDoesNotDecay() public {
         vm.prank(treasury);
         token.approve(alice, type(uint256).max);

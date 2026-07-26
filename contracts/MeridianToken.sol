@@ -40,11 +40,20 @@ contract MeridianToken {
     error InsufficientBalance();
     error InsufficientAllowance();
     error TransferToZero();
+    error MintToZero();
+    error ZeroSupply();
 
     /// The whole supply goes to `treasury` at deploy. Distribution from there is
     /// an off-chain decision recorded on-chain by ordinary transfers, which is
     /// easier for anyone to audit than a vesting contract they have to trust.
     constructor(string memory name_, string memory symbol_, uint256 supply, address treasury) {
+        // Both of these are unrecoverable if they slip through. Minting the
+        // supply to address(0) burns it on creation and leaves a token nobody
+        // can ever hold; a zero supply leaves a token nobody can ever trade.
+        // The deploy script checks them too, but the check that matters is the
+        // one the chain enforces.
+        if (treasury == address(0)) revert MintToZero();
+        if (supply == 0) revert ZeroSupply();
         name = name_;
         symbol = symbol_;
         totalSupply = supply;

@@ -135,6 +135,12 @@ contract MeridianTreasuryHook is IHooks {
         int128 unspecifiedAmount = unspecifiedIsCurrency1 ? delta.amount1() : delta.amount0();
         if (unspecifiedAmount == 0) return (IHooks.afterSwap.selector, 0);
 
+        // Negating int128.min overflows and would revert under checked
+        // arithmetic — inside the swap path, so it would take the whole swap
+        // down with it rather than just costing us a fee. Unreachable at any
+        // realistic size, but "unreachable" is not a reason to leave a revert
+        // in a hot path when the guard is one comparison.
+        if (unspecifiedAmount == type(int128).min) return (IHooks.afterSwap.selector, 0);
         uint256 magnitude = unspecifiedAmount < 0 ? uint256(uint128(-unspecifiedAmount)) : uint256(uint128(unspecifiedAmount));
         uint256 fee = (magnitude * bps) / 10_000;
         if (fee == 0) return (IHooks.afterSwap.selector, 0); // dust: not worth a transfer
