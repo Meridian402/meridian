@@ -348,6 +348,219 @@ export function buildStandardLaunch(req: LaunchRequest, dep: FlapDeployment = fl
   };
 }
 
+// --- launch styles -----------------------------------------------------------
+//
+// Different agents want to launch different SHAPES of token, and the raw struct
+// is a bad interface for that: 26 fields, four of which must sum to exactly
+// 10000 bps or the Portal reverts InvalidTaxDistribution(). Asking an agent to
+// assemble that freehand invites a class of failure where the launch is subtly
+// wrong rather than obviously broken — a token whose tax silently all goes to
+// the wrong place.
+//
+// So styles are named, validated bundles. An agent picks one and optionally
+// overrides individual knobs; the shape rules are enforced here, once.
+
+export type LaunchStyle = "standard" | "marketing" | "dividend" | "deflationary" | "liquidity";
+
+export interface TaxShape {
+  /** Basis points taken on buys / sells. 100 = 1%. */
+  buyTaxRate: number;
+  sellTaxRate: number;
+  /** Where the tax goes. MUST sum to 10000. */
+  mktBps: number;
+  deflationBps: number;
+  dividendBps: number;
+  lpBps: number;
+  taxDurationSec: bigint;
+  antiFarmerDurationSec: bigint;
+}
+
+const YEAR = 365n * 24n * 60n * 60n;
+const DAY = 24n * 60n * 60n;
+
+/**
+ * A ceiling of our own, not the protocol's. Flap's own interface offers 1/3/5/10%
+ * tiers, and a token that taxes a third of every trade is a mechanism for
+ * extracting from holders rather than funding anything. An agent acting for a
+ * user should not be able to build one by fumbling a number, so 10% is the cap
+ * and exceeding it is an error rather than a silent clamp.
+ */
+export const MAX_TAX_BPS = 1000;
+const MAX_TAX_DURATION = 100n * YEAR;
+const MAX_ANTIFARMER_DURATION = YEAR;
+
+export const LAUNCH_STYLES: Record<Exclude<LaunchStyle, "standard">, TaxShape> = {
+  // The common case: trading tax funds the project, paid to the creator.
+  marketing: {
+    buyTaxRate: 300,
+    sellTaxRate: 300,
+    mktBps: 10000,
+    deflationBps: 0,
+    dividendBps: 0,
+    lpBps: 0,
+    taxDurationSec: YEAR,
+    antiFarmerDurationSec: DAY,
+  },
+  // Tax is redistributed to holders, paid in the quote asset (native ETH here).
+  dividend: {
+    buyTaxRate: 300,
+    sellTaxRate: 300,
+    mktBps: 2000,
+    deflationBps: 0,
+    dividendBps: 8000,
+    lpBps: 0,
+    taxDurationSec: YEAR,
+    antiFarmerDurationSec: DAY,
+  },
+  // Tax is burned, shrinking supply on every trade.
+  deflationary: {
+    buyTaxRate: 300,
+    sellTaxRate: 300,
+    mktBps: 2000,
+    deflationBps: 8000,
+    dividendBps: 0,
+    lpBps: 0,
+    taxDurationSec: YEAR,
+    antiFarmerDurationSec: DAY,
+  },
+  // Tax deepens the pool, so the token gets easier to trade as it trades.
+  liquidity: {
+    buyTaxRate: 300,
+    sellTaxRate: 300,
+    mktBps: 2000,
+    deflationBps: 0,
+    dividendBps: 0,
+    lpBps: 8000,
+    taxDurationSec: YEAR,
+    antiFarmerDurationSec: DAY,
+  },
+};
+
+/** MAGIC_DIVIDEND_SELF — pay dividends in the launching token itself. */
+export const DIVIDEND_SELF = "0xfEEDFEEDfeEDFEedFEEdFEEDFeEdfEEdFeEdFEEd" as const;
+
+/**
+ * Floor on dividend eligibility, required by the Portal whenever dividendBps > 0
+ * — below it the launch reverts MinimumShareBalanceTooLow() (0x6b9099a1), which
+ * is how we found it. Supply is fixed at 1e9 tokens for every Flap launch, so
+ * 10k tokens is 0.001% of supply: a dust filter, not a real barrier.
+ */
+export const MIN_SHARE_BALANCE = 10_000n * 10n ** 18n;
+
+/**
+ * Reject a tax shape the Portal would reject, but with a message that says what
+ * is wrong. Every rule here maps to a named custom error on the contract, and
+ * hitting them on-chain costs the user gas to learn nothing.
+ */
+export function validateTaxShape(s: TaxShape): void {
+  const sum = s.mktBps + s.deflationBps + s.dividendBps + s.lpBps;
+  if (sum !== 10000) {
+    throw new Error(`tax distribution must sum to exactly 10000 bps (mkt+deflation+dividend+lp), got ${sum} — Portal reverts InvalidTaxDistribution()`);
+  }
+  for (const [label, rate] of [["buyTaxRate", s.buyTaxRate], ["sellTaxRate", s.sellTaxRate]] as const) {
+    if (rate < 0 || !Number.isInteger(rate)) throw new Error(`${label} must be a non-negative integer in basis points`);
+    if (rate > MAX_TAX_BPS) throw new Error(`${label} ${rate}bps exceeds the ${MAX_TAX_BPS}bps (${MAX_TAX_BPS / 100}%) ceiling this tool will build`);
+  }
+  if (s.buyTaxRate === 0 && s.sellTaxRate === 0) {
+    throw new Error("a tax token needs a non-zero buy or sell rate — use the 'standard' style for a plain ERC-20");
+  }
+  if (s.taxDurationSec <= 0n) throw new Error("taxDuration must be positive — Portal reverts TaxDurationTooShort()");
+  if (s.taxDurationSec > MAX_TAX_DURATION) throw new Error("taxDuration exceeds the 100-year maximum — Portal reverts TaxDurationTooLong()");
+  if (s.antiFarmerDurationSec > MAX_ANTIFARMER_DURATION) {
+    throw new Error("antiFarmerDuration exceeds the 1-year maximum — Portal reverts AntiFarmerDurationTooLong()");
+  }
+}
+
+export interface TaxLaunchRequest extends LaunchRequest {
+  style: Exclude<LaunchStyle, "standard">;
+  /** Per-launch overrides on top of the style's defaults. */
+  overrides?: Partial<TaxShape>;
+  /**
+   * Who receives dividends, when the style pays them. Defaults to the quote
+   * asset (native ETH), which is the common case and the one holders expect.
+   * DIVIDEND_SELF pays in the launching token instead.
+   */
+  dividendToken?: Address;
+  /** Minimum balance to qualify for dividends. */
+  minimumShareBalance?: bigint;
+}
+
+/**
+ * Build an UNSIGNED tax-token launch (FlapTaxTokenV3) via newTokenV6.
+ *
+ * Tax tokens are the only path on this chain where commissionReceiver exists,
+ * so this is also the only path that earns us anything — worth being honest
+ * about, because it means our incentive and the user's are not automatically
+ * aligned here. The tax rates are the user's to choose, capped, and never
+ * raised on their behalf.
+ */
+export function buildTaxLaunch(req: TaxLaunchRequest, dep: FlapDeployment = flapDeployment()): BuiltLaunch {
+  const name = req.name.trim();
+  const symbol = req.symbol.trim();
+  if (!name || name.length > MAX_NAME) throw new Error(`name must be 1-${MAX_NAME} chars`);
+  if (!symbol || symbol.length > MAX_SYMBOL) throw new Error(`symbol must be 1-${MAX_SYMBOL} chars`);
+  if (req.quoteAmt < 0n) throw new Error("quoteAmt cannot be negative");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(req.creator)) throw new Error("creator must be an address");
+
+  const base = LAUNCH_STYLES[req.style];
+  if (!base) throw new Error(`unknown launch style "${req.style}" — one of ${Object.keys(LAUNCH_STYLES).join(", ")}`);
+  const shape: TaxShape = { ...base, ...req.overrides };
+  validateTaxShape(shape);
+
+  // Dividend-paying tokens need an eligibility floor; the Portal enforces it and
+  // zero is not allowed. Default rather than demand it — an agent asking for a
+  // dividend token should not have to know the protocol's dust threshold.
+  const minShare = req.minimumShareBalance ?? (shape.dividendBps > 0 ? MIN_SHARE_BALANCE : 0n);
+  if (shape.dividendBps > 0 && minShare < MIN_SHARE_BALANCE) {
+    throw new Error(
+      `minimumShareBalance must be at least ${MIN_SHARE_BALANCE / 10n ** 18n} tokens when dividends are on — Portal reverts MinimumShareBalanceTooLow()`,
+    );
+  }
+
+  // Tax tokens carry the 7777 suffix and clone a different implementation, so
+  // the salt must be mined against THAT impl or the address will never match.
+  const mined = mineVanitySalt("7777", dep.tokenImplTaxedV3, dep.portal);
+
+  const params = {
+    name,
+    symbol,
+    meta: (req.meta ?? "").trim(),
+    dexThresh: DexThresh.FOUR_FIFTHS,
+    salt: mined.salt,
+    migratorType: MigratorType.V2, // mandatory on Robinhood Chain
+    quoteToken: ZERO,
+    quoteAmt: req.quoteAmt,
+    beneficiary: req.creator, // tax accrues to the creator, never to us
+    permitData: "0x" as Hex,
+    extensionID: ZERO_BYTES32,
+    extensionData: "0x" as Hex,
+    dexId: 0,
+    lpFeeProfile: V3LPFeeProfile.STANDARD,
+    buyTaxRate: shape.buyTaxRate,
+    sellTaxRate: shape.sellTaxRate,
+    taxDuration: shape.taxDurationSec,
+    antiFarmerDuration: shape.antiFarmerDurationSec,
+    mktBps: shape.mktBps,
+    deflationBps: shape.deflationBps,
+    dividendBps: shape.dividendBps,
+    lpBps: shape.lpBps,
+    minimumShareBalance: minShare,
+    dividendToken: req.dividendToken ?? ZERO, // zero => quote asset (native ETH)
+    commissionReceiver: commissionReceiver(),
+    tokenVersion: TokenVersion.TAXED_V3,
+  } as const;
+
+  return {
+    to: dep.portal,
+    data: encodeFunctionData({ abi: PORTAL_ABI, functionName: "newTokenV6", args: [params] }),
+    value: req.quoteAmt,
+    predictedToken: mined.address,
+    salt: mined.salt,
+    iterations: mined.iterations,
+    chainId: dep.chainId,
+  };
+}
+
 export interface SimulationResult {
   ok: boolean;
   /** The token address the Portal would actually create. */
@@ -377,14 +590,16 @@ export interface SimulationResult {
  */
 export async function simulateLaunch(built: BuiltLaunch, creator: Address, dep: FlapDeployment = flapDeployment()): Promise<SimulationResult> {
   const client = createPublicClient({ transport: http(dep.rpcUrl) });
-  const args = decodeFunctionData({ abi: PORTAL_ABI, data: built.data }).args as never;
+  // Dispatch on whichever entry point the build chose — newTokenV5 for standard,
+  // newTokenV6 for tax. Hardcoding one silently mis-simulates the other.
+  const decoded = decodeFunctionData({ abi: PORTAL_ABI, data: built.data });
 
   const run = async (overrideBalance?: bigint) =>
     client.simulateContract({
       address: built.to,
       abi: PORTAL_ABI,
-      functionName: "newTokenV5",
-      args,
+      functionName: decoded.functionName as "newTokenV5" | "newTokenV6",
+      args: decoded.args as never,
       value: built.value,
       account: creator,
       ...(overrideBalance != null ? { stateOverride: [{ address: creator, balance: overrideBalance }] } : {}),

@@ -3,12 +3,15 @@ import assert from "node:assert/strict";
 import { decodeFunctionData, parseEther } from "viem";
 import {
   buildStandardLaunch,
+  buildTaxLaunch,
   mineVanitySalt,
   predictTokenAddress,
   PORTAL_ABI,
   DexThresh,
   MigratorType,
   TokenVersion,
+  LAUNCH_STYLES,
+  MIN_SHARE_BALANCE,
   FLAP_ROBINHOOD_TESTNET as DEP,
 } from "../src/launch/flapPortal.js";
 
@@ -85,6 +88,86 @@ test("bad input is rejected before any salt is mined", () => {
   assert.throws(() => buildStandardLaunch({ ...req, name: "" }, DEP), /name must be/);
   assert.throws(() => buildStandardLaunch({ ...req, symbol: "" }, DEP), /symbol must be/);
   assert.throws(() => buildStandardLaunch({ ...req, creator: "nope" as never }, DEP), /creator/);
+});
+
+// --- tax tokens --------------------------------------------------------------
+
+test("every tax style targets the 7777 suffix and the V6 entry point", () => {
+  for (const style of ["marketing", "dividend", "deflationary", "liquidity"] as const) {
+    const built = buildTaxLaunch({ ...req, style }, DEP);
+    assert.ok(built.predictedToken.toLowerCase().endsWith("7777"), `${style} got ${built.predictedToken}`);
+    assert.equal(decodeFunctionData({ abi: PORTAL_ABI, data: built.data }).functionName, "newTokenV6", style);
+  }
+});
+
+test("each style routes tax where its name says it does", () => {
+  const routed = (style: "marketing" | "dividend" | "deflationary" | "liquidity") => {
+    const [p] = decodeFunctionData({ abi: PORTAL_ABI, data: buildTaxLaunch({ ...req, style }, DEP).data }).args as [
+      Record<string, number>,
+    ];
+    return p;
+  };
+  assert.equal(routed("marketing").mktBps, 10000);
+  assert.ok(routed("dividend").dividendBps > routed("dividend").mktBps);
+  assert.ok(routed("deflationary").deflationBps > routed("deflationary").mktBps);
+  assert.ok(routed("liquidity").lpBps > routed("liquidity").mktBps);
+});
+
+test("the tax split must sum to exactly 10000 bps", () => {
+  // The Portal reverts InvalidTaxDistribution(); catching it here saves the gas.
+  assert.throws(
+    () => buildTaxLaunch({ ...req, style: "marketing", overrides: { mktBps: 5000 } }, DEP),
+    /sum to exactly 10000/,
+  );
+  for (const style of ["marketing", "dividend", "deflationary", "liquidity"] as const) {
+    const s = LAUNCH_STYLES[style];
+    assert.equal(s.mktBps + s.deflationBps + s.dividendBps + s.lpBps, 10000, `${style} preset is malformed`);
+  }
+});
+
+test("tax rates are capped — an agent cannot build a 50% tax by fumbling a number", () => {
+  assert.throws(() => buildTaxLaunch({ ...req, style: "marketing", overrides: { buyTaxRate: 5000 } }, DEP), /exceeds the 1000bps/);
+  assert.throws(() => buildTaxLaunch({ ...req, style: "marketing", overrides: { sellTaxRate: 1001 } }, DEP), /exceeds the 1000bps/);
+  // At the ceiling exactly is allowed.
+  assert.ok(buildTaxLaunch({ ...req, style: "marketing", overrides: { buyTaxRate: 1000 } }, DEP).predictedToken);
+});
+
+test("a tax token with no tax is a mistake, not a standard token", () => {
+  assert.throws(
+    () => buildTaxLaunch({ ...req, style: "marketing", overrides: { buyTaxRate: 0, sellTaxRate: 0 } }, DEP),
+    /use the 'standard' style/,
+  );
+});
+
+test("dividend styles get the eligibility floor the Portal demands", () => {
+  // Discovered the hard way: 0 reverts MinimumShareBalanceTooLow() (0x6b9099a1).
+  const [p] = decodeFunctionData({ abi: PORTAL_ABI, data: buildTaxLaunch({ ...req, style: "dividend" }, DEP).data }).args as [
+    Record<string, bigint>,
+  ];
+  assert.ok(p.minimumShareBalance >= MIN_SHARE_BALANCE, `got ${p.minimumShareBalance}`);
+  assert.throws(() => buildTaxLaunch({ ...req, style: "dividend", minimumShareBalance: 1n }, DEP), /at least 10000 tokens/);
+});
+
+test("non-dividend styles do not carry an eligibility floor", () => {
+  const [p] = decodeFunctionData({ abi: PORTAL_ABI, data: buildTaxLaunch({ ...req, style: "marketing" }, DEP).data }).args as [
+    Record<string, bigint>,
+  ];
+  assert.equal(p.minimumShareBalance, 0n);
+});
+
+test("tax accrues to the creator, never to us", () => {
+  const [p] = decodeFunctionData({ abi: PORTAL_ABI, data: buildTaxLaunch({ ...req, style: "marketing" }, DEP).data }).args as [
+    Record<string, string>,
+  ];
+  assert.equal(p.beneficiary, CREATOR);
+});
+
+test("durations are bounded the way the contract bounds them", () => {
+  assert.throws(() => buildTaxLaunch({ ...req, style: "marketing", overrides: { taxDurationSec: 0n } }, DEP), /TaxDurationTooShort/);
+  assert.throws(
+    () => buildTaxLaunch({ ...req, style: "marketing", overrides: { antiFarmerDurationSec: 400n * 24n * 60n * 60n } }, DEP),
+    /AntiFarmerDurationTooLong/,
+  );
 });
 
 test("meta is optional — the chain accepts an empty metadata URI", () => {

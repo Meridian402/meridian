@@ -10,7 +10,7 @@ import { basisSnapshot } from "../signals/basis.js";
 import { carryQuote } from "../signals/carry.js";
 import { perpSnapshot } from "../signals/perpFeed.js";
 import { lpScores } from "../signals/lpScore.js";
-import { buildStandardLaunch, simulateLaunch, flapDeployment } from "../launch/flapPortal.js";
+import { buildStandardLaunch, buildTaxLaunch, simulateLaunch, flapDeployment, LAUNCH_STYLES, DIVIDEND_SELF } from "../launch/flapPortal.js";
 import { parseEther, formatEther } from "viem";
 
 const CHAIN_IDS = ["solana", "ethereum", "base", "polygon", "robinhood"] as const;
@@ -400,7 +400,7 @@ export function buildServer(): McpServer {
     {
       title: "Prepare a token launch on Robinhood Chain",
       description:
-        "Prepare a standard (non-tax) ERC-20 launch on Robinhood Chain via Flap's Portal, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet — this tool never signs, never holds funds, and never spends. The token address is deterministic (CREATE2) and is reported before signing. Tokens trade on a bonding curve and graduate to a Uniswap V2 pair at ~80% of supply sold; before graduation, transfers to or from any pool are blocked by the protocol.",
+        "Prepare a token launch on Robinhood Chain via Flap's Portal, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet — this tool never signs, never holds funds, and never spends. The token address is deterministic (CREATE2) and is reported before signing. Choose a style: 'standard' is a plain ERC-20 with no tax; the tax styles ('marketing', 'dividend', 'deflationary', 'liquidity') take a percentage of every trade and route it differently. Tokens trade on a bonding curve and graduate to a Uniswap V2 pair at ~80% of supply sold; before graduation, transfers to or from any pool are blocked by the protocol.",
       inputSchema: {
         name: z.string().min(1).max(64).describe("Token name, e.g. 'Meridian Test'"),
         symbol: z.string().min(1).max(16).describe("Ticker, e.g. MTEST"),
@@ -408,6 +408,12 @@ export function buildServer(): McpServer {
           .string()
           .regex(/^0x[0-9a-fA-F]{40}$/)
           .describe("The wallet that will sign, fund and own the launch. Must be the user's own wallet."),
+        style: z
+          .enum(["standard", "marketing", "dividend", "deflationary", "liquidity"])
+          .default("standard")
+          .describe(
+            "standard: plain ERC-20, no tax. marketing: trade tax funds the creator. dividend: tax is paid back to holders. deflationary: tax is burned. liquidity: tax deepens the pool.",
+          ),
         initialBuyEth: z
           .number()
           .min(0)
@@ -418,16 +424,46 @@ export function buildServer(): McpServer {
           .string()
           .optional()
           .describe("IPFS CID from Flap's upload API. Without it the token has no image or description in any terminal."),
+        buyTaxPct: z.number().min(0).max(10).optional().describe("Tax styles only. Percent taken on buys, max 10."),
+        sellTaxPct: z.number().min(0).max(10).optional().describe("Tax styles only. Percent taken on sells, max 10."),
+        taxDurationDays: z.number().int().min(1).max(36500).optional().describe("Tax styles only. How long the tax stays on."),
+        dividendsInOwnToken: z
+          .boolean()
+          .optional()
+          .describe("Dividend style only. True pays holders in the launched token; default pays in ETH."),
       },
     },
-    async ({ name, symbol, creator, initialBuyEth, meta }) => {
+    async ({ name, symbol, creator, style, initialBuyEth, meta, buyTaxPct, sellTaxPct, taxDurationDays, dividendsInOwnToken }) => {
       const dep = flapDeployment();
+      const common = { name, symbol, meta, creator: creator as `0x${string}`, quoteAmt: parseEther(String(initialBuyEth ?? 0)) };
       let built;
       try {
-        built = buildStandardLaunch(
-          { name, symbol, meta, creator: creator as `0x${string}`, quoteAmt: parseEther(String(initialBuyEth ?? 0)) },
-          dep,
-        );
+        if (style === "standard") {
+          // Tax knobs are meaningless without a tax; say so rather than
+          // silently ignoring them and handing back a token that does not do
+          // what the user just asked for.
+          if (buyTaxPct || sellTaxPct || dividendsInOwnToken) {
+            return json({
+              ok: false,
+              error: "the 'standard' style has no tax — pass style='marketing' (or dividend/deflationary/liquidity) to set tax rates",
+            });
+          }
+          built = buildStandardLaunch(common, dep);
+        } else {
+          const overrides: Record<string, number | bigint> = {};
+          if (buyTaxPct != null) overrides.buyTaxRate = Math.round(buyTaxPct * 100);
+          if (sellTaxPct != null) overrides.sellTaxRate = Math.round(sellTaxPct * 100);
+          if (taxDurationDays != null) overrides.taxDurationSec = BigInt(taxDurationDays) * 86400n;
+          built = buildTaxLaunch(
+            {
+              ...common,
+              style,
+              overrides,
+              ...(dividendsInOwnToken ? { dividendToken: DIVIDEND_SELF } : {}),
+            },
+            dep,
+          );
+        }
       } catch (e) {
         return json({ ok: false, error: (e as Error).message });
       }
@@ -446,13 +482,33 @@ export function buildServer(): McpServer {
         });
       }
 
+      const shape = style === "standard" ? null : { ...LAUNCH_STYLES[style], ...(buyTaxPct != null ? { buyTaxRate: Math.round(buyTaxPct * 100) } : {}), ...(sellTaxPct != null ? { sellTaxRate: Math.round(sellTaxPct * 100) } : {}) };
       return json({
         ok: true,
         network: dep.chainId === 4663 ? "robinhood-mainnet" : "robinhood-testnet",
         chainId: built.chainId,
+        style,
         tokenAddress: sim.token,
         addressMatchedPrediction: sim.matchesPrediction,
         explorer: `${dep.explorer}/address/${sim.token}`,
+        // Restate the economics in plain terms. The struct is 26 fields of
+        // basis points; a user signing this deserves to read what it means.
+        economics:
+          shape == null
+            ? { tax: "none", note: "a plain ERC-20 — no tax on any trade" }
+            : {
+                buyTax: `${shape.buyTaxRate / 100}%`,
+                sellTax: `${shape.sellTaxRate / 100}%`,
+                split: {
+                  toCreator: `${shape.mktBps / 100}%`,
+                  burned: `${shape.deflationBps / 100}%`,
+                  toHolders: `${shape.dividendBps / 100}%`,
+                  toLiquidity: `${shape.lpBps / 100}%`,
+                },
+                ...(shape.dividendBps > 0
+                  ? { dividendsPaidIn: dividendsInOwnToken ? "the launched token" : "ETH" }
+                  : {}),
+              },
         // What the user signs. Nothing here is broadcast by us.
         transaction: { to: built.to, data: built.data, value: String(built.value) },
         simulated: true,
