@@ -18,10 +18,10 @@ import type { TokenDeployment } from "./deployToken.js";
  * neither M nor R exists in that alphabet at any mining cost. The symbol is
  * what wallets display; the address only ever carries the chain id.
  */
-export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000001ee1"; // 7905
+export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000051c4d"; // 334925
 
 /** Where MERD lands. Deterministic, and verified before any broadcast. */
-export const MERD_ADDRESS: Address = "0x4663e0FE6D659A83C81AEAc0088a81b3072a8e9D";
+export const MERD_ADDRESS: Address = "0x4663b8F879484A671B98320808142a722FC7e703";
 
 /**
  * Receives the entire supply, and separately receives x402 revenue. One

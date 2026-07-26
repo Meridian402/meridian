@@ -1,0 +1,224 @@
+// Creating MERD's v4 pool and seeding it with the launch liquidity.
+//
+// This is the step that turns a deployed token into a tradeable one, and it is
+// the last thing that has to happen before any fee — ours or the LP's — has
+// anything to charge on.
+//
+// It builds UNSIGNED transactions rather than sending them. The supply lives in
+// the treasury, which is a cold wallet whose key we deliberately do not hold, so
+// the treasury has to sign this itself. That constraint is the point: the same
+// separation that stops a compromised agent key from touching the supply also
+// means the agent cannot seed the pool on its own.
+//
+// The pool's HOOK is part of its identity. Creating the pool with the wrong hook
+// address — or with none — produces a different pool that can never be given one
+// later, so the hook has to be deployed and its address known before any of this
+// runs.
+import {
+  encodeAbiParameters,
+  encodeFunctionData,
+  encodePacked,
+  parseAbiParameters,
+  parseAbi,
+  type Address,
+  type Hex,
+} from "viem";
+import { MERD_ADDRESS } from "./merd.js";
+import { V4_POSITION_MANAGER, PERMIT2, NATIVE_ETH, MERD_POOL_FEE, MERD_POOL_TICK_SPACING, type PoolKey } from "./v4Pool.js";
+
+/** v4-periphery action ids, already proven live on this chain by the LP guard. */
+const MINT_POSITION = "0x02";
+const SETTLE_PAIR = "0x0d";
+
+const Q96 = 2n ** 96n;
+
+/** Widest ticks usable at a given spacing. v4's own bound is ±887272. */
+export function fullRangeTicks(tickSpacing: number): { tickLower: number; tickUpper: number } {
+  const bound = Math.floor(887272 / tickSpacing) * tickSpacing;
+  return { tickLower: -bound, tickUpper: bound };
+}
+
+/** Integer square root. Newton's method, exact for our purposes. */
+function isqrt(n: bigint): bigint {
+  if (n < 0n) throw new Error("isqrt of a negative");
+  if (n < 2n) return n;
+  let x = n;
+  let y = (x + 1n) / 2n;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) / 2n;
+  }
+  return x;
+}
+
+/**
+ * The opening price, as v4 wants it.
+ *
+ * price is currency1 per currency0 — MERD per ETH, since native ETH is
+ * address(0) and always sorts first. sqrtPriceX96 = sqrt(amount1/amount0) * 2^96.
+ *
+ * Computed in integers on purpose. Doing this in floating point and converting
+ * at the end loses precision at exactly the magnitudes a launch uses (1e27
+ * against 1e18), and the opening price cannot be corrected afterwards — it is
+ * whatever the pool was created with, and every subsequent trade prices off it.
+ */
+export function sqrtPriceX96For(amount0Wei: bigint, amount1Wei: bigint): bigint {
+  if (amount0Wei <= 0n || amount1Wei <= 0n) throw new Error("both sides must be positive to set a price");
+  // sqrt(a1/a0) * 2^96 == sqrt(a1 * 2^192 / a0)
+  return isqrt((amount1Wei * Q96 * Q96) / amount0Wei);
+}
+
+/** What one MERD is worth, for a human check before signing. */
+export function openingPrice(amount0Wei: bigint, amount1Wei: bigint): { merdPerEth: number; ethPerMerd: number } {
+  const merdPerEth = Number(amount1Wei) / Number(amount0Wei);
+  return { merdPerEth, ethPerMerd: 1 / merdPerEth };
+}
+
+const POSITION_MANAGER_ABI = parseAbi([
+  "function initializePool(( address,address,uint24,int24,address ) key, uint160 sqrtPriceX96) payable returns (int24)",
+  "function modifyLiquidities(bytes unlockData, uint256 deadline) payable",
+  "function multicall(bytes[] data) payable returns (bytes[])",
+]);
+
+const ERC20_ABI = parseAbi(["function approve(address spender, uint256 amount) returns (bool)"]);
+const PERMIT2_ABI = parseAbi(["function approve(address token, address spender, uint160 amount, uint48 expiration)"]);
+
+export interface SeedPlan {
+  /** ETH put into the pool, in wei. */
+  ethWei: bigint;
+  /** MERD put into the pool, in wei. */
+  merdWei: bigint;
+  /** Who receives the LP position NFT. */
+  recipient: Address;
+  /** Deployed treasury hook. Part of the pool's identity — not optional. */
+  hook: Address;
+  /** Defaults to the widest usable range, which is what a launch wants. */
+  tickLower?: number;
+  tickUpper?: number;
+}
+
+export interface UnsignedTx {
+  to: Address;
+  data: Hex;
+  value: string;
+  description: string;
+}
+
+/**
+ * Liquidity for a full-range position holding these amounts.
+ *
+ * Takes the smaller of what each side supports, then a 1% haircut. That haircut
+ * is not superstition: the PositionManager pulls amounts at EXECUTION-time
+ * price, not at the price this was computed against, and the LP guard's first
+ * live re-center reverted on exactly this before the margin was added.
+ */
+export function liquidityFor(amount0Wei: bigint, amount1Wei: bigint, sqrtPriceX96: bigint, tickLower: number, tickUpper: number): bigint {
+  const sqrtA = sqrtAtTick(tickLower);
+  const sqrtB = sqrtAtTick(tickUpper);
+  const sqrtP = sqrtPriceX96;
+  if (sqrtP <= sqrtA || sqrtP >= sqrtB) throw new Error("opening price must sit inside the range");
+
+  // L from the token0 side: amount0 = L * (sqrtB - sqrtP) / (sqrtP * sqrtB)
+  const l0 = (amount0Wei * sqrtP * sqrtB) / (Q96 * (sqrtB - sqrtP));
+  // L from the token1 side: amount1 = L * (sqrtP - sqrtA)
+  const l1 = (amount1Wei * Q96) / (sqrtP - sqrtA);
+  const l = (l0 < l1 ? l0 : l1) * 99n / 100n;
+  if (l <= 0n) throw new Error("amounts too small to mint any liquidity");
+  return l;
+}
+
+/** sqrt(1.0001^tick) * 2^96, to the precision this needs. */
+function sqrtAtTick(tick: number): bigint {
+  const ratio = Math.pow(1.0001, tick / 2);
+  return BigInt(Math.floor(ratio * 2 ** 96));
+}
+
+/**
+ * Every transaction needed to go from "token deployed" to "pool trading",
+ * in order, unsigned.
+ *
+ * Approvals come first and are separate on purpose: v4 pulls ERC-20s through
+ * Permit2, which needs two grants (token -> Permit2, then Permit2 -> the
+ * PositionManager). Bundling them into a multicall would hide which step failed,
+ * and this sequence is signed once by a cold wallet that should be able to read
+ * each transaction for what it is.
+ */
+export function buildSeedTransactions(plan: SeedPlan): { key: PoolKey; sqrtPriceX96: bigint; txs: UnsignedTx[] } {
+  if (plan.hook === NATIVE_ETH) {
+    throw new Error("hook address is required — a pool created without it can never be given one later");
+  }
+  const { tickLower, tickUpper } = {
+    ...fullRangeTicks(MERD_POOL_TICK_SPACING),
+    ...(plan.tickLower != null && plan.tickUpper != null ? { tickLower: plan.tickLower, tickUpper: plan.tickUpper } : {}),
+  };
+
+  const key: PoolKey = {
+    currency0: NATIVE_ETH,
+    currency1: MERD_ADDRESS,
+    fee: MERD_POOL_FEE,
+    tickSpacing: MERD_POOL_TICK_SPACING,
+    hooks: plan.hook,
+  };
+  const sqrtPriceX96 = sqrtPriceX96For(plan.ethWei, plan.merdWei);
+  const liquidity = liquidityFor(plan.ethWei, plan.merdWei, sqrtPriceX96, tickLower, tickUpper);
+  const keyTuple = [key.currency0, key.currency1, key.fee, key.tickSpacing, key.hooks] as const;
+
+  const mintParams = encodeAbiParameters(
+    parseAbiParameters("(address,address,uint24,int24,address), int24, int24, uint256, uint128, uint128, address, bytes"),
+    [
+      keyTuple as never,
+      tickLower,
+      tickUpper,
+      liquidity,
+      // Caps, not targets: the position takes what the price requires and never
+      // more than this. Set to exactly what we intend to spend.
+      plan.ethWei,
+      plan.merdWei,
+      plan.recipient,
+      "0x",
+    ],
+  );
+  const settleParams = encodeAbiParameters(parseAbiParameters("address, address"), [key.currency0, key.currency1]);
+  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [
+    encodePacked(["bytes1", "bytes1"], [MINT_POSITION, SETTLE_PAIR]),
+    [mintParams, settleParams],
+  ]);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+  return {
+    key,
+    sqrtPriceX96,
+    txs: [
+      {
+        to: MERD_ADDRESS,
+        data: encodeFunctionData({ abi: ERC20_ABI, functionName: "approve", args: [PERMIT2, plan.merdWei] }),
+        value: "0",
+        description: `approve Permit2 to move ${plan.merdWei / 10n ** 18n} MERD`,
+      },
+      {
+        to: PERMIT2,
+        data: encodeFunctionData({
+          abi: PERMIT2_ABI,
+          functionName: "approve",
+          // uint160 max is the Permit2 convention for "no amount limit"; the
+          // expiry is what bounds it, and the mint below is the only spender.
+          args: [MERD_ADDRESS, V4_POSITION_MANAGER, (1n << 160n) - 1n, Math.floor(Date.now() / 1000) + 86_400],
+        }),
+        value: "0",
+        description: "allow the PositionManager to pull MERD through Permit2 (24h)",
+      },
+      {
+        to: V4_POSITION_MANAGER,
+        data: encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "initializePool", args: [keyTuple as never, sqrtPriceX96] }),
+        value: "0",
+        description: `create the ETH/MERD pool at ${MERD_POOL_FEE / 10_000}% with the treasury hook`,
+      },
+      {
+        to: V4_POSITION_MANAGER,
+        data: encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
+        value: plan.ethWei.toString(),
+        description: `seed the pool and mint the position to ${plan.recipient}`,
+      },
+    ],
+  };
+}
