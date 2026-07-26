@@ -373,6 +373,151 @@ contract MeridianTreasuryHookTest is Test {
     function _exactInZeroForOne() internal pure returns (SwapParams memory) {
         return SwapParams({zeroForOne: true, amountSpecified: -1_000_000, sqrtPriceLimitX96: 0});
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The two things the launch actually sells: a tax that only ever falls, and
+    // a split that lands exactly where it says. The sampled tests above check
+    // points on the curve; these check that nothing lives BETWEEN the points.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The schedule, re-derived independently of the contract's own arithmetic.
+    function _expected(uint256 elapsed) internal pure returns (uint16) {
+        if (elapsed < 600) return uint16(1000 - (700 * elapsed) / 600);
+        if (elapsed < 86_400) return 300;
+        uint256 into = elapsed - 86_400;
+        if (into >= 86_400) return 100;
+        return uint16(300 - (200 * into) / 86_400);
+    }
+
+    function _startClock(uint256 t0) internal {
+        vm.warp(t0);
+        vm.prank(address(pm));
+        hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+    }
+
+    function test_theCurveIsCorrectAtEverySecondOfTheRamp() public {
+        uint256 t0 = 1_000_000;
+        _startClock(t0);
+
+        // Every second of the anti-sniper window, not a sample of it. This is
+        // the phase a bot times to the second, so an off-by-one here is worth
+        // real money to somebody.
+        uint16 previous = 1000;
+        for (uint256 s = 0; s <= 600; s++) {
+            vm.warp(t0 + s);
+            (uint16 buyBps, uint16 sellBps) = hook.currentFeeBps(key);
+            assertEq(buyBps, _expected(s), "ramp diverges from the schedule");
+            assertEq(sellBps, buyBps, "both sides ramp together");
+            assertLe(buyBps, previous, "the rate must never rise");
+            previous = buyBps;
+        }
+        assertEq(previous, 300, "the ramp lands exactly on the plateau");
+    }
+
+    function test_theRateNeverRisesAcrossSeventyTwoHours() public {
+        uint256 t0 = 1_000_000;
+        _startClock(t0);
+
+        // A holder who bought at any moment must never wake to a higher tax.
+        // Stepping in minutes covers all three phases and both transitions.
+        uint16 previous = 1000;
+        for (uint256 s = 0; s <= 72 hours; s += 1 minutes) {
+            vm.warp(t0 + s);
+            (uint16 buyBps,) = hook.currentFeeBps(key);
+            assertEq(buyBps, _expected(s), "curve diverges");
+            assertLe(buyBps, previous, "the rate rose");
+            assertGe(buyBps, 100, "below the floor");
+            assertLe(buyBps, 1000, "above the cap");
+            previous = buyBps;
+        }
+        assertEq(previous, 100, "settles on the permanent floor");
+    }
+
+    function test_theExactBoundarySeconds() public {
+        uint256 t0 = 1_000_000;
+        _startClock(t0);
+
+        // Each phase change, to the second either side. Boundaries are where
+        // interpolation goes wrong, and none of these are sampled above.
+        uint16 r;
+        vm.warp(t0 + 599);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 302, "last second of the ramp: 1000 - floor(700*599/600)");
+        vm.warp(t0 + 600);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 300, "first second of the plateau, and it lands exactly on it");
+
+        vm.warp(t0 + 86_400 - 1);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 300, "last second of the plateau");
+        vm.warp(t0 + 86_400);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 300, "the taper begins AT the plateau rate, never below it");
+
+        // Integer division sets the taper's resolution: a 200 bps drop spread
+        // over 86,400 seconds cannot move until 200*into/86400 reaches 1, which
+        // takes 432 seconds. So the taper steps in ~7 minute increments rather
+        // than sliding every second. Not a defect — just the granularity — but
+        // worth pinning, because "it did not move for seven minutes" otherwise
+        // looks like a stuck schedule.
+        vm.warp(t0 + 86_400 + 431);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 300, "still 300 seven minutes in");
+        vm.warp(t0 + 86_400 + 432);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 299, "the taper's first actual step");
+
+        vm.warp(t0 + 172_800 - 1);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 101, "one bp above the floor at the last second of the taper");
+        vm.warp(t0 + 172_800);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 100, "and exactly the floor the moment the taper completes");
+        vm.warp(t0 + 3650 days);
+        (r,) = hook.currentFeeBps(key);
+        assertEq(r, 100, "still the floor a decade later");
+    }
+
+    function test_theSplitIsExactlyEightyTenTenAndLosesNoWei() public {
+        // Tested elsewhere as "the trader pays the same either way". Here:
+        // where the money actually GOES, to the wei.
+        address referrer = address(0xBEEF01);
+        int128 gross = 1_000_000_000;
+
+        vm.prank(address(pm));
+        (, int128 hookDelta) = hook.afterSwap(
+            stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000_000, gross), abi.encode(referrer)
+        );
+
+        uint256 fee = uint256(uint128(hookDelta));
+        assertEq(fee, uint256(uint128(gross)) * 1000 / 10_000, "10% of the output at launch");
+
+        uint256 toReferrer = pm.taken(referrer);
+        uint256 toTreasury = pm.taken(treasury);
+        uint256 toLps = pm.donated();
+
+        assertEq(toReferrer, fee / 10, "referral share is exactly 10% of the fee");
+        assertEq(toLps, fee / 10, "LP share is exactly 10% of the fee");
+        assertEq(toTreasury, fee - toReferrer - toLps, "the treasury takes the rest");
+        assertEq(toTreasury, fee * 80 / 100, "which is 80%");
+
+        // Nothing created, nothing destroyed: the three shares ARE the fee.
+        assertEq(toReferrer + toLps + toTreasury, fee, "the split must be conservative");
+    }
+
+    function test_roundingDustIsAccountedForAndNeverEscapes() public {
+        // A fee that does not divide by ten. Integer division must not leak a
+        // wei into nowhere, nor pay out more than was taken.
+        vm.prank(address(pm));
+        (, int128 hookDelta) = hook.afterSwap(
+            stranger, key, _exactInZeroForOne(), toBalanceDelta(-7, 9_999_999), abi.encode(address(0xBEEF01))
+        );
+
+        uint256 fee = uint256(uint128(hookDelta));
+        uint256 sum = pm.taken(address(0xBEEF01)) + pm.taken(treasury) + pm.donated();
+        assertEq(sum, fee, "every wei of the fee is accounted for");
+    }
+
 }
 
 contract MeridianTokenTest is Test {
