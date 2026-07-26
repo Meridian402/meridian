@@ -26,6 +26,12 @@ position-state.json
 scripts-pushState.sh
 _volprobe.mjs
 
+# One-off probes and spikes. The agent/_* prefix is a MIXED namespace — the
+# launchd-driven _merd-* jobs and the session-key spike are tracked product
+# scripts — so the throwaways get their own directory instead of a prefix rule
+# that would silently hide real work.
+agent/scratch/
+
 # launchd jobs are generated per-machine by agent/install-agents.sh, which fills
 # in absolute paths. Committing them would leak local paths and go stale on a move.
 agent/com.meridian.*.plist
