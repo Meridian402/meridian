@@ -8,6 +8,8 @@
 // address still reproduces, so that goes from a silent surprise to a red build.
 import type { Address, Hex } from "viem";
 import type { TokenDeployment } from "./deployToken.js";
+import type { HookDeployment } from "./deployHook.js";
+import { V4_POOL_MANAGER, NATIVE_ETH, MERD_POOL_FEE, MERD_POOL_TICK_SPACING, type PoolKey } from "./v4Pool.js";
 
 /**
  * The address was mined to begin 0x4663 — Robinhood Chain's chain id — so the
@@ -77,3 +79,60 @@ export const MERD: TokenDeployment = {
   treasury: MERD_TREASURY,
   salt: MERD_SALT,
 };
+
+/**
+ * Holds the hook's one and only authority: disableFeesForever(), which zeroes
+ * the fee permanently and can never raise it.
+ *
+ * The cold treasury rather than Merd's hot key, and the asymmetry is the reason.
+ * Needing to pull this switch within minutes is a remote scenario — it exists
+ * for a bug that makes the pool too expensive to trade, and the pool keeps
+ * trading either way. A compromised hot key permanently zeroing our revenue is
+ * the ordinary one. Between a slow remedy and a fast catastrophe, take the slow
+ * remedy; transferOwnership() is there if that trade ever stops making sense.
+ */
+export const MERD_HOOK_OWNER: Address = MERD_TREASURY;
+
+/**
+ * The hook, fully specified. Every field is in the init code, so this object IS
+ * the address — change one basis point and the hook lands somewhere else.
+ */
+export const MERD_HOOK: HookDeployment = {
+  poolManager: V4_POOL_MANAGER,
+  treasury: MERD_TREASURY,
+  owner: MERD_HOOK_OWNER,
+  schedule: MERD_FEE_SCHEDULE,
+};
+
+/**
+ * Where MERD_HOOK lands, recorded from a mine against the current build.
+ *
+ * The last four hex digits are not a vanity: 0x0044 is AFTER_SWAP |
+ * AFTER_SWAP_RETURNS_DELTA, the exact permissions this hook implements. v4 reads
+ * them straight out of the address, which is why the salt had to be mined at all.
+ *
+ * Not used AS the deploy target — the salt is re-mined at deploy time, because a
+ * stored salt goes stale silently when the contract or the compiler settings
+ * change. This is the tripwire for that: deployHook refuses to broadcast if the
+ * fresh mine disagrees with this line, and a test asserts it on every run.
+ */
+export const MERD_HOOK_ADDRESS: Address = "0x9f67875975D518AD71864A7164A1a788411F0044";
+
+/**
+ * The pool MERD will trade in. `hooks` is part of the pool's IDENTITY — a pool
+ * created with the wrong hook, or with none, is a different pool that can never
+ * be given one later, so this defaults to the mined address rather than making
+ * the caller remember it.
+ *
+ * Native ETH is address(0) and always sorts to currency0, which makes MERD
+ * currency1 and the price read as MERD per ETH.
+ */
+export function merdPoolKey(hooks: Address = MERD_HOOK_ADDRESS): PoolKey {
+  return {
+    currency0: NATIVE_ETH,
+    currency1: MERD_ADDRESS,
+    fee: MERD_POOL_FEE,
+    tickSpacing: MERD_POOL_TICK_SPACING,
+    hooks,
+  };
+}

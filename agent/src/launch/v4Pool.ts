@@ -16,7 +16,6 @@
 //   labelled, with the PoolManager read off the PositionManager on chain rather
 //   than copied from documentation.
 import type { Address } from "viem";
-import { MERD_ADDRESS } from "./merd.js";
 
 /** The v4 singleton. Every pool lives inside this one contract. */
 export const V4_POOL_MANAGER: Address = "0x8366a39CC670B4001A1121B8F6A443A643e40951";
@@ -51,19 +50,3 @@ export interface PoolKey {
  */
 export const MERD_POOL_FEE = 10_000; // 1.00%
 export const MERD_POOL_TICK_SPACING = 200;
-
-/**
- * The pool MERD will trade in. `hooks` is the treasury hook's mined address and
- * is part of the pool's IDENTITY — change it and this is a different pool, so
- * it cannot be added or swapped later. Pass the zero address to open the pool
- * with no hook at all, which is a permanent decision either way.
- */
-export function merdPoolKey(hooks: Address): PoolKey {
-  return {
-    currency0: NATIVE_ETH,
-    currency1: MERD_ADDRESS,
-    fee: MERD_POOL_FEE,
-    tickSpacing: MERD_POOL_TICK_SPACING,
-    hooks,
-  };
-}
