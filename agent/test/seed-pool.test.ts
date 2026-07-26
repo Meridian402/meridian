@@ -93,31 +93,61 @@ const plan = {
   hook: HOOK,
 };
 
-test("the sequence is approve, permit2, create, seed", () => {
+const MULTICALL_ABI = parseAbi(["function multicall(bytes[] data) payable returns (bytes[])"]);
+const INITIALIZE_ABI = parseAbi(["function initializePool((address,address,uint24,int24,address), uint160) payable returns (int24)"]);
+const MODIFY_ABI = parseAbi(["function modifyLiquidities(bytes unlockData, uint256 deadline) payable"]);
+
+/** The two inner calls bundled into the launch transaction. */
+function innerCalls(data: `0x${string}`): readonly `0x${string}`[] {
+  const [calls] = decodeFunctionData({ abi: MULTICALL_ABI, data }).args as [readonly `0x${string}`[]];
+  return calls;
+}
+
+test("the sequence is approve, permit2, then one atomic launch transaction", () => {
   const { txs } = buildSeedTransactions(plan);
-  assert.equal(txs.length, 4);
+  assert.equal(txs.length, 3, "creation and seeding are bundled, not separate");
   assert.equal(txs[0].to, MERD_ADDRESS, "first grant is on the token");
   assert.equal(txs[1].to, PERMIT2, "v4 pulls ERC-20s through Permit2");
   assert.equal(txs[2].to, V4_POSITION_MANAGER);
-  assert.equal(txs[3].to, V4_POSITION_MANAGER);
 });
 
-test("only the seeding transaction carries ETH, and exactly the planned amount", () => {
+test("creation and seeding are ATOMIC — the opening price cannot be moved in between", () => {
+  // The failure this prevents: a v4 pool with no liquidity still has a price,
+  // and a swap against an empty pool moves it. Two transactions leave a gap
+  // where anyone watching can set the opening price of a pool that is about to
+  // receive the entire supply.
+  const { txs, sqrtPriceX96 } = buildSeedTransactions(plan);
+  const calls = innerCalls(txs[2].data);
+  assert.equal(calls.length, 2, "exactly initializePool then modifyLiquidities");
+
+  const [tuple, price] = decodeFunctionData({ abi: INITIALIZE_ABI, data: calls[0] }).args as [
+    readonly [string, string, number, number, string],
+    bigint,
+  ];
+  assert.equal(price, sqrtPriceX96, "the pool opens at the price we computed");
+
+  // The second call must really be the mint, or "atomic" is a comment rather
+  // than a property.
+  const [unlockData] = decodeFunctionData({ abi: MODIFY_ABI, data: calls[1] }).args as [`0x${string}`, bigint];
+  assert.ok(unlockData.length > 2, "the mint carries its actions");
+  assert.equal(tuple[4], plan.hook);
+});
+
+test("only the launch transaction carries ETH, and exactly the planned amount", () => {
   const { txs } = buildSeedTransactions(plan);
   assert.equal(txs[0].value, "0");
   assert.equal(txs[1].value, "0");
-  assert.equal(txs[2].value, "0");
-  assert.equal(txs[3].value, plan.ethWei.toString(), "the pool is funded once, in the mint");
+  // multicall delegatecalls, so msg.value passes through to modifyLiquidities.
+  assert.equal(txs[2].value, plan.ethWei.toString(), "the pool is funded once");
 });
 
 test("the pool is created WITH the hook — it can never be added later", () => {
   const { key, txs } = buildSeedTransactions(plan);
   assert.equal(key.hooks, HOOK);
-  const decoded = decodeFunctionData({
-    abi: parseAbi(["function initializePool((address,address,uint24,int24,address), uint160) payable returns (int24)"]),
-    data: txs[2].data,
-  });
-  const [tuple] = decoded.args as [readonly [string, string, number, number, string], bigint];
+  const [tuple] = decodeFunctionData({ abi: INITIALIZE_ABI, data: innerCalls(txs[2].data)[0] }).args as [
+    readonly [string, string, number, number, string],
+    bigint,
+  ];
   assert.equal(tuple[4], HOOK, "the hook is part of the pool's identity");
   assert.equal(tuple[0], NATIVE_ETH, "native ETH sorts to currency0");
   assert.equal(tuple[1], MERD_ADDRESS);
@@ -129,11 +159,7 @@ test("seeding without a hook is refused outright", () => {
 
 test("the opening price in the creation call matches the amounts being seeded", () => {
   const { sqrtPriceX96, txs } = buildSeedTransactions(plan);
-  const decoded = decodeFunctionData({
-    abi: parseAbi(["function initializePool((address,address,uint24,int24,address), uint160) payable returns (int24)"]),
-    data: txs[2].data,
-  });
-  const [, price] = decoded.args as [unknown, bigint];
+  const [, price] = decodeFunctionData({ abi: INITIALIZE_ABI, data: innerCalls(txs[2].data)[0] }).args as [unknown, bigint];
   assert.equal(price, sqrtPriceX96);
   assert.equal(price, sqrtPriceX96For(plan.ethWei, plan.merdWei), "price must be derived from the seed, not guessed");
 });
@@ -169,7 +195,7 @@ test("the seed produces a valid price at whole-supply magnitudes", () => {
 test("the pinned seed builds against the pinned hook", () => {
   const { key, txs } = buildSeedTransactions(MERD_SEED);
   assert.equal(key.hooks, MERD_HOOK_ADDRESS);
-  assert.equal(txs[3].value, MERD_SEED.ethWei.toString());
+  assert.equal(txs[2].value, MERD_SEED.ethWei.toString());
 });
 
 test("the LP position — which is the entire supply — goes to the cold treasury", () => {

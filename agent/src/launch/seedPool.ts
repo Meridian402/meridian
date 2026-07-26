@@ -137,11 +137,23 @@ function sqrtAtTick(tick: number): bigint {
  * Every transaction needed to go from "token deployed" to "pool trading",
  * in order, unsigned.
  *
- * Approvals come first and are separate on purpose: v4 pulls ERC-20s through
- * Permit2, which needs two grants (token -> Permit2, then Permit2 -> the
- * PositionManager). Bundling them into a multicall would hide which step failed,
- * and this sequence is signed once by a cold wallet that should be able to read
- * each transaction for what it is.
+ * CREATION AND SEEDING ARE ONE TRANSACTION, and they have to be. A v4 pool that
+ * exists with no liquidity still has a price, and a swap against an empty pool
+ * moves that price without exchanging anything worth having. Left as two
+ * transactions, the gap between them is an open invitation: anyone watching can
+ * shift the opening price, and the mint that follows lands at their number
+ * instead of ours — pulling a lopsided mix of a supply that cannot be re-seeded.
+ * The PositionManager's multicall closes the gap, and it is still one signature.
+ *
+ * What that costs is knowing which of the two steps failed, since they now
+ * revert as one. That is a fair trade against handing a stranger the opening
+ * price of a pool holding the entire supply.
+ *
+ * The approvals stay separate. That was never about atomicity — v4 pulls ERC-20s
+ * through Permit2, which needs two grants (token -> Permit2, then Permit2 -> the
+ * PositionManager), and this sequence is signed by a cold wallet that should be
+ * able to read each grant for what it is. Neither approval is exploitable in the
+ * gap: they authorise the PositionManager and nobody else.
  */
 export function buildSeedTransactions(plan: SeedPlan): { key: PoolKey; sqrtPriceX96: bigint; txs: UnsignedTx[] } {
   if (plan.hook === NATIVE_ETH) {
@@ -209,15 +221,23 @@ export function buildSeedTransactions(plan: SeedPlan): { key: PoolKey; sqrtPrice
       },
       {
         to: V4_POSITION_MANAGER,
-        data: encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "initializePool", args: [keyTuple as never, sqrtPriceX96] }),
-        value: "0",
-        description: `create the ETH/MERD pool at ${MERD_POOL_FEE / 10_000}% with the treasury hook`,
-      },
-      {
-        to: V4_POSITION_MANAGER,
-        data: encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
+        // multicall delegatecalls each entry, so both run against the
+        // PositionManager's own storage with the caller and msg.value intact.
+        // initializePool ignores the value; modifyLiquidities spends it.
+        data: encodeFunctionData({
+          abi: POSITION_MANAGER_ABI,
+          functionName: "multicall",
+          args: [
+            [
+              encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "initializePool", args: [keyTuple as never, sqrtPriceX96] }),
+              encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
+            ],
+          ],
+        }),
         value: plan.ethWei.toString(),
-        description: `seed the pool and mint the position to ${plan.recipient}`,
+        description:
+          `create the ETH/MERD pool at ${MERD_POOL_FEE / 10_000}% with the treasury hook AND seed it in the same transaction, ` +
+          `minting the position to ${plan.recipient} — atomic so the opening price cannot be moved in between`,
       },
     ],
   };
