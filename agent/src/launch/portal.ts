@@ -83,6 +83,23 @@ export const TokenVersion = {
 } as const;
 export const V3LPFeeProfile = { STANDARD: 0, LOW: 1, HIGH: 2 } as const;
 
+/**
+ * Which DEX a graduating token's liquidity migrates to. The protocol allows
+ * three slots and maps them per chain (on BSC it is PancakeSwap, on Monad it is
+ * Uniswap / PancakeSwap / Monday) — but the docs never state the mapping for
+ * Robinhood Chain.
+ *
+ * Probed instead: on BOTH 4663 and 46630, dexId 0 simulates clean and dexId 1
+ * and 2 revert 0xead3ad50 (an undocumented error; not one of the 37 the docs
+ * name). So there is exactly one venue and no choice to make. Combined with
+ * V2_MIGRATOR being the only permitted migrator, every graduating token lands
+ * in the same V2-style pair, and Uniswap is the primary AMM on this chain.
+ *
+ * Worth holding onto: that is NOT where our own market-making book lives. The
+ * LP guard works Uniswap v4 pools; graduations land in v2.
+ */
+export const DEX_ID_ROBINHOOD = 0;
+
 // Robinhood Chain only permits TOKEN_V2_PERMIT and TOKEN_TAXED_V3; every other
 // version reverts with FeatureDisabled(). Only V2_MIGRATOR is supported, so a
 // graduating token lands in a Uniswap V2 pair (not v4, where our own
@@ -186,13 +203,20 @@ export const PORTAL_ABI = [
     outputs: [{ name: "enabled", type: "bool" }, { name: "curveType", type: "uint8" }, { name: "dexThresh", type: "uint256" }],
   },
   {
+    // NOTHING is indexed. The docs present creator and token as the identifying
+    // fields, which reads like they would be — but a real log on chain 4663
+    // carries exactly one topic (the signature), so every field lives in data.
+    // Declaring them indexed still matches topic0, so getLogs returns rows
+    // normally and only the DECODE is wrong: name and symbol come back right
+    // while creator and token are silently garbage. Verified against a real
+    // launch before this was corrected.
     type: "event",
     name: "TokenCreated",
     inputs: [
       { name: "timestamp", type: "uint256", indexed: false },
-      { name: "creator", type: "address", indexed: true },
+      { name: "creator", type: "address", indexed: false },
       { name: "nonce", type: "uint256", indexed: false },
-      { name: "token", type: "address", indexed: true },
+      { name: "token", type: "address", indexed: false },
       { name: "name", type: "string", indexed: false },
       { name: "symbol", type: "string", indexed: false },
       { name: "meta", type: "string", indexed: false },
@@ -325,7 +349,7 @@ export function buildStandardLaunch(req: LaunchRequest, dep: LaunchpadDeployment
     permitData: "0x" as Hex,
     extensionID: ZERO_BYTES32,
     extensionData: "0x" as Hex,
-    dexId: 0,
+    dexId: DEX_ID_ROBINHOOD, // the only enabled slot on this chain (probed)
     lpFeeProfile: V3LPFeeProfile.STANDARD,
     // Tax-only fields, unused at taxRate 0. antiFarmerDuration still applies:
     // it's the post-graduation window during which transfers to pools other
@@ -536,7 +560,7 @@ export function buildTaxLaunch(req: TaxLaunchRequest, dep: LaunchpadDeployment =
     permitData: "0x" as Hex,
     extensionID: ZERO_BYTES32,
     extensionData: "0x" as Hex,
-    dexId: 0,
+    dexId: DEX_ID_ROBINHOOD, // the only enabled slot on this chain (probed)
     lpFeeProfile: V3LPFeeProfile.STANDARD,
     buyTaxRate: shape.buyTaxRate,
     sellTaxRate: shape.sellTaxRate,
