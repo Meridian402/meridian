@@ -1112,11 +1112,19 @@ async function replaySessionRequest(req: Request, res: Response) {
 app.get("/mcp", replaySessionRequest);
 app.delete("/mcp", replaySessionRequest);
 
-// The public "thoughts" feed narrates what the house agent ACTUALLY does:
-// market-making (see MarketMakingStrategy). The momentum `strategy` singleton
-// stays wired to meridian_suggest_route for callers who want a rotation route,
-// but it no longer drives the live desk — that was showing momentum reasoning
-// while the wallet was market-making.
+// The public "thoughts" feed is narrated by ResearchStrategy: every cycle it
+// surfaces real, measured research rather than reasoning about a position.
+// The momentum `strategy` singleton stays wired to meridian_suggest_route for
+// callers who want a rotation route, but it does not drive the live desk — that
+// was showing momentum reasoning while the wallet was market-making.
+//
+// Whatever is passed here MUST be narrate-only. startAgentLoop can execute, so
+// the single thing standing between this line and autonomous trading is that
+// the strategy plugged into it only ever returns `hold`. ResearchStrategy has
+// exactly one return statement and it is a hold. Two earlier narrators kept for
+// the same reason are MarketMakingStrategy (superseded by this one) and
+// IdleStrategy — the latter is a deliberate no-op kept as a drop-in kill switch
+// after an uncontrolled re-entry bought 68,702.5 $INDEX with real ETH.
 startAgentLoop(market, new ResearchStrategy(), decisionLog, config.agentThinkIntervalMs);
 startLpGuard();
 startLpAllocator();
