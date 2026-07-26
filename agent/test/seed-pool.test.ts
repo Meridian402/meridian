@@ -9,7 +9,7 @@ import {
   poolIdFor,
   openingPrice,
 } from "../src/launch/seedPool.js";
-import { MERD_ADDRESS, MERD, MERD_SEED, MERD_HOOK_ADDRESS } from "../src/launch/merd.js";
+import { MERD_ADDRESS, MERD, MERD_SEED, MERD_HOOK_ADDRESS, MERD_LOCK_ADDRESS } from "../src/launch/merd.js";
 import { V4_POSITION_MANAGER, PERMIT2, NATIVE_ETH } from "../src/launch/v4Pool.js";
 
 /**
@@ -199,10 +199,13 @@ test("the pinned seed builds against the pinned hook", () => {
   assert.equal(txs[2].value, MERD_SEED.ethWei.toString());
 });
 
-test("the LP position — which is the entire supply — goes to the cold treasury", () => {
-  // The NFT this mints holds all of MERD. It must not land on a hot key, and
-  // it must be locked before anyone is invited to trade against it.
-  assert.equal(MERD_SEED.recipient, MERD.treasury);
+test("the LP position — which is the entire supply — goes to the lock, not a wallet", () => {
+  // The NFT this mints holds all of MERD. It is minted STRAIGHT into the lock:
+  // no key holds it, not even briefly, so there is no window needing a second
+  // signature that could be delayed, forgotten or lost. This test previously
+  // asserted the treasury, which was the earlier and worse design.
+  assert.equal(MERD_SEED.recipient, MERD_LOCK_ADDRESS);
+  assert.notEqual(MERD_SEED.recipient, MERD.treasury, "a wallet must never hold the position");
 });
 
 // ── the squat check ──────────────────────────────────────────────────────────

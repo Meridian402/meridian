@@ -9,7 +9,15 @@
 import type { Address, Hex } from "viem";
 import type { TokenDeployment } from "./deployToken.js";
 import type { HookDeployment } from "./deployHook.js";
-import { V4_POOL_MANAGER, NATIVE_ETH, MERD_POOL_FEE, MERD_POOL_TICK_SPACING, type PoolKey } from "./v4Pool.js";
+import type { LockDeployment } from "./deployLock.js";
+import {
+  V4_POOL_MANAGER,
+  V4_POSITION_MANAGER,
+  NATIVE_ETH,
+  MERD_POOL_FEE,
+  MERD_POOL_TICK_SPACING,
+  type PoolKey,
+} from "./v4Pool.js";
 
 /**
  * The address was mined to begin 0x4663 — Robinhood Chain's chain id — so the
@@ -119,6 +127,30 @@ export const MERD_HOOK: HookDeployment = {
 export const MERD_HOOK_ADDRESS: Address = "0x9f67875975D518AD71864A7164A1a788411F0044";
 
 /**
+ * The lock that will hold MERD's position, fully specified.
+ *
+ * Both beneficiaries are the treasury, with A taking the whole share: creator
+ * and platform are the same party here. The two-address shape stays because it
+ * is immutable — a future launch that wants to split fees with its creator uses
+ * the same contract, and this one simply points both ends at itself.
+ */
+export const MERD_LOCK: LockDeployment = {
+  positionManager: V4_POSITION_MANAGER,
+  currency0: NATIVE_ETH,
+  currency1: MERD_ADDRESS,
+  beneficiaryA: MERD_TREASURY,
+  beneficiaryB: MERD_TREASURY,
+  shareABps: 10_000,
+};
+
+/**
+ * Where MERD_LOCK lands. Deterministic, and needed as a VALUE before the launch
+ * transaction can be built at all, because that transaction names it as the
+ * position's owner. A test asserts it still reproduces from the current build.
+ */
+export const MERD_LOCK_ADDRESS: Address = "0x184948C404573e2E3940302be9c43FB586193cbd";
+
+/**
  * What goes into the pool on day one.
  *
  * THE WHOLE SUPPLY, against one ETH. Nothing is held back — no treasury
@@ -142,18 +174,25 @@ export const MERD_HOOK_ADDRESS: Address = "0x9f67875975D518AD71864A7164A1a788411
  * unlocked position here is not a risk, it is a rug with extra steps — locking
  * it is not optional, and MeridianPositionLock is what it exists for.
  *
- * Note the ORDER that implies. The position is minted to the treasury and then
- * sent to the lock with safeTransferFrom, rather than minted to the lock
- * directly: v4's PositionManager mints with _mint and never calls
- * onERC721Received, so a position minted straight there would be owned but
- * unrecorded. The lock has lockExisting() to recover exactly that case, but not
- * needing it is better than needing it.
+ * SO THE POSITION IS MINTED STRAIGHT INTO THE LOCK. The recipient below is the
+ * lock's address, not a wallet, and the supply is never held by a key at any
+ * point. The alternative — mint to the treasury, then safeTransferFrom into the
+ * lock — leaves a window where a cold wallet holds an NFT worth every token in
+ * existence, and closing that window needs a second cold signature that can be
+ * delayed, forgotten, or lost. Minting direct has no such window.
+ *
+ * The cost is one loose end rather than one window: v4's PositionManager mints
+ * with _mint and never calls onERC721Received, so the lock will not know its own
+ * tokenId until lockExisting() is called with it. That is a fee-collection
+ * detail, not a custody one. The NFT is already inside a contract with no
+ * transfer function from the moment it is minted, so it cannot go anywhere while
+ * we sort it out, and anyone may make the call.
  */
 export const MERD_SEED = {
   ethWei: 1_000_000_000_000_000_000n, // 1 ETH
   merdWei: 1_000_000_000n * 10n ** 18n, // the entire supply
-  /** Receives the LP position NFT. Cold, and the only wallet holding supply. */
-  recipient: MERD_TREASURY,
+  /** The lock, not a wallet. No key ever holds the position. */
+  recipient: MERD_LOCK_ADDRESS,
   hook: MERD_HOOK_ADDRESS,
 } as const;
 
