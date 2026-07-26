@@ -56,7 +56,7 @@ contract MeridianTreasuryHookTest is Test {
         address target = address(flags | (uint160(0x4444) << 20));
         deployCodeTo(
             "MeridianTreasuryHook.sol:MeridianTreasuryHook",
-            abi.encode(IPoolManager(address(pm)), treasury, owner),
+            abi.encode(IPoolManager(address(pm)), treasury, owner, uint16(1000), uint16(300), uint16(1000), uint16(300), uint64(48 hours)),
             target
         );
         hook = MeridianTreasuryHook(target);
@@ -66,41 +66,8 @@ contract MeridianTreasuryHookTest is Test {
 
     // ── the promise a trader relies on ───────────────────────────────────────
 
-    function test_shipsDisabled() public view {
-        assertEq(hook.buyFeeBps(), 0, "the pool must open with no buy fee");
-        assertEq(hook.sellFeeBps(), 0, "the pool must open with no sell fee");
-    }
 
-    function test_capCannotBeRaised() public {
-        // There is no setter for MAX_FEE_BPS. This is the whole trust model:
-        // a trader reads one constant and knows the worst case, permanently.
-        assertEq(hook.MAX_FEE_BPS(), 500);
-        vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(MeridianTreasuryHook.FeeAboveCap.selector, uint16(501), uint16(500)));
-        hook.setFees(501, 300);
-        vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(MeridianTreasuryHook.FeeAboveCap.selector, uint16(501), uint16(500)));
-        hook.setFees(300, 501);
-    }
 
-    function test_onlyOwnerMovesTheFee() public {
-        vm.prank(stranger);
-        vm.expectRevert(MeridianTreasuryHook.NotOwner.selector);
-        hook.setFees(50, 50);
-    }
-
-    function test_renouncingFreezesTheFeeForever() public {
-        vm.startPrank(owner);
-        hook.setFees(50, 50);
-        hook.renounceOwnership();
-        vm.stopPrank();
-
-        vm.prank(owner);
-        vm.expectRevert(MeridianTreasuryHook.NotOwner.selector);
-        hook.setFees(0, 0);
-        assertEq(hook.buyFeeBps(), 50);
-        assertEq(hook.sellFeeBps(), 50);
-    }
 
     // ── who may call the hook ────────────────────────────────────────────────
 
@@ -112,113 +79,131 @@ contract MeridianTreasuryHookTest is Test {
 
     // ── the fee itself ───────────────────────────────────────────────────────
 
-    function test_takesNothingWhileDisabled() public {
-        vm.prank(address(pm));
-        (, int128 d) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1000, 900), "");
-        assertEq(d, 0);
-        assertEq(pm.lastTakeAmount(), 0, "a disabled hook must not touch the swap");
-    }
 
-    function test_exactInputChargesOnTheOutputCurrency() public {
-        vm.prank(owner);
-        hook.setFees(300, 300); // 3% / 3%
 
-        // exactIn, zeroForOne: user pays currency0, receives currency1.
-        // Unspecified side is currency1, so the fee comes out of what they get.
-        vm.prank(address(pm));
-        (, int128 d) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 900_000), "");
 
-        assertEq(uint128(d), 27_000, "3% of the 900000 received");
-        assertEq(pm.lastTakeAmount(), 27_000);
-        assertEq(pm.lastTakeTo(), treasury);
-        assertEq(Currency.unwrap(pm.lastTakeCurrency()), Currency.unwrap(c1));
-    }
 
-    function test_exactOutputIsAlsoCharged() public {
-        // Otherwise exact-output swaps would be a free lane around the fee.
-        vm.prank(owner);
-        hook.setFees(300, 300);
-
-        // exactOut, zeroForOne: specified is the output (currency1), so the
-        // unspecified side is currency0 — the input, a negative delta.
-        SwapParams memory p = SwapParams({zeroForOne: true, amountSpecified: 900_000, sqrtPriceLimitX96: 0});
-        vm.prank(address(pm));
-        (, int128 d) = hook.afterSwap(stranger, key, p, toBalanceDelta(-1_000_000, 900_000), "");
-
-        assertEq(uint128(d), 30_000, "3% of the 1000000 paid");
-        assertEq(Currency.unwrap(pm.lastTakeCurrency()), Currency.unwrap(c0));
-    }
-
-    function test_dustRoundsToNothingRatherThanReverting() public {
-        vm.prank(owner);
-        hook.setFees(1, 1); // 0.01%
-        vm.prank(address(pm));
-        (, int128 d) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-100, 90), "");
-        assertEq(d, 0, "a swap too small to fee must still succeed");
-        assertEq(pm.lastTakeAmount(), 0);
-    }
-
-    function test_feeNeverExceedsTheCapEvenOnHugeSwaps() public {
-        // Read the cap BEFORE pranking: vm.prank applies to the next call, and
-        // a view call in the argument list would consume it.
-        uint16 cap = hook.MAX_FEE_BPS();
-        vm.prank(owner);
-        hook.setFees(cap, cap);
-        vm.prank(address(pm));
-        (, int128 d) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1e18, 1e18), "");
-        assertLe(uint256(uint128(d)), uint256(1e18) / 20, "never more than 5% of the swap");
-    }
 
 
     // ── the buy / sell split ─────────────────────────────────────────────────
 
-    function test_buyAndSellAreChargedIndependently() public {
-        // Asymmetric on purpose here, so a bug that read one rate for both
-        // directions cannot pass. The launch config is 3/3, but the mechanism
-        // has to be right before the numbers matter.
-        vm.prank(owner);
-        hook.setFees(300, 500); // 3% buy, 5% sell
 
-        // BUY: zeroForOne, ETH(currency0) -> MERD(currency1). Fee off the output.
-        vm.prank(address(pm));
-        (, int128 buyFee) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
-        assertEq(uint128(buyFee), 30_000, "3% on a buy");
 
-        // SELL: !zeroForOne, MERD -> ETH. Unspecified side is currency0.
-        SwapParams memory sell = SwapParams({zeroForOne: false, amountSpecified: -1_000_000, sqrtPriceLimitX96: 0});
-        vm.prank(address(pm));
-        (, int128 sellFee) = hook.afterSwap(stranger, key, sell, toBalanceDelta(1_000_000, -1_000_000), "");
-        assertEq(uint128(sellFee), 50_000, "5% on a sell");
+
+
+    // ── the decay curve ──────────────────────────────────────────────────────
+
+    function test_opensAtTenPercentBothWays() public view {
+        (uint16 buy, uint16 sell) = hook.currentFeeBps();
+        assertEq(buy, 1000, "10% on the first buy");
+        assertEq(sell, 1000, "10% on the first sell");
     }
 
-    function test_theLaunchConfigIsSymmetric() public {
-        // What actually ships: 3% either way.
-        vm.prank(owner);
-        hook.setFees(300, 300);
+    function test_theClockStartsOnTheFirstSwapNotAtDeploy() public {
+        // The sniper window is measured from the first trade. If the clock ran
+        // from deployment, a delay between deploying and opening the pool would
+        // burn the protection before anyone could trade.
+        assertEq(hook.decayStartedAt(), 0);
+        assertEq(hook.decayEndsAt(), 0);
 
+        vm.warp(block.timestamp + 30 days); // a long, irrelevant delay
         vm.prank(address(pm));
-        (, int128 buyFee) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
 
-        SwapParams memory sell = SwapParams({zeroForOne: false, amountSpecified: -1_000_000, sqrtPriceLimitX96: 0});
-        vm.prank(address(pm));
-        (, int128 sellFee) = hook.afterSwap(stranger, key, sell, toBalanceDelta(1_000_000, -1_000_000), "");
-
-        assertEq(uint128(buyFee), 30_000);
-        assertEq(uint128(sellFee), 30_000);
-        assertEq(buyFee, sellFee, "3:3 must cost the same in both directions");
+        assertEq(hook.decayStartedAt(), uint64(block.timestamp));
+        (uint16 buy,) = hook.currentFeeBps();
+        assertEq(buy, 1000, "still the full opening rate at the first trade");
     }
 
-    function test_oneSideCanBeFreeWithoutFreeingTheOther() public {
-        // A pool that is free to enter and costly to leave is the shape of a
-        // trap. Nothing stops an owner building one, so it should at least be
-        // visible and deliberate rather than an accident of a single setter.
+    function test_decaysLinearlyToThreePercent() public {
+        vm.prank(address(pm));
+        hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        uint256 t0 = block.timestamp;
+
+        vm.warp(t0 + 24 hours); // halfway
+        (uint16 mid,) = hook.currentFeeBps();
+        assertEq(mid, 650, "halfway between 10% and 3%");
+
+        vm.warp(t0 + 48 hours); // the floor
+        (uint16 endBuy, uint16 endSell) = hook.currentFeeBps();
+        assertEq(endBuy, 300);
+        assertEq(endSell, 300);
+    }
+
+    function test_neverDecaysBelowTheFloor() public {
+        vm.prank(address(pm));
+        hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        vm.warp(block.timestamp + 3650 days); // ten years later
+        (uint16 buy, uint16 sell) = hook.currentFeeBps();
+        assertEq(buy, 300, "3% is the floor, forever");
+        assertEq(sell, 300);
+    }
+
+    function test_theRateChargedMatchesTheCurve() public {
+        // Opening trade: 10% of the 1,000,000 received.
+        vm.prank(address(pm));
+        (, int128 first) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(uint128(first), 100_000, "10% at launch");
+
+        vm.warp(block.timestamp + 48 hours);
+        vm.prank(address(pm));
+        (, int128 later) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(uint128(later), 30_000, "3% once decayed");
+    }
+
+    function test_sellsAreChargedOnTheirOwnSchedule() public {
+        SwapParams memory sell = SwapParams({zeroForOne: false, amountSpecified: -1_000_000, sqrtPriceLimitX96: 0});
+        vm.prank(address(pm));
+        (, int128 d) = hook.afterSwap(stranger, key, sell, toBalanceDelta(1_000_000, -1_000_000), "");
+        assertEq(uint128(d), 100_000, "10% on an opening sell");
+        assertEq(Currency.unwrap(pm.lastTakeCurrency()), Currency.unwrap(c0), "sell fee taken in currency0");
+    }
+
+    // ── what nobody can do ───────────────────────────────────────────────────
+
+    function test_nobodyCanChangeTheSchedule() public {
+        // The whole trust model: there is no setter. If one is ever added, this
+        // is the test that has to be deleted first.
+        bytes4[3] memory forbidden = [
+            bytes4(keccak256("setFees(uint16,uint16)")),
+            bytes4(keccak256("setFeeBps(uint16)")),
+            bytes4(keccak256("setDecaySeconds(uint64)"))
+        ];
+        for (uint256 i = 0; i < forbidden.length; i++) {
+            vm.prank(owner);
+            (bool ok,) = address(hook).call(abi.encodeWithSelector(forbidden[i], uint16(1000), uint16(1000)));
+            assertFalse(ok, "a fee setter exists");
+        }
+    }
+
+    function test_aRisingScheduleCannotBeDeployed() public {
+        // A rate that goes UP on holders after they buy is the most hostile
+        // thing this contract could be configured to do.
+        vm.expectRevert(MeridianTreasuryHook.EndAboveStart.selector);
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 300, 1000, 300, 300, 48 hours);
+    }
+
+    function test_anOpeningRateAboveTheCapCannotBeDeployed() public {
+        vm.expectRevert(abi.encodeWithSelector(MeridianTreasuryHook.FeeAboveCap.selector, uint16(1001), uint16(1000)));
+        new MeridianTreasuryHook(IPoolManager(address(pm)), treasury, owner, 1001, 300, 300, 300, 48 hours);
+    }
+
+    function test_theOnlyLeverMakesTradingCheaper() public {
         vm.prank(owner);
-        hook.setFees(0, 300);
+        hook.disableFeesForever();
+        (uint16 buy, uint16 sell) = hook.currentFeeBps();
+        assertEq(buy, 0);
+        assertEq(sell, 0);
 
         vm.prank(address(pm));
-        (, int128 buyFee) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
-        assertEq(buyFee, 0, "buy side disabled");
-        assertEq(pm.lastTakeAmount(), 0);
+        (, int128 d) = hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
+        assertEq(d, 0, "disabled means genuinely free, not merely lower");
+    }
+
+    function test_onlyOwnerCanDisable() public {
+        vm.prank(stranger);
+        vm.expectRevert(MeridianTreasuryHook.NotOwner.selector);
+        hook.disableFeesForever();
     }
 
     function _exactInZeroForOne() internal pure returns (SwapParams memory) {
