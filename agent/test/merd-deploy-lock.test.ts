@@ -7,10 +7,10 @@ import {
   assertDeployable,
   buildLockExistingTransaction,
   type LockDeployment,
-} from "../src/launch/deployLock.js";
-import { MERD_LOCK, MERD_LOCK_ADDRESS, MERD_SEED, MERD_TREASURY, MERD_ADDRESS } from "../src/launch/merd.js";
-import { buildSeedTransactions } from "../src/launch/seedPool.js";
-import { V4_POSITION_MANAGER, V4_POOL_MANAGER, NATIVE_ETH } from "../src/launch/v4Pool.js";
+} from "../src/merd/deployLock.js";
+import { MERD_LOCK, MERD_LOCK_ADDRESS, MERD_SEED, MERD_TREASURY, MERD_ADDRESS } from "../src/merd/merd.js";
+import { buildSeedTransactions } from "../src/merd/seedPool.js";
+import { V4_POSITION_MANAGER, V4_POOL_MANAGER, NATIVE_ETH } from "../src/merd/v4Pool.js";
 
 /**
  * The lock's address is an INPUT to the launch transaction — the mint names it

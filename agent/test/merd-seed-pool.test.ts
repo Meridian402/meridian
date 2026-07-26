@@ -8,9 +8,9 @@ import {
   buildSeedTransactions,
   poolIdFor,
   openingPrice,
-} from "../src/launch/seedPool.js";
-import { MERD_ADDRESS, MERD, MERD_SEED, MERD_HOOK_ADDRESS, MERD_LOCK_ADDRESS } from "../src/launch/merd.js";
-import { V4_POSITION_MANAGER, PERMIT2, NATIVE_ETH } from "../src/launch/v4Pool.js";
+} from "../src/merd/seedPool.js";
+import { MERD_ADDRESS, MERD, MERD_SEED, MERD_HOOK_ADDRESS, MERD_LOCK_ADDRESS } from "../src/merd/merd.js";
+import { V4_POSITION_MANAGER, PERMIT2, NATIVE_ETH } from "../src/merd/v4Pool.js";
 
 /**
  * The opening price cannot be corrected. Whatever the pool is created with is

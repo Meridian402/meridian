@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getAddress } from "viem";
-import { MERD, MERD_ADDRESS, MERD_SALT, MERD_TREASURY } from "../src/launch/merd.js";
-import { predictTokenAddress } from "../src/launch/deployToken.js";
+import { MERD, MERD_ADDRESS, MERD_SALT, MERD_TREASURY } from "../src/merd/merd.js";
+import { predictTokenAddress } from "../src/merd/deployToken.js";
 
 /**
  * The salt is only correct for one exact set of constructor arguments. Change
@@ -69,24 +69,24 @@ test("the salt is the mined value, not a placeholder", () => {
 // ── wallet topology ──────────────────────────────────────────────────────────
 
 test("the three wallet roles are three distinct addresses", async () => {
-  const { WALLET_ROLES } = await import("../src/launch/wallets.js");
+  const { WALLET_ROLES } = await import("../src/merd/wallets.js");
   const seen = new Set(Object.values(WALLET_ROLES).map((a) => a.toLowerCase()));
   assert.equal(seen.size, 3, "a collapsed role means one compromise costs more than it has to");
 });
 
 test("the treasury is the wallet that holds the supply", async () => {
-  const { TREASURY_WALLET } = await import("../src/launch/wallets.js");
+  const { TREASURY_WALLET } = await import("../src/merd/wallets.js");
   assert.equal(MERD.treasury, TREASURY_WALLET, "MERD's supply must land in the treasury, not elsewhere");
 });
 
 test("neither the agent nor the deployer is the treasury", async () => {
-  const { MERD_AGENT_WALLET, DEPLOYER_WALLET, TREASURY_WALLET } = await import("../src/launch/wallets.js");
+  const { MERD_AGENT_WALLET, DEPLOYER_WALLET, TREASURY_WALLET } = await import("../src/merd/wallets.js");
   assert.notEqual(MERD_AGENT_WALLET.toLowerCase(), TREASURY_WALLET.toLowerCase());
   assert.notEqual(DEPLOYER_WALLET.toLowerCase(), TREASURY_WALLET.toLowerCase());
 });
 
 test("the retired wallet is not wired into any live role", async () => {
-  const { WALLET_ROLES, RETIRED_WALLET } = await import("../src/launch/wallets.js");
+  const { WALLET_ROLES, RETIRED_WALLET } = await import("../src/merd/wallets.js");
   for (const [role, addr] of Object.entries(WALLET_ROLES)) {
     assert.notEqual(addr.toLowerCase(), RETIRED_WALLET.toLowerCase(), `${role} points at the retired wallet`);
   }
@@ -95,7 +95,7 @@ test("the retired wallet is not wired into any live role", async () => {
 // ── the fee schedule ─────────────────────────────────────────────────────────
 
 test("the schedule is 10% -> 3% -> 1% across three phases", async () => {
-  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/merd/merd.js");
   assert.equal(s.buyLaunchBps, 1000);
   assert.equal(s.buyPlateauBps, 300);
   assert.equal(s.buyFloorBps, 100);
@@ -107,26 +107,26 @@ test("the schedule is 10% -> 3% -> 1% across three phases", async () => {
 test("the schedule only ever falls", async () => {
   // A rate that rises on holders after they buy is the hostile configuration.
   // The hook rejects it at construction; this catches it a step earlier.
-  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/merd/merd.js");
   assert.ok(s.buyPlateauBps <= s.buyLaunchBps && s.buyFloorBps <= s.buyPlateauBps, "buy fee must not rise");
   assert.ok(s.sellPlateauBps <= s.sellLaunchBps && s.sellFloorBps <= s.sellPlateauBps, "sell fee must not rise");
 });
 
 test("the plateau covers the whole first day and cannot end before the ramp", async () => {
-  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/merd/merd.js");
   assert.equal(s.rampSeconds, 600n, "10 minute opening ramp");
   assert.equal(s.plateauUntil, 86_400n, "3% holds for 24 hours");
   assert.ok(s.plateauUntil > s.rampSeconds, "the plateau cannot end before the ramp feeding it");
 });
 
 test("the opening rate is within the hook's hard cap", async () => {
-  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/merd/merd.js");
   // MAX_FEE_BPS in the hook is 1000; above it the deployment reverts.
   assert.ok(s.buyLaunchBps <= 1000 && s.sellLaunchBps <= 1000);
 });
 
 test("the fee split leaves the treasury a majority and cannot exceed the fee", async () => {
-  const { MERD_FEE_SCHEDULE: s } = await import("../src/launch/merd.js");
+  const { MERD_FEE_SCHEDULE: s } = await import("../src/merd/merd.js");
   assert.equal(s.referralShareBps, 1000);
   assert.equal(s.lpShareBps, 1000);
   const total = s.referralShareBps + s.lpShareBps;

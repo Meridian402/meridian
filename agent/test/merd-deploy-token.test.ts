@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
-import { predictTokenAddress, tokenInitCode, deployToken } from "../src/launch/deployToken.js";
+import { predictTokenAddress, tokenInitCode, deployToken } from "../src/merd/deployToken.js";
 import { keccak256 } from "viem";
 
 /**

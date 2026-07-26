@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { assertTreasuryIsLive } from "../src/config.js";
-import { TREASURY_WALLET, RETIRED_WALLET } from "../src/launch/wallets.js";
+import { TREASURY_WALLET, RETIRED_WALLET } from "../src/merd/wallets.js";
 
 /**
  * treasuryAddress is the payTo of the whole x402 rail — the address callers are

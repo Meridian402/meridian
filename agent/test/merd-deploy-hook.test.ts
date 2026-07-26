@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hookInitCode, predictHookAddress, assertDeployable, type HookDeployment } from "../src/launch/deployHook.js";
-import { MERD_HOOK, MERD_HOOK_ADDRESS, MERD_HOOK_OWNER, MERD_TREASURY, MERD_FEE_SCHEDULE } from "../src/launch/merd.js";
-import { ALL_HOOK_MASK, TREASURY_HOOK_FLAGS, hookAddressClaims } from "../src/launch/hookMiner.js";
-import { V4_POOL_MANAGER, V4_POSITION_MANAGER } from "../src/launch/v4Pool.js";
+import { hookInitCode, predictHookAddress, assertDeployable, type HookDeployment } from "../src/merd/deployHook.js";
+import { MERD_HOOK, MERD_HOOK_ADDRESS, MERD_HOOK_OWNER, MERD_TREASURY, MERD_FEE_SCHEDULE } from "../src/merd/merd.js";
+import { ALL_HOOK_MASK, TREASURY_HOOK_FLAGS, hookAddressClaims } from "../src/merd/hookMiner.js";
+import { V4_POOL_MANAGER, V4_POSITION_MANAGER } from "../src/merd/v4Pool.js";
 
 /**
  * The hook's address is not cosmetic. v4 reads the permissions it will honour

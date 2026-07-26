@@ -10,7 +10,7 @@ import {
   ALL_HOOK_MASK,
   TREASURY_HOOK_FLAGS,
   CREATE2_DEPLOYER,
-} from "../src/launch/hookMiner.js";
+} from "../src/merd/hookMiner.js";
 
 /**
  * A v4 hook's permissions live in the low 14 bits of its own address, so the
