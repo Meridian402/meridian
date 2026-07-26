@@ -65,9 +65,9 @@ export const MERD_FEE_SCHEDULE = {
   // Shares OF THE FEE, not of the trade. Neither changes what a trader pays;
   // they only decide where our slice lands, which is why they are safe to have
   // in the swap path at all.
-  referralShareBps: 2000, // 20% to whoever routed the swap, named in hookData
-  lpShareBps: 2000, // 20% donated to whoever is LPing in range
-  // treasury keeps the remaining 60%
+  referralShareBps: 1000, // 10% to whoever routed the swap, named in hookData
+  lpShareBps: 1000, // 10% donated to whoever is LPing in range
+  // treasury keeps the remaining 80%
 } as const;
 
 export const MERD: TokenDeployment = {

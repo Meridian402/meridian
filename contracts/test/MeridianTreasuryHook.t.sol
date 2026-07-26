@@ -267,18 +267,18 @@ contract MeridianTreasuryHookTest is Test {
         (, int128 d) = hook.afterSwap(
             stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), abi.encode(partner)
         );
-        // Opening rate is 10% of 1,000,000 = 100,000. 20% of that to the partner.
+        // Opening rate is 10% of 1,000,000 = 100,000. 10% of that to the partner.
         assertEq(uint128(d), 100_000, "the trader still pays exactly the schedule");
-        assertEq(pm.taken(partner), 20_000, "referrer gets 20% of OUR fee");
-        assertEq(pm.donated(), 20_000, "LPs get 20%");
-        assertEq(pm.taken(treasury), 60_000, "treasury keeps the rest");
+        assertEq(pm.taken(partner), 10_000, "referrer gets 10% of OUR fee");
+        assertEq(pm.donated(), 10_000, "LPs get 10%");
+        assertEq(pm.taken(treasury), 80_000, "treasury keeps the rest");
     }
 
     function test_noReferrerMeansTheTreasuryKeepsThatShare() public {
         vm.prank(address(pm));
         hook.afterSwap(stranger, key, _exactInZeroForOne(), toBalanceDelta(-1_000_000, 1_000_000), "");
-        assertEq(pm.donated(), 20_000);
-        assertEq(pm.taken(treasury), 80_000, "no referrer, so the treasury keeps that slice too");
+        assertEq(pm.donated(), 10_000);
+        assertEq(pm.taken(treasury), 90_000, "no referrer, so the treasury keeps that slice too");
     }
 
     function test_theSplitNeverChangesWhatTheTraderPays() public {
@@ -337,8 +337,8 @@ contract MeridianTreasuryHookTest is Test {
             rampSeconds: 10 minutes,
             plateauUntil: 24 hours,
             taperSeconds: 24 hours,
-            referralShareBps: 2000, // 20% of our fee to whoever routed the swap
-            lpShareBps: 2000 // 20% donated to in-range LPs
+            referralShareBps: 1000, // 10% of our fee to whoever routed the swap
+            lpShareBps: 1000 // 10% donated to in-range LPs
         });
     }
 
