@@ -18,18 +18,21 @@ import type { TokenDeployment } from "./deployToken.js";
  * neither M nor R exists in that alphabet at any mining cost. The symbol is
  * what wallets display; the address only ever carries the chain id.
  */
-export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000030df3"; // 200179
+export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000005424"; // 21540
 
 /** Where MERD lands. Deterministic, and verified before any broadcast. */
-export const MERD_ADDRESS: Address = "0x4663E66B70D1de12D8A18BCA44895598096Ddc71";
+export const MERD_ADDRESS: Address = "0x4663964e902e4fD11dee12229Bb22263919Ca10B";
 
 /**
- * Receives the entire supply at deployment. Deliberately NOT the agent signer:
- * that key is hot and has rotated, and a single compromise of it must not also
- * be a compromise of the whole supply. deployToken() refuses to proceed if the
- * two are ever the same.
+ * Receives the entire supply, and separately receives x402 revenue. One
+ * treasury doing both jobs, by design.
+ *
+ * Deliberately NOT a wallet whose key we hold. Merd's key is hot — he signs
+ * unattended — and a compromise of it must not also be a compromise of the
+ * supply or the revenue. deployToken() refuses outright if the treasury is ever
+ * the deploying key.
  */
-export const MERD_TREASURY: Address = "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81";
+export const MERD_TREASURY: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
 
 export const MERD: TokenDeployment = {
   name: "Meridian",

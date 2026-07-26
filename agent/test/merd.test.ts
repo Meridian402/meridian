@@ -57,5 +57,34 @@ test("the treasury is not the deploying key", () => {
 });
 
 test("the salt is the mined value, not a placeholder", () => {
-  assert.equal(BigInt(MERD_SALT), 200179n);
+  // Re-mined when the treasury consolidated onto 0x475C: the treasury is a
+  // constructor argument, so it is part of the init code hash and therefore
+  // part of the address. The previous salt (200179) is void.
+  assert.equal(BigInt(MERD_SALT), 21540n);
+});
+
+// ── wallet topology ──────────────────────────────────────────────────────────
+
+test("the three wallet roles are three distinct addresses", async () => {
+  const { WALLET_ROLES } = await import("../src/launch/wallets.js");
+  const seen = new Set(Object.values(WALLET_ROLES).map((a) => a.toLowerCase()));
+  assert.equal(seen.size, 3, "a collapsed role means one compromise costs more than it has to");
+});
+
+test("the treasury is the wallet that holds the supply", async () => {
+  const { TREASURY_WALLET } = await import("../src/launch/wallets.js");
+  assert.equal(MERD.treasury, TREASURY_WALLET, "MERD's supply must land in the treasury, not elsewhere");
+});
+
+test("neither the agent nor the deployer is the treasury", async () => {
+  const { MERD_AGENT_WALLET, DEPLOYER_WALLET, TREASURY_WALLET } = await import("../src/launch/wallets.js");
+  assert.notEqual(MERD_AGENT_WALLET.toLowerCase(), TREASURY_WALLET.toLowerCase());
+  assert.notEqual(DEPLOYER_WALLET.toLowerCase(), TREASURY_WALLET.toLowerCase());
+});
+
+test("the retired wallet is not wired into any live role", async () => {
+  const { WALLET_ROLES, RETIRED_WALLET } = await import("../src/launch/wallets.js");
+  for (const [role, addr] of Object.entries(WALLET_ROLES)) {
+    assert.notEqual(addr.toLowerCase(), RETIRED_WALLET.toLowerCase(), `${role} points at the retired wallet`);
+  }
 });
