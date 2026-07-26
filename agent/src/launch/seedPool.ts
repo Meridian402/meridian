@@ -15,16 +15,27 @@
 // later, so the hook has to be deployed and its address known before any of this
 // runs.
 import {
+  createPublicClient,
+  http,
   encodeAbiParameters,
   encodeFunctionData,
   encodePacked,
+  keccak256,
   parseAbiParameters,
   parseAbi,
   type Address,
   type Hex,
 } from "viem";
 import { MERD_ADDRESS } from "./merd.js";
-import { V4_POSITION_MANAGER, PERMIT2, NATIVE_ETH, MERD_POOL_FEE, MERD_POOL_TICK_SPACING, type PoolKey } from "./v4Pool.js";
+import {
+  V4_POSITION_MANAGER,
+  V4_STATE_VIEW,
+  PERMIT2,
+  NATIVE_ETH,
+  MERD_POOL_FEE,
+  MERD_POOL_TICK_SPACING,
+  type PoolKey,
+} from "./v4Pool.js";
 
 /** v4-periphery action ids, already proven live on this chain by the LP guard. */
 const MINT_POSITION = "0x02";
@@ -104,6 +115,127 @@ export interface UnsignedTx {
   description: string;
 }
 
+// ── is the pool still ours to create? ────────────────────────────────────────
+//
+// PoolManager.initialize is PERMISSIONLESS. A PoolKey is just five public
+// values, and every one of them — token, hook, fee, spacing — is readable in
+// this repo. So anyone can create our pool before we do, at any price they
+// choose, and there is nothing on chain that reserves it for us.
+//
+// If that happens our launch transaction reverts, because initializePool inside
+// the multicall fails on an already-initialized pool and takes the seed down
+// with it. That is the safe direction to fail in — but it fails as an opaque
+// revert on the day, which is the worst moment to be diagnosing anything.
+//
+// This turns it into an answer beforehand: read the pool's price first, and say
+// plainly whether the pool is untouched, already sitting at our exact price, or
+// squatted at someone else's.
+
+/** v4 identifies a pool by keccak256 of the encoded key, not by a contract. */
+export function poolIdFor(key: PoolKey): Hex {
+  return keccak256(
+    encodeAbiParameters(parseAbiParameters("address,address,uint24,int24,address"), [
+      key.currency0,
+      key.currency1,
+      key.fee,
+      key.tickSpacing,
+      key.hooks,
+    ]),
+  );
+}
+
+const STATE_VIEW_ABI = parseAbi([
+  "function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
+]);
+
+export interface PoolState {
+  poolId: Hex;
+  /** Zero sqrtPriceX96 is v4's "never initialized". */
+  initialized: boolean;
+  sqrtPriceX96: bigint;
+  tick: number;
+}
+
+export async function readPoolState(key: PoolKey, rpcUrl: string): Promise<PoolState> {
+  const client = createPublicClient({ transport: http(rpcUrl) });
+  const poolId = poolIdFor(key);
+  const [sqrtPriceX96, tick] = await client.readContract({
+    address: V4_STATE_VIEW,
+    abi: STATE_VIEW_ABI,
+    functionName: "getSlot0",
+    args: [poolId],
+  });
+  return { poolId, initialized: sqrtPriceX96 !== 0n, sqrtPriceX96, tick };
+}
+
+export type PreflightStatus = "clear" | "already-at-our-price" | "squatted";
+
+export interface Preflight {
+  status: PreflightStatus;
+  /** False means do not broadcast. Nothing here is worth guessing about. */
+  safeToBroadcast: boolean;
+  /** True when the pool exists already and only the mint should be sent. */
+  skipInitialize: boolean;
+  intendedSqrtPriceX96: bigint;
+  actual: PoolState;
+  message: string;
+}
+
+/**
+ * Run this immediately before broadcasting, every time.
+ *
+ * It cannot PREVENT a squat — the pool can still be taken in the seconds between
+ * this call and the transaction landing, and the on-chain revert is what covers
+ * that. What it buys is knowing, before a cold wallet signs anything, whether
+ * the launch we are about to send is the launch we designed.
+ */
+export async function preflightSeed(plan: SeedPlan, rpcUrl: string): Promise<Preflight> {
+  const { key, sqrtPriceX96 } = buildSeedTransactions(plan);
+  const actual = await readPoolState(key, rpcUrl);
+
+  if (!actual.initialized) {
+    return {
+      status: "clear",
+      safeToBroadcast: true,
+      skipInitialize: false,
+      intendedSqrtPriceX96: sqrtPriceX96,
+      actual,
+      message: `pool ${actual.poolId} is untouched — launch as planned`,
+    };
+  }
+
+  // Someone got there first. If they happened to use our exact price the pool
+  // is still the one we wanted, so seed into it and skip the creation call.
+  if (actual.sqrtPriceX96 === sqrtPriceX96) {
+    return {
+      status: "already-at-our-price",
+      safeToBroadcast: true,
+      skipInitialize: true,
+      intendedSqrtPriceX96: sqrtPriceX96,
+      actual,
+      message:
+        `pool ${actual.poolId} already exists at exactly our opening price — ` +
+        "send the mint alone; including initializePool would revert",
+    };
+  }
+
+  // Anything else means the opening price is not ours, and seeding into it
+  // would mint the entire supply against a number a stranger picked.
+  const ratio = Number((actual.sqrtPriceX96 * 10_000n) / sqrtPriceX96) / 10_000;
+  return {
+    status: "squatted",
+    safeToBroadcast: false,
+    skipInitialize: false,
+    intendedSqrtPriceX96: sqrtPriceX96,
+    actual,
+    message:
+      `pool ${actual.poolId} was created by someone else at sqrtPriceX96 ${actual.sqrtPriceX96} ` +
+      `(${ratio.toFixed(4)}x our intended ${sqrtPriceX96}, tick ${actual.tick}). DO NOT SEED — ` +
+      "the entire supply would be priced at a number a stranger chose. Launch in a different " +
+      "fee tier or tick spacing, which is a different pool that nobody has taken.",
+  };
+}
+
 /**
  * Liquidity for a full-range position holding these amounts.
  *
@@ -155,7 +287,15 @@ function sqrtAtTick(tick: number): bigint {
  * able to read each grant for what it is. Neither approval is exploitable in the
  * gap: they authorise the PositionManager and nobody else.
  */
-export function buildSeedTransactions(plan: SeedPlan): { key: PoolKey; sqrtPriceX96: bigint; txs: UnsignedTx[] } {
+export function buildSeedTransactions(
+  plan: SeedPlan,
+  /**
+   * Set when preflightSeed reports the pool already exists at our exact price.
+   * The mint goes out alone, because bundling initializePool into a pool that
+   * is already initialized reverts the whole transaction.
+   */
+  opts: { skipInitialize?: boolean } = {},
+): { key: PoolKey; sqrtPriceX96: bigint; txs: UnsignedTx[] } {
   if (plan.hook === NATIVE_ETH) {
     throw new Error("hook address is required — a pool created without it can never be given one later");
   }
@@ -219,26 +359,35 @@ export function buildSeedTransactions(plan: SeedPlan): { key: PoolKey; sqrtPrice
         value: "0",
         description: "allow the PositionManager to pull MERD through Permit2 (24h)",
       },
-      {
-        to: V4_POSITION_MANAGER,
-        // multicall delegatecalls each entry, so both run against the
-        // PositionManager's own storage with the caller and msg.value intact.
-        // initializePool ignores the value; modifyLiquidities spends it.
-        data: encodeFunctionData({
-          abi: POSITION_MANAGER_ABI,
-          functionName: "multicall",
-          args: [
-            [
-              encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "initializePool", args: [keyTuple as never, sqrtPriceX96] }),
-              encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
-            ],
-          ],
-        }),
-        value: plan.ethWei.toString(),
-        description:
-          `create the ETH/MERD pool at ${MERD_POOL_FEE / 10_000}% with the treasury hook AND seed it in the same transaction, ` +
-          `minting the position to ${plan.recipient} — atomic so the opening price cannot be moved in between`,
-      },
+      opts.skipInitialize
+        ? {
+            to: V4_POSITION_MANAGER,
+            data: encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
+            value: plan.ethWei.toString(),
+            description:
+              `seed the EXISTING pool and mint the position to ${plan.recipient} — ` +
+              "creation is omitted because the pool already exists at our opening price",
+          }
+        : {
+            to: V4_POSITION_MANAGER,
+            // multicall delegatecalls each entry, so both run against the
+            // PositionManager's own storage with the caller and msg.value intact.
+            // initializePool ignores the value; modifyLiquidities spends it.
+            data: encodeFunctionData({
+              abi: POSITION_MANAGER_ABI,
+              functionName: "multicall",
+              args: [
+                [
+                  encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "initializePool", args: [keyTuple as never, sqrtPriceX96] }),
+                  encodeFunctionData({ abi: POSITION_MANAGER_ABI, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
+                ],
+              ],
+            }),
+            value: plan.ethWei.toString(),
+            description:
+              `create the ETH/MERD pool at ${MERD_POOL_FEE / 10_000}% with the treasury hook AND seed it in the same transaction, ` +
+              `minting the position to ${plan.recipient} — atomic so the opening price cannot be moved in between`,
+          },
     ],
   };
 }

@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeFunctionData, parseAbi, parseEther } from "viem";
+import { decodeFunctionData, parseAbi, parseEther, keccak256, encodeAbiParameters, parseAbiParameters } from "viem";
 import {
   sqrtPriceX96For,
   liquidityFor,
   fullRangeTicks,
   buildSeedTransactions,
+  poolIdFor,
   openingPrice,
 } from "../src/launch/seedPool.js";
 import { MERD_ADDRESS, MERD, MERD_SEED, MERD_HOOK_ADDRESS } from "../src/launch/merd.js";
@@ -202,4 +203,47 @@ test("the LP position — which is the entire supply — goes to the cold treasu
   // The NFT this mints holds all of MERD. It must not land on a hot key, and
   // it must be locked before anyone is invited to trade against it.
   assert.equal(MERD_SEED.recipient, MERD.treasury);
+});
+
+// ── the squat check ──────────────────────────────────────────────────────────
+
+test("the pool id matches v4's own derivation", () => {
+  // keccak256(abi.encode(PoolKey)). Verified against the live StateView, which
+  // returned an uninitialized slot0 for this id rather than reverting.
+  const { key } = buildSeedTransactions(plan);
+  assert.equal(poolIdFor(key), keccak256(encodeAbiParameters(
+    parseAbiParameters("address,address,uint24,int24,address"),
+    [key.currency0, key.currency1, key.fee, key.tickSpacing, key.hooks],
+  )));
+});
+
+test("the pool id changes with every part of the key", () => {
+  // If two different keys collided here the check would pass while reading a
+  // different pool's price, which is worse than not checking at all.
+  const { key } = buildSeedTransactions(plan);
+  const base = poolIdFor(key);
+  assert.notEqual(poolIdFor({ ...key, fee: 3000 }), base, "fee tier is part of the identity");
+  assert.notEqual(poolIdFor({ ...key, tickSpacing: 60 }), base, "spacing is part of the identity");
+  assert.notEqual(poolIdFor({ ...key, hooks: NATIVE_ETH }), base, "the hook is part of the identity");
+});
+
+test("skipInitialize sends the mint alone, not a multicall", () => {
+  // The recovery path when someone created our pool at our exact price:
+  // including initializePool would revert on an already-initialized pool.
+  const { txs } = buildSeedTransactions(plan, { skipInitialize: true });
+  assert.equal(txs.length, 3);
+  assert.equal(txs[2].to, V4_POSITION_MANAGER);
+  const [unlockData] = decodeFunctionData({ abi: MODIFY_ABI, data: txs[2].data }).args as [`0x${string}`, bigint];
+  assert.ok(unlockData.length > 2, "still carries the mint actions");
+  assert.equal(txs[2].value, plan.ethWei.toString(), "still funds the position");
+  assert.throws(() => innerCalls(txs[2].data), "must not be wrapped in multicall");
+});
+
+test("the default still creates and seeds atomically", () => {
+  // skipInitialize must be opt-in. Defaulting it the other way would silently
+  // drop pool creation from the launch and seed into whatever price it found.
+  const { txs } = buildSeedTransactions(plan);
+  assert.equal(innerCalls(txs[2].data).length, 2, "creation is still bundled by default");
+  const { txs: explicit } = buildSeedTransactions(plan, { skipInitialize: false });
+  assert.equal(explicit[2].data, txs[2].data, "passing it false must match the default");
 });
