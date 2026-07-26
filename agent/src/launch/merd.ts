@@ -138,9 +138,16 @@ export const MERD_HOOK_ADDRESS: Address = "0x9f67875975D518AD71864A7164A1a788411
  * would farm, which is what the 10% opening tax is in the hook to prevent.
  *
  * WHAT THIS MAKES TRUE OF THE LP POSITION: it holds the entire supply. The NFT
- * minted by the fourth transaction is, for practical purposes, all of MERD. An
+ * minted by the launch transaction is, for practical purposes, all of MERD. An
  * unlocked position here is not a risk, it is a rug with extra steps — locking
- * it is not optional, and MeridianManagedLocker is what it exists for.
+ * it is not optional, and MeridianPositionLock is what it exists for.
+ *
+ * Note the ORDER that implies. The position is minted to the treasury and then
+ * sent to the lock with safeTransferFrom, rather than minted to the lock
+ * directly: v4's PositionManager mints with _mint and never calls
+ * onERC721Received, so a position minted straight there would be owned but
+ * unrecorded. The lock has lockExisting() to recover exactly that case, but not
+ * needing it is better than needing it.
  */
 export const MERD_SEED = {
   ethWei: 1_000_000_000_000_000_000n, // 1 ETH
