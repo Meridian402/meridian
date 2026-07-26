@@ -97,6 +97,19 @@ export function isSkip(reply: string): boolean {
  */
 const FORBIDDEN: Array<[RegExp, string]> = [
   [/\$merd\b|\btge\b|\bairdrop|\bpresale|\bpre-sale|\bcontract address|\btoken launch|\btoken sale|\bour token\b|\bthe token\b|\bticker\b|\bwhitelist\b/i, "token/launch content"],
+  // Token launching is built but NOT announced. The rule above was written to
+  // stop Merd shilling a token of his own, and it does not cover him announcing
+  // that USERS can launch one — a different sentence that sailed straight
+  // through ("your agent can deploy a token for you now" passed clean). Until
+  // this ships deliberately, it is not his to reveal. Scoped to launching a
+  // token specifically so ordinary market talk ("the ETF launch", "launched in
+  // 2019") is untouched.
+  [
+    // Verb STEMS with \w*, not whole words: "creating" is creat+ing, so
+    // create(ing)? never matches it and the sentence leaks.
+    /\blaunchpad\b|\blaunch styles?\b|\b(launch|deploy|mint|creat|spin)\w*\s+(a|an|your|their|our|his|her|its|my|new|own)\s+(own\s+)?(token|coin|memecoin)\b/i,
+    "unannounced launch feature",
+  ],
   [/\bunaudited\b|\bvulnerab|\bexploit\b|\bfail.?open\b|\bsecurity (hole|flaw|issue|bug|gap)|\bnot been audited\b/i, "security disclosure"],
   [/@robinhood|\bpartnered? with robinhood|\bpartnership with robinhood|\bbacked by robinhood/i, "implied Robinhood affiliation"],
   [/\bfinancial advice\b|\bguaranteed?\b|\bwill (moon|pump|hit \$)/i, "advice or price promise"],

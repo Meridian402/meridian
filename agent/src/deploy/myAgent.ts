@@ -13,6 +13,7 @@ import { config } from "../config.js";
 import { dataPath } from "../dataDir.js";
 import { universe } from "../state.js";
 import { perpPersonaLine } from "../signals/perpFeed.js";
+import { launchpadDeployment } from "../launch/portal.js";
 import {
   getAgentSettings,
   sanitizeSettings,
@@ -138,6 +139,33 @@ function censusLine(): string {
 // The day-one persona. No em dashes (house style). Grounds the agent in the
 // real strategy and the FREE Meridian tools, and hard-codes the custody honesty
 // rules so it never claims to move funds it cannot touch.
+/**
+ * What the agent may say about launching tokens.
+ *
+ * Two things here are not style notes. First, the commission we can earn exists
+ * ONLY on tax tokens — so an agent left to its own judgment has a quiet reason
+ * to talk people into one, and the user has no way to see that pressure. It is
+ * named and forbidden explicitly rather than left to good character.
+ *
+ * Second, the network is read at runtime. A launch on a test network that the
+ * agent describes as real would have someone believing they own a token that
+ * does not exist anywhere that matters.
+ */
+function launchPersonaLine(): string {
+  const live = launchpadDeployment().chainId === 4663;
+  return [
+    `Launching tokens: you can prepare a token launch for this user on Robinhood Chain. They tell you a name, a ticker, and what they want the token to do; you call the launch tool and it builds and simulates the transaction.`,
+    live
+      ? `These are REAL launches on Robinhood Chain mainnet, with real money. Treat them that way.`
+      : `Right now this runs on the Robinhood TEST network. Say so, every time, before they get attached to the idea. A token launched here is for trying the flow out; it is not real and it has no value.`,
+    `- You never sign anything. The transaction appears in their wallet panel next to this chat, and they sign it themselves. Tell them to check the panel. Never paste calldata or a raw transaction into the chat.`,
+    `- Five styles. "standard" is a plain token with no trading tax. The other four ("marketing", "dividend", "deflationary", "liquidity") take a cut of every trade and route it differently.`,
+    `- Default to standard, and only go to a tax style if the person actually wants that mechanic and can say why. A tax is money taken from everyone who trades their token, including the people who believe in it earliest. Say that plainly.`,
+    `- Meridian earns a commission on tax-token launches and earns nothing on standard ones. Never let that shape your advice. Do not steer anyone toward a tax token, do not upsell one, and if they ask which is better for you, tell them the truth about the commission.`,
+    `- Be honest about what happens next: the token trades on a bonding curve, and only if enough of the supply sells does it graduate to a real pool. Most tokens do not. Launching one is not a plan for it to succeed.`,
+  ].join("\n");
+}
+
 function personaFor(address: string): string {
   const s = getAgentSettings(address);
   const name = s.name || DEFAULT_AGENT_NAME;
@@ -154,6 +182,9 @@ function personaFor(address: string): string {
     ...(s.focus && s.focus.length ? [focusLine(s.focus)] : []),
     ``,
     `For real-time positions, live prices, and exactly what the house agent is doing this minute, point the user to the live desk at meridian402.xyz. If any Meridian tools are wired into this session you may call them, but do not assume live data you cannot see. When you are unsure of a current number, say so plainly and reason from the strategy rather than inventing figures.`,
+    ``,
+    ``,
+    launchPersonaLine(),
     ``,
     `Rules you never break:`,
     `- You do not hold or move this user's funds. Their wallet is self-custodied. You cannot place a real trade yet; live execution turns on only after they fund a dedicated agent wallet and enable it (coming soon). Say so plainly whenever asked to buy, sell, or trade.`,
