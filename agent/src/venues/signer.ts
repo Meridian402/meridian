@@ -44,11 +44,32 @@ export const robinhoodChain = {
  */
 let cached: { account: ReturnType<typeof privateKeyToAccount>; address: Address } | null = null;
 
+/**
+ * Wallets export private keys in both shapes: with the 0x prefix and as bare
+ * 64-char hex. viem only accepts the prefixed form, so a bare paste used to
+ * reach privateKeyToAccount verbatim and take the process down at boot with
+ * "invalid private key, expected hex or 32 bytes, got string" (2026-07-27,
+ * prod crash-looped on exactly this). The operator did nothing wrong there:
+ * they pasted what their wallet gave them. Normalize the two harmless
+ * variations, and refuse anything else by NAME so the log says which variable
+ * is wrong instead of making someone decode a viem internal.
+ */
+function normalizeSignerKey(raw: string): `0x${string}` {
+  const k = raw.trim();
+  const body = k.startsWith("0x") || k.startsWith("0X") ? k.slice(2) : k;
+  if (!/^[0-9a-fA-F]{64}$/.test(body)) {
+    throw new Error(
+      `AGENT_SIGNER_PRIVATE_KEY is not a private key: expected 64 hex characters (with or without a 0x prefix), got ${body.length} characters. Re-export the key for the house wallet and set it again.`,
+    );
+  }
+  return `0x${body.toLowerCase()}`;
+}
+
 export function getAgentSigner() {
   const key = process.env.AGENT_SIGNER_PRIVATE_KEY;
   if (!key) return null;
   if (!cached) {
-    const account = privateKeyToAccount(key as `0x${string}`);
+    const account = privateKeyToAccount(normalizeSignerKey(key));
     cached = { account, address: account.address };
   }
   return cached;
