@@ -41,7 +41,9 @@ export const config = {
   // Every cross-chain execution settles its routing fee via x402 before the
   // bridge moves anything — this is what makes cross-chain RWA trading
   // actually run over x402, not just the signal paywall below. Basis points
-  // on trade notional, paid by the trade's own wallet (payer), not Meridian's.
+  // on trade notional. The transfer is signed by the executing house wallet
+  // (X402Client always signs with getAgentSigner); the tool's `payer` field is
+  // recorded for attribution and never chooses the signer.
   bridgeFeeBps: Number(process.env.BRIDGE_FEE_BPS ?? 8),
 
   // How often the background agent loop re-evaluates the strategy and logs a

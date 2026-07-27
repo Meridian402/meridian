@@ -177,7 +177,7 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
 
       case "scan": {
         const s = latestScan() ?? (await scanOpportunities());
-        const lines = ["LP opportunities right now, ranked by expected net $/day for ~$160:", ""];
+        const lines = [`LP opportunities right now, ranked by expected net $/day for ~$${Math.round(s.capitalUsd)}:`, ""];
         for (const o of s.opportunities) {
           lines.push(
             `  ${o.pool.padEnd(16)} ${o.viable ? "" : "avoid "}~$${o.expectedNetPerDayUsd.toFixed(2)}/day  (our share ${o.ourSharePct.toFixed(1)}%)`,

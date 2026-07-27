@@ -372,35 +372,42 @@ test("agent_thoughts reflects the background loop, not just manual calls", async
   assert.ok(Array.isArray(latest.thoughts) && latest.thoughts.length > 0);
 });
 
-test("bridge_execute settles the routing fee via x402 before bridging", async () => {
+test("bridge_execute refuses fee-free while the bridge leg is a stub", async () => {
+  // The Wormhole leg is a no-op today. The tool must refuse BEFORE settling the
+  // x402 fee: a real fee in front of a fake move is the one outcome this tool
+  // may never produce, in any configuration.
   const result = textOf(
     await client.callTool({
       name: "meridian_bridge_execute",
       arguments: { symbol: "AAPL", amountUsd: 500, destChain: "base", payer: "test-wallet-1" },
     }),
   );
-  assert.equal(result.success, true);
-  assert.equal(result.feeUsd, 0.4, "8 bps of the $500 notional");
-  assert.equal(result.feeReceipt.success, true);
-  assert.equal(result.feeReceipt.payer, "test-wallet-1");
+  assert.equal(result.success, false);
+  assert.match(result.error, /not live/);
+  assert.equal(result.feeReceipt, undefined, "no fee may be settled for a bridge that does not move funds");
+  assert.equal(result.feeUsd, undefined);
 });
 
-test("bridge_execute enforces the daily cap across calls", async () => {
+test("the daily cap holds across execute calls", async () => {
+  // Spend accounting for the shared RiskLimiter: the index_execute test above
+  // recorded $300, so a $1000 swap lands at $1300 and a second $1000 attempt
+  // would cross the $2000 daily cap. (bridge_execute no longer records spend —
+  // it refuses while the bridge is a stub — so the cap is pinned here instead.)
   const first = textOf(
     await client.callTool({
-      name: "meridian_bridge_execute",
-      arguments: { symbol: "AAPL", amountUsd: 1000, destChain: "base", payer: "test-wallet-2" },
+      name: "meridian_index_execute",
+      arguments: { fromSymbol: "TSLA", toSymbol: "NVDA", amountUsd: 1000, payer: "test-wallet-2" },
     }),
   );
   assert.equal(first.success, true);
 
   const second = textOf(
     await client.callTool({
-      name: "meridian_bridge_execute",
-      arguments: { symbol: "AAPL", amountUsd: 1000, destChain: "base", payer: "test-wallet-2" },
+      name: "meridian_index_execute",
+      arguments: { fromSymbol: "NVDA", toSymbol: "TSLA", amountUsd: 1000, payer: "test-wallet-2" },
     }),
   );
-  assert.equal(second.success, false, "second $1000 trade should exceed the $1500 daily cap");
+  assert.equal(second.success, false, "second $1000 trade should exceed the $2000 daily cap");
   // risk.ts words this "daily trade limit reached ($X/$Y in the last 24h)".
   assert.match(second.error, /daily trade limit reached/);
 });
