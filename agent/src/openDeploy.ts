@@ -17,7 +17,7 @@ import { parseAbiItem, type Address } from "viem";
 import { dataPath } from "./dataDir.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { openInPool, phaseOf } from "./lpGuard.js";
-import { realSwapEthToUsdg, isTradable, TRADABLE_SYMBOLS } from "./venues/stockPools.js";
+import { realSwapEthToUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
 import { getAgentSigner, getPublicClient } from "./venues/signer.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 
@@ -35,7 +35,7 @@ function readPlan(): { legs: Leg[]; error?: string } {
   try {
     const legs = (JSON.parse(raw) as Leg[]).map((l) => ({ symbol: String(l.symbol).toUpperCase(), usd: Number(l.usd) }));
     for (const l of legs) {
-      if (!isTradable(l.symbol)) return { legs: [], error: `${l.symbol} is not a baseline-tradable pool (${TRADABLE_SYMBOLS.join(", ")})` };
+      if (!isTradable(l.symbol)) return { legs: [], error: `${l.symbol} is not a tradable pool (seed or qualified: ${tradableSymbols().join(", ")})` };
       if (!Number.isFinite(l.usd) || l.usd < 50) return { legs: [], error: `leg ${l.symbol}: usd must be >= 50` };
     }
     const total = legs.reduce((s, l) => s + l.usd, 0);

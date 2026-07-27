@@ -93,16 +93,48 @@ const POOLS: Record<string, PoolEntry> = {
 // ~$2.9k, AMD 1% ~$2.5k, SNDK 1% ~$1.8k. Note the qualifier logs depth at a
 // 2% move, roughly double these figures: same reality, different definition.
 // The allocator's share trap still applies: a high $/day from being most of a
-// pool does not transfer. This table stays the SWAP seed until the
-// acquisition path learns to consult the qualified set; widening it is a
-// deliberate decision, not a drive-by.
+// pool does not transfer. As of 2026-07-27 this table is the SEED, not the
+// ceiling: swap routing also consults the qualified set pushed in below by
+// signals/poolQualify, the decision that measurement justified.
 
 const BRIDGE_FEE = 500; // 0.05% NATIVE/USDG tier — deepest of the four real tiers found, used when a rotation's two legs don't share a quote currency
 const BRIDGE_TICK_SPACING = 10;
 
+/**
+ * Qualified pools pushed in by signals/poolQualify once a symbol clears all
+ * three of its gates (depth, fee-score, round-trip holdability sim). The
+ * qualifier PUSHES rather than being imported here because it already imports
+ * this module; pulling from it would be a cycle. Registration replaces the
+ * whole dynamic set each time, so a pool that thins or restricts drops out on
+ * the next qualification pass instead of lingering. The hand-verified POOLS
+ * table above always wins on conflict: the seed is the floor, never overridden.
+ *
+ * Empty until the first qualification pass completes (the allocator warms it
+ * at boot), so a cold process trades only the seed. Fail-safe by construction,
+ * same doctrine as poolQualify.cachedQualified.
+ */
+const dynamicPools = new Map<string, PoolEntry>();
+export function registerQualifiedPools(list: Array<{ symbol: string; token: Address; fee: number; tickSpacing: number }>): void {
+  dynamicPools.clear();
+  for (const p of list) {
+    if (POOLS[p.symbol]) continue; // the seed outranks the qualifier
+    dynamicPools.set(p.symbol, { token: p.token, quote: "USDG", fee: p.fee, tickSpacing: p.tickSpacing });
+  }
+}
+
+/** Resolve a symbol to its pool entry: hand-verified seed first, then the qualified set. */
+function poolEntryFor(symbol: string): PoolEntry | undefined {
+  return POOLS[symbol] ?? dynamicPools.get(symbol);
+}
+
+/** The static hand-verified seed. Fixed membership; samplers that pay per-symbol costs (basis/Yahoo) stay on this. */
 export const TRADABLE_SYMBOLS = Object.keys(POOLS);
+/** The live tradable set: seed plus currently-qualified pools. Grows and shrinks with qualification. */
+export function tradableSymbols(): string[] {
+  return [...TRADABLE_SYMBOLS, ...dynamicPools.keys()];
+}
 export function isTradable(symbol: string): boolean {
-  return symbol in POOLS;
+  return !!poolEntryFor(symbol);
 }
 
 // The originally hand-verified baseline: standard params, depth-checked, and
@@ -132,7 +164,7 @@ export function isAutoExecutable(symbol: string): boolean {
 
 /** Per-leg pool fee in percent (0.3 or 1.0 across the current universe) — the strategy's cost-aware bar consults this. */
 export function poolFeePct(symbol: string): number {
-  const entry = POOLS[symbol];
+  const entry = poolEntryFor(symbol);
   return entry ? entry.fee / 10_000 : 1;
 }
 
@@ -436,7 +468,10 @@ async function tokenPriceUsd(entry: PoolEntry): Promise<number> {
  * RWAs around the clock instead of staring at a frozen Friday close.
  */
 export async function poolPricesUsd(): Promise<Record<string, number>> {
-  const entries = Object.entries(POOLS);
+  // Seed plus qualified: the guard's rebalance math divides by these prices,
+  // so any symbol the engine can hold MUST price here or a retile of a
+  // dynamic pool would value the stock side at zero and buy the book again.
+  const entries = [...Object.entries(POOLS), ...dynamicPools.entries()];
   const priced = await Promise.all(entries.map(async ([sym, e]) => [sym, await tokenPriceUsd(e)] as const));
   return Object.fromEntries(priced);
 }
@@ -453,8 +488,8 @@ export async function realSwapStockToStock(params: {
   amountUsd: number;
 }): Promise<{ hash: Hex; amountReceived: number; hops: number }> {
   const { fromSymbol, toSymbol, amountUsd } = params;
-  const fromEntry = POOLS[fromSymbol];
-  const toEntry = POOLS[toSymbol];
+  const fromEntry = poolEntryFor(fromSymbol);
+  const toEntry = poolEntryFor(toSymbol);
   if (!fromEntry) throw new Error(`no verified cheap pool for ${fromSymbol}`);
   if (!toEntry) throw new Error(`no verified cheap pool for ${toSymbol}`);
 
@@ -490,7 +525,7 @@ export async function realSellStockForUsdg(params: {
   fromSymbol: string;
   amountTokens?: number;
 }): Promise<{ hash: Hex; usdgReceived: number; tokensSold: number }> {
-  const entry = POOLS[params.fromSymbol];
+  const entry = poolEntryFor(params.fromSymbol);
   if (!entry) throw new Error(`no verified cheap pool for ${params.fromSymbol}`);
   if (entry.quote !== "USDG") throw new Error(`${params.fromSymbol} is not USDG-quoted`);
   // A sell converts stock -> USDG: de-risking, an EXIT. Never breaker-blocked —
@@ -531,7 +566,7 @@ export async function realBuyStockFromNative(params: {
   amountUsd: number;
 }): Promise<{ hash: Hex; amountReceived: number; hops: number }> {
   const { toSymbol, amountUsd } = params;
-  const toEntry = POOLS[toSymbol];
+  const toEntry = poolEntryFor(toSymbol);
   if (!toEntry) throw new Error(`no verified cheap pool for ${toSymbol}`);
   guardWalletOp(`lp-buy ${toSymbol}`); // global runaway breaker
   recordWalletOp(amountUsd, "lp-buy");

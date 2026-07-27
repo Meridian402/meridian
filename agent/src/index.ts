@@ -45,7 +45,7 @@ import { prepareIndexYield } from "./earn/yieldPosition.js";
 import { runScout, scoutAllowed, bountyBoard, settleBounties } from "./earn/scout.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
-import { realSellStockForUsdg, isTradable, TRADABLE_SYMBOLS } from "./venues/stockPools.js";
+import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
 
@@ -1045,7 +1045,7 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
   const symbol = String((req.body ?? {}).symbol ?? "").toUpperCase();
   const widthPct = Number((req.body ?? {}).widthPct);
   if (!symbol || !isTradable(symbol)) {
-    res.status(400).json({ ok: false, error: `symbol must be a tradable pool (${TRADABLE_SYMBOLS.join(", ")})` });
+    res.status(400).json({ ok: false, error: `symbol must be a tradable pool (${tradableSymbols().join(", ")})` });
     return;
   }
   try {

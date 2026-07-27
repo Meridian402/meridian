@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { decisionLog } from "./state.js";
 import { getAgentAddress, getPublicClient } from "./venues/signer.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
-import { poolPricesUsd, TRADABLE_SYMBOLS } from "./venues/stockPools.js";
+import { poolPricesUsd, tradableSymbols } from "./venues/stockPools.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { basisSnapshot } from "./signals/basis.js";
 import { lpScoresIfCached } from "./signals/lpScore.js";
@@ -257,11 +257,13 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
         return lines;
       }
 
-      case "universe":
+      case "universe": {
+        const live = tradableSymbols();
         return [
-          `depth-verified tradable tickers: ${TRADABLE_SYMBOLS.join(", ")}`,
-          "82 Robinhood tokens exist on-chain; these five have pools deep enough to absorb real size (measured, not assumed).",
+          `depth-verified tradable tickers: ${live.join(", ")}`,
+          `82 Robinhood tokens exist on-chain; these ${live.length} have pools deep enough to absorb real size (measured and re-qualified every ~30min, not assumed).`,
         ];
+      }
 
       case "tools":
         return [

@@ -10,7 +10,7 @@
 // read-only; qualification gates deployment but moves no capital itself.
 import { keccak256, encodeAbiParameters, parseAbiParameters, parseAbiItem, type Address, type Hex } from "viem";
 import { getPublicClient, getAgentAddress } from "../venues/signer.js";
-import { buildSwapExactInCalldata, USDG, poolCandidates, type RouteHop } from "../venues/stockPools.js";
+import { buildSwapExactInCalldata, USDG, poolCandidates, registerQualifiedPools, type RouteHop } from "../venues/stockPools.js";
 import { lpScores } from "./lpScore.js";
 
 const SV: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
@@ -152,6 +152,10 @@ export async function qualifyDeployablePools(): Promise<DeployablePool[]> {
 
   const qualified = deep.filter((p) => p.holdable).sort((a, b) => b.depthUsd - a.depthUsd);
   cache = { at: Date.now(), pools: qualified };
+  // Push into the swap layer so acquisition can follow qualification: the
+  // seed table stays the floor, this is how the ceiling lifts. Same replace-
+  // not-accumulate semantics as this cache, so de-qualification propagates.
+  registerQualifiedPools(qualified.map((p) => ({ symbol: p.symbol, token: p.token, fee: p.fee, tickSpacing: p.tickSpacing })));
   return qualified;
 }
 
