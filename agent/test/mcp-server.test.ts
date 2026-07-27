@@ -391,8 +391,8 @@ test("bridge_execute refuses fee-free while the bridge leg is a stub", async () 
 test("the daily cap holds across execute calls", async () => {
   // Spend accounting for the shared RiskLimiter: the index_execute test above
   // recorded $300, so a $1000 swap lands at $1300 and a second $1000 attempt
-  // would cross the $2000 daily cap. (bridge_execute no longer records spend —
-  // it refuses while the bridge is a stub — so the cap is pinned here instead.)
+  // would cross the $2000 daily cap. (bridge_execute no longer records spend,
+  // since it refuses while the bridge is a stub, so the cap is pinned here.)
   const first = textOf(
     await client.callTool({
       name: "meridian_index_execute",

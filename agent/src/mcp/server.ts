@@ -223,12 +223,12 @@ export function buildServer(): McpServer {
     {
       title: "Execute a cross-chain bridge",
       description:
-        "Execute a cross-chain move of an RWA position via Wormhole. Mutating: subject to Meridian's per-trade and daily spend caps. Settles the routing fee via x402 before moving anything — the trade itself is never x402-gated, only the routing fee is. Refuses (fee-free) while the bridge leg is not live. Gate this behind an OpenHermit approval policy in production.",
+        "Execute a cross-chain move of an RWA position via Wormhole. Mutating: subject to Meridian's per-trade and daily spend caps. Settles the routing fee via x402 before moving anything; the trade itself is never x402-gated, only the routing fee is. Refuses (fee-free) while the bridge leg is not live. Gate this behind an OpenHermit approval policy in production.",
       inputSchema: {
         symbol: z.string(),
         amountUsd: z.number().positive(),
         destChain: z.enum(CHAIN_IDS),
-        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet — this field does not choose the signer."),
+        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
       },
     },
     async ({ symbol, amountUsd, destChain, payer }) => {
@@ -243,7 +243,7 @@ export function buildServer(): McpServer {
       if (bridge.isStub) {
         return json({
           success: false,
-          error: "cross-chain bridging is not live on this deployment — no fee charged, no funds moved",
+          error: "cross-chain bridging is not live on this deployment; no fee charged, no funds moved",
         });
       }
 
@@ -268,12 +268,12 @@ export function buildServer(): McpServer {
     {
       title: "Execute a trade on The Index",
       description:
-        "Swap between tokenized equities on The Index (theindex.finance — Uniswap v4 pools on Robinhood Chain). Same-chain execution, distinct from meridian_bridge_execute's cross-chain moves: an Index rotation never leaves Robinhood Chain. Settles a routing fee via x402 before swapping (signed by Meridian's executing wallet; payer is attribution only); subject to per-trade and daily spend caps.",
+        "Swap between tokenized equities on The Index (theindex.finance, Uniswap v4 pools on Robinhood Chain). Same-chain execution, distinct from meridian_bridge_execute's cross-chain moves: an Index rotation never leaves Robinhood Chain. Settles a routing fee via x402 before swapping (signed by Meridian's executing wallet; payer is attribution only); subject to per-trade and daily spend caps.",
       inputSchema: {
         fromSymbol: z.string().describe("Index ticker to sell, e.g. TSLA"),
         toSymbol: z.string().describe("Index ticker to buy, e.g. NVDA"),
         amountUsd: z.number().positive(),
-        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet — this field does not choose the signer."),
+        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
       },
     },
     async ({ fromSymbol, toSymbol, amountUsd, payer }) =>
@@ -289,7 +289,7 @@ export function buildServer(): McpServer {
       inputSchema: {
         side: z.enum(["enter", "exit"]).describe("enter: ETH -> $INDEX. exit: $INDEX -> ETH."),
         amountUsd: z.number().positive(),
-        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet — this field does not choose the signer."),
+        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
       },
     },
     async ({ side, amountUsd, payer }) => {

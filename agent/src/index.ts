@@ -1143,14 +1143,14 @@ startAgentLoop(market, new ResearchStrategy(), decisionLog, config.agentThinkInt
 // mints REAL liquidity on a 5-minute tick using the house wallet's key, and
 // startLpAllocator scans and moves capital between pools. Neither was gated by
 // anything before, which meant `deploy` and `start managing funds` were the
-// same action — including on a fresh box, on a rollback, or on a restart nobody
+// same action, including on a fresh box, on a rollback, or on a restart nobody
 // intended. AGENT_LIVE_TRADING does NOT cover these; it only gates the
 // momentum/index path, which is a different set of transactions entirely.
 //
 // Explicit opt-in, so the default of a newly deployed instance is to serve the
 // API and touch nothing.
 if (process.env.MERIDIAN_LP_ENGINE === "on") {
-  console.log("[boot] LP engine ON — autonomous liquidity management is live");
+  console.log("[boot] LP engine ON: autonomous liquidity management is live");
   startLpGuard();
   startLpAllocator();
 } else {

@@ -17,7 +17,7 @@
 // State is derived from the clock and each position's own tick span, so a
 // guard restart loses nothing.
 //
-// This starts only when MERIDIAN_LP_ENGINE=on (see index.ts) — but it is not
+// This starts only when MERIDIAN_LP_ENGINE=on (see index.ts), but it is not
 // gated by AGENT_LIVE_TRADING, because protecting an open position must keep
 // working when signal trading is off. The practical consequence: any process
 // running with the engine on and holding AGENT_SIGNER_PRIVATE_KEY is a live

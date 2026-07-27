@@ -85,8 +85,8 @@ switches, and conflating them wastes time:
 
 ### Market-making (LP) — what the agent actually does
 
-`AGENT_LIVE_TRADING` is **not** involved. The liquidity engine — `startLpGuard()`
-and `startLpAllocator()` — starts only when `MERIDIAN_LP_ENGINE=on`; any other
+`AGENT_LIVE_TRADING` is **not** involved. The liquidity engine (`startLpGuard()`
+and `startLpAllocator()`) starts only when `MERIDIAN_LP_ENGINE=on`; any other
 value (including unset) leaves both loops unstarted at boot, so deploying is not
 the same action as managing funds.
 
@@ -95,7 +95,7 @@ the same action as managing funds.
 2. **Fund the signer wallet** with ETH (gas) *and* USDG (capital). Its address is
    the `AGENT_SIGNER_PRIVATE_KEY` wallet. Without ETH it cannot pay gas even when
    it holds USDG, so both are required.
-3. **Open a position** — nothing auto-deploys idle cash:
+3. **Open a position** (nothing auto-deploys idle cash):
    `POST /api/lp-open {"symbol":"NVDA"}` with the `MERIDIAN_MCP_TOKEN` bearer.
    Tradable: NVDA / TSLA / META (0.3%), AAPL / GOOGL (1%).
 
@@ -104,7 +104,7 @@ auto-collect above `MERIDIAN_COLLECT_THRESHOLD_USD`.
 
 **To stop:** close the position (`POST /api/lp-close`). Clearing
 `AGENT_LIVE_TRADING` does *not* stop the LP guard. Clearing `MERIDIAN_LP_ENGINE`
-and redeploying does stop it — but an open position is then **unmanaged**, not
+and redeploying does stop it, but an open position is then **unmanaged**, not
 closed, so close positions first.
 
 ### Directional / momentum trading — retired, off
@@ -141,7 +141,7 @@ entirely. Every knob here reads `Number(...)`, so `0` is a real value, not "unse
 
 **One caveat, so "trading off" is not misread as "nothing moves":** with
 `MERIDIAN_LP_ENGINE=on`, the LP guard is position protection, not signal trading,
-and it runs *even with* `AGENT_LIVE_TRADING=false` — it can re-center, widen, or
+and it runs *even with* `AGENT_LIVE_TRADING=false`: it can re-center, widen, or
 withdraw an existing LP position on its own. If you need the engine to touch
-nothing at all, leave `MERIDIAN_LP_ENGINE` off — remembering that an open
+nothing at all, leave `MERIDIAN_LP_ENGINE` off, remembering that an open
 position is then unmanaged, not closed.

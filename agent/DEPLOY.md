@@ -9,7 +9,7 @@ container host works: Fly.io, Railway, Render, a VPS.
 - `AGENT_SIGNER_PRIVATE_KEY` — the agent wallet key. THIS LIVES ON THE HOST.
   Fund it only with what you'd accept losing to a host compromise.
 - `AGENT_LIVE_TRADING` — `true` to trade, `false` for observe-only
-- `MERIDIAN_LP_ENGINE` — `on` to run the autonomous liquidity loops (LP guard +
+- `MERIDIAN_LP_ENGINE`: `on` to run the autonomous liquidity loops (LP guard +
   allocator); anything else boots API-only and moves no funds. Set it only on
   the one instance that holds the signer key.
 - `MERIDIAN_MCP_TOKEN` — bearer token gating /mcp and /api/index-trade

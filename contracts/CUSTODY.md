@@ -34,7 +34,7 @@ guarantee.
 
 > **Status: design, not current behavior.** What ships today in
 > `agent/src/custody/vault.ts` scopes the session key to the UniversalRouter's
-> `execute` selector **directly** — the recipient-pinning adapter below is the
+> `execute` selector **directly**. The recipient-pinning adapter below is the
 > audit-phase refinement (see the inline note in `buildScopeSession`), and
 > `MeridianVaultRouter.sol` is a draft referenced by nothing else yet. Custody
 > is dormant behind `CUSTODY_SESSION_MASTER`; do not enable it expecting the
