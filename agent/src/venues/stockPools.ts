@@ -81,12 +81,21 @@ const POOLS: Record<string, PoolEntry> = {
   // rule stands: do not re-add on simulation alone. Needs a REAL swap + mint to
   // confirm before this becomes executable.
 };
-// Excluded, re-measured 2026-07-16 (max USDG in at ~1% impact): MU/USDG 1% ~$15,
-// AMD/USDG 1% ~$40 — the allocator's high "$/day" for these came from us being
-// ~100% of a TINY pool (unreliable, un-deployable at our size). (MSFT was here
-// too until 2026-07-21, when its 0.3% pool deepened to ~$40k — now in POOLS.)
-// Older 2026-07-11 notes: PLTR/SNDK dust; AMZN/COIN/CRWV/INTC/ORCL NATIVE-quoted
-// dust; BE/USAR no pool. Re-measure before re-adding any.
+// Exclusion history, RECONCILED 2026-07-27. The 2026-07-16 measurements (max
+// USDG in at ~1% impact: MU/USDG 1% ~$15, AMD/USDG 1% ~$40) are obsolete: a
+// tick-walking re-measure against live state (naive constant-L formula and
+// tick-crossed integration agree within a few percent, validated against the
+// baseline pools, and independently re-derived by an adversarial review that
+// also reproduced the $15 figure exactly at the 2026-07-16 block) found the
+// pools genuinely deepened ~600x in eleven days (MU in-range L grew 596x,
+// block 11239912 vs live). 1%-impact depth on 2026-07-27: MU 1% ~$9.1k,
+// INTC 1% ~$6.9k, COIN 1% ~$7.1k, PLTR 1% ~$5.3k, USAR 1% ~$4.1k, AMZN 0.3%
+// ~$2.9k, AMD 1% ~$2.5k, SNDK 1% ~$1.8k. Note the qualifier logs depth at a
+// 2% move, roughly double these figures: same reality, different definition.
+// The allocator's share trap still applies: a high $/day from being most of a
+// pool does not transfer. This table stays the SWAP seed until the
+// acquisition path learns to consult the qualified set; widening it is a
+// deliberate decision, not a drive-by.
 
 const BRIDGE_FEE = 500; // 0.05% NATIVE/USDG tier — deepest of the four real tiers found, used when a rotation's two legs don't share a quote currency
 const BRIDGE_TICK_SPACING = 10;
