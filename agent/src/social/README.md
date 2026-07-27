@@ -49,7 +49,11 @@ that is easy to miss. The credentials are real and the account is real; only
 | `merdVoice.ts` | Composes candidates from real signal values only — never invents a number. |
 | `merdMemory.ts` | Per-agent continuity, so he is not writing from a 12-item window. |
 | `postGuards.ts` | Every output guard, in one place. 38 tests. |
-| `cadence.ts` | Decides when he has something worth saying, and stays quiet otherwise. |
+
+The cadence — deciding when he has something worth saying and staying quiet
+otherwise — is NOT a file here: it lives in `agent/_merd-autopilot.mts`, run by
+launchd on the operator's machine. This directory stays unwired from the server
+on purpose; the cadence rides the same deliberate gap.
 
 ## Why the launch is still off limits
 

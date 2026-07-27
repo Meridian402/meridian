@@ -32,6 +32,14 @@ guarantee.
 
 ## The fix: a thin, recipient-pinning adapter
 
+> **Status: design, not current behavior.** What ships today in
+> `agent/src/custody/vault.ts` scopes the session key to the UniversalRouter's
+> `execute` selector **directly** — the recipient-pinning adapter below is the
+> audit-phase refinement (see the inline note in `buildScopeSession`), and
+> `MeridianVaultRouter.sol` is a draft referenced by nothing else yet. Custody
+> is dormant behind `CUSTODY_SESSION_MASTER`; do not enable it expecting the
+> property this section describes until vault.ts targets the adapter.
+
 The session key is scoped to call **only** `MeridianVaultRouter` — never the
 UniversalRouter directly. The adapter takes trade *intent* (which tokens, how
 much, min out) and **builds the router call itself**, setting the payout
