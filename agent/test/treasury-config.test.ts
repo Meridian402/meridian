@@ -24,6 +24,16 @@ test("the real treasury passes", () => {
   assert.doesNotThrow(() => assertTreasuryIsLive(TREASURY_WALLET));
 });
 
+test("an unknown but plausible address is refused: allowlist, not denylist", () => {
+  // The 2026-07-27 crash-loop was caught only because the stale value happened
+  // to be on the denylist already. The next stale value will not be. Anything
+  // that is not the canonical treasury is refused, no list maintenance needed.
+  assert.throws(
+    () => assertTreasuryIsLive("0x1111111111111111111111111111111111111111"),
+    /not the canonical treasury/,
+  );
+});
+
 test("unconfigured is allowed, because PaymentGate already fails safe on it", () => {
   // An empty treasury makes PaymentGate refuse to quote a price at all, which
   // is a louder and earlier failure than anything this guard would add.

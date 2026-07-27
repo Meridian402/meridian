@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildServer } from "./mcp/server.js";
 import { config, assertTreasuryIsLive } from "./config.js";
+import { launchpadDeployment } from "./launch/portal.js";
 import { PaymentGate } from "./payments/PaymentGate.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
@@ -38,7 +39,7 @@ import { startLighterLogger } from "./research/lighterLogger.js";
 import { startYieldLogger, yieldSummary } from "./research/yieldLogger.js";
 import { opportunitiesSnapshot } from "./signals/opportunities.js";
 import { validateFleet, recordFleet, exportBundle } from "./deploy/fleets.js";
-import { getAgentSigner, getAgentAddress, getPublicClient } from "./venues/signer.js";
+import { getAgentSigner, getAgentAddress, getPublicClient, assertSignerIsHouseWallet } from "./venues/signer.js";
 import { earnOpportunities, prepareCarry } from "./earn/carry.js";
 import { prepareIndexYield } from "./earn/yieldPosition.js";
 import { runScout, scoutAllowed, bountyBoard, settleBounties } from "./earn/scout.js";
@@ -228,8 +229,11 @@ function executeAuthorized(req: Request): boolean {
 
 // Before anything can be quoted a price, prove we are not collecting into a
 // wallet we retired. Throwing here stops the process; the alternative is
-// running normally and misdirecting every payment.
+// running normally and misdirecting every payment. Same doctrine for the
+// signer: a key that is present must be the pinned house wallet, or everything
+// that explains the money follows the wrong address.
 assertTreasuryIsLive();
+assertSignerIsHouseWallet();
 const paymentGate = new PaymentGate(config.treasuryAddress, config.x402FacilitatorUrl);
 const revenue = new RevenueLedger();
 
@@ -1156,6 +1160,14 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
 }
+// Which chain user-facing token launches land on. Testnet is the safe default;
+// the silent part is the problem, so every boot log says it out loud.
+const launchpad = launchpadDeployment();
+console.log(
+  launchpad.chainId === 46630
+    ? "[boot] launchpad: TESTNET (chain 46630). User launches are rehearsals until LAUNCH_NETWORK=mainnet."
+    : `[boot] launchpad: MAINNET (chain ${launchpad.chainId})`,
+);
 startEquitySnapshotter();
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();

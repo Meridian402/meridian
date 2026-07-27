@@ -1,3 +1,5 @@
+import { TREASURY_WALLET } from "./merd/wallets.js";
+
 export const config = {
   solanaRpcUrl: process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
   wormholeRpcUrl: process.env.WORMHOLE_RPC_URL ?? "",
@@ -127,18 +129,22 @@ export const config = {
 };
 
 /**
- * Refuse to run pointed at a wallet we have retired.
+ * Refuse to run pointed at anything but the canonical treasury.
  *
  * treasuryAddress is the `payTo` of the entire x402 rail: it is the address
  * PaymentGate hands to anyone about to pay us, and the address it then checks
  * Transfer logs against when verifying that payment. Point it somewhere stale
- * and nothing errors — callers are quoted the wrong destination, their payments
+ * and nothing errors; callers are quoted the wrong destination, their payments
  * verify against it happily, and the money lands somewhere we are not watching.
  *
- * That is exactly what was configured: MERIDIAN_TREASURY_ADDRESS still held
- * 0x76a4fF…, a wallet deliberately retired and wired to nothing, while every
- * comment in the codebase said revenue goes to the cold treasury. It cost
- * nothing only because the backend had not been deployed yet.
+ * This started as a denylist of known-retired wallets, and the 2026-07-27
+ * crash-loop proved both halves of that design: it caught a stale Railway
+ * value at boot (good), and it only caught it because that address had been
+ * added to the list (luck). Two rotations inside three days is the actual
+ * cadence, so the guard is now an allowlist: the env var must equal
+ * TREASURY_WALLET in merd/wallets.ts, the one place a rotation is recorded.
+ * A rotation updates that one file, and every stale or typo'd env value fails
+ * loudly at the next boot instead of silently collecting into the past.
  *
  * An empty value stays allowed: PaymentGate already treats that as
  * "unconfigured" and refuses to quote a price, which fails safe. The failure
@@ -151,10 +157,11 @@ const RETIRED_TREASURY_ADDRESSES = [
 
 export function assertTreasuryIsLive(address: string = config.treasuryAddress): void {
   if (!address) return; // unconfigured fails safe elsewhere
-  if (RETIRED_TREASURY_ADDRESSES.includes(address.toLowerCase())) {
-    throw new Error(
-      `MERIDIAN_TREASURY_ADDRESS is ${address}, a retired wallet. Every x402 payment would be ` +
-        "quoted and verified against an address nobody is watching. Set it to the current treasury.",
-    );
-  }
+  if (address.toLowerCase() === TREASURY_WALLET.toLowerCase()) return;
+  const known = RETIRED_TREASURY_ADDRESSES.includes(address.toLowerCase());
+  throw new Error(
+    `MERIDIAN_TREASURY_ADDRESS is ${address}, ${known ? "a retired wallet" : "not the canonical treasury"}. ` +
+      `The live treasury is ${TREASURY_WALLET} (merd/wallets.ts TREASURY_WALLET). Every x402 payment ` +
+      "would otherwise be quoted and verified against an address nobody is watching.",
+  );
 }
