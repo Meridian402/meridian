@@ -23,7 +23,6 @@ import { provisionResearchFleet, triggerResearchRun } from "./research/orchestra
 import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad } from "./chatLimits.js";
 import { pendingLaunchFor, clearPendingLaunch } from "./launch/pendingLaunches.js";
 import { ResearchStrategy } from "./strategy/ResearchStrategy.js";
-import { startMerdCadence } from "./social/cadence.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { walletOps24h } from "./risk.js";
 import { securityHeaders, globalRateLimit, authRateLimit } from "./httpGuards.js";
@@ -1132,29 +1131,13 @@ app.delete("/mcp", replaySessionRequest);
 // after an uncontrolled re-entry bought 68,702.5 $INDEX with real ETH.
 startAgentLoop(market, new ResearchStrategy(), decisionLog, config.agentThinkIntervalMs);
 
-// Merd talking about Meridian on his own, a few times a week. DRAFT-FIRST:
-// candidates are written to x-posts.jsonl and nothing publishes unless X_LIVE
-// is explicitly "true". Every candidate is filtered by postGuards first, which
-// blocks the unlaunched token, contract addresses and launch mechanics — a
-// probe found all nine plausible launch sentences passed the guards as they
-// were before those rules were added.
-startMerdCadence(() => {
-  const latest = decisionLog.recent(1)[0];
-  const y = yieldSummary() as { latest?: { measuredSyrupAprPct?: number | null; indexImpliedAprPct?: number | null } | null };
-  const syrup = y?.latest?.measuredSyrupAprPct;
-  const index = y?.latest?.indexImpliedAprPct;
-  // Whichever of the two measured yields is actually the better one today.
-  const best =
-    syrup != null && (index == null || syrup >= index)
-      ? { label: "syrupUSDG carry", aprPct: syrup }
-      : index != null
-        ? { label: "$INDEX distributions", aprPct: index }
-        : null;
-  return {
-    decision: latest ? { action: latest.action, reason: latest.reason, thoughts: latest.thoughts } : null,
-    topYield: best,
-  };
-});
+// NOTE: Merd's X voice is NOT wired here. It runs out of process, driven by
+// launchd (_merd-post.sh -> _merd-autopilot.mts), where an LLM is handed live
+// state and his own memory and DECIDES what to say. A template composer was
+// briefly started from here and it was a downgrade in every sense: it published
+// canned lines during cycles the real Merd had gone quiet in, and its output
+// landed in the same ledger he reads back as his own history.
+// See src/social/README.md.
 
 startLpGuard();
 startLpAllocator();

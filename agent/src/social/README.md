@@ -1,9 +1,35 @@
-# Merd's public voice — wired, in draft mode
+# Merd's public voice — runs OUT OF PROCESS
 
-`cadence.ts` is started from `src/index.ts` and composes a candidate a few times
-a week. **Nothing publishes**: `xClient` posts only when `X_LIVE === "true"`,
-and that variable is unset, so candidates are written to `x-posts.jsonl` and go
-no further.
+**The X account is driven by `_merd-autopilot.mts`, not by anything in
+`src/index.ts`.** launchd fires `_merd-post.sh` every two hours; the autopilot
+hands an LLM the live state and his own memory, and he decides what — if
+anything — to say. `_merd-engage.sh` (2 min) and `_merd-outreach.sh` (3 h) do
+the same for replies and outreach.
+
+This directory holds the pieces that autopilot uses: the X client, the output
+guards, and his memory. `merdVoice.ts` is a template composer that is **not**
+his X voice — a cadence built on it was briefly started from the server and was
+a downgrade in every sense, publishing canned lines during cycles the real Merd
+had deliberately gone quiet in, into the same ledger he reads back as his own
+history. Do not wire it to X again.
+
+## When he goes quiet, check this first
+
+A gateway failure used to be indistinguishable from a decision. `postMessageSync`
+returns `{ text: null, error }` on failure, that fell through the length check,
+and the log said **"Merd chose to hold this cycle."** OpenRouter ran out of
+credits on 2026-07-25 and produced 15 consecutive fake "holds" over 30 hours
+before anyone noticed, because the log described an agent thinking rather than
+an agent that could not think.
+
+The autopilot now exits non-zero and prints the real error. If he is quiet:
+
+```
+tail -20 _autopilot.log          # the reason will be in here now
+```
+
+A 402 means the LLM budget is empty — that is a billing problem, not a Merd
+problem.
 
 The launch itself remains off limits. MERD is built and unlaunched, the whole
 PoolKey is public in this repo, and v4's `initialize` is permissionless — so

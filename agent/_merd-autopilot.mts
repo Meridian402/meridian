@@ -136,6 +136,19 @@ If nothing is genuinely worth saying right now: reply with PASS on the first lin
 const sessionId = "x-autopilot";
 await gw.agent(X_AGENT).openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
 const resp = await gw.agent(X_AGENT).postMessageSync(sessionId, { text: prompt }, { timeout: 90000 });
+
+// A failed call is NOT a decision. The gateway returns { text: null, error }
+// on failure, and text:null used to fall straight through to the length check
+// and be logged as "Merd chose to hold this cycle" — so 30 hours of OpenRouter
+// returning "402 ... can only afford 346 tokens" looked exactly like an agent
+// thoughtfully staying quiet. Nothing in the log said otherwise, which is why
+// it went unnoticed for a day and a half. Exit non-zero so launchd records a
+// failure rather than a clean run, and say what actually happened.
+const gwError = (resp as { error?: string }).error;
+if (gwError || resp.text == null) {
+  console.error(`[autopilot] Merd could not think this cycle: ${gwError ?? "gateway returned no text"}`);
+  process.exit(1);
+}
 // Split the private note off BEFORE any public processing, so a NOTE can never
 // reach the timeline. Unlabelled replies fall through as pure tweet text, so a
 // model that ignores the format still posts normally.

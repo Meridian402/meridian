@@ -164,6 +164,8 @@ test("ordinary market talk is untouched by the new rules", () => {
 
 // ── the composer must not invert a trend ─────────────────────────────────────
 
+// merdVoice is no longer Merd's X voice (that is the LLM autopilot), but it
+// still composes elsewhere, and these two bugs are worth keeping fixed.
 test("a cooling yield is never announced as climbing", async () => {
   // Found in the first real draft run: the yield logger says "cooling from
   // highs", the falling-trend regex did not match that word, and Merd
