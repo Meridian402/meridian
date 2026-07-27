@@ -68,10 +68,14 @@ test("the salt is the mined value, not a placeholder", () => {
 
 // ── wallet topology ──────────────────────────────────────────────────────────
 
-test("the three wallet roles are three distinct addresses", async () => {
+test("the roles collapse exactly as decided: agent and treasury one address, deployer apart", async () => {
+  // The 2026-07-27 single-wallet decision: all money moves in and out of the
+  // treasury, which therefore also signs. Pinned in BOTH directions so neither
+  // a silent re-split nor a deployer collapse can happen without a test
+  // failing first.
   const { WALLET_ROLES } = await import("../src/merd/wallets.js");
-  const seen = new Set(Object.values(WALLET_ROLES).map((a) => a.toLowerCase()));
-  assert.equal(seen.size, 3, "a collapsed role means one compromise costs more than it has to");
+  assert.equal(WALLET_ROLES.agent.toLowerCase(), WALLET_ROLES.treasury.toLowerCase(), "agent and treasury are one wallet by decision");
+  assert.notEqual(WALLET_ROLES.deployer.toLowerCase(), WALLET_ROLES.treasury.toLowerCase(), "the once-ever deploy key must not be the always-on key");
 });
 
 test("the treasury is the wallet that holds the supply", async () => {
@@ -79,16 +83,12 @@ test("the treasury is the wallet that holds the supply", async () => {
   assert.equal(MERD.treasury, TREASURY_WALLET, "MERD's supply must land in the treasury, not elsewhere");
 });
 
-test("neither the agent nor the deployer is the treasury", async () => {
-  const { MERD_AGENT_WALLET, DEPLOYER_WALLET, TREASURY_WALLET } = await import("../src/merd/wallets.js");
-  assert.notEqual(MERD_AGENT_WALLET.toLowerCase(), TREASURY_WALLET.toLowerCase());
-  assert.notEqual(DEPLOYER_WALLET.toLowerCase(), TREASURY_WALLET.toLowerCase());
-});
-
-test("the retired wallet is not wired into any live role", async () => {
-  const { WALLET_ROLES, RETIRED_WALLET } = await import("../src/merd/wallets.js");
+test("no retired wallet is wired into any live role", async () => {
+  const { WALLET_ROLES, RETIRED_WALLET, PREVIOUS_AGENT_WALLET, PREVIOUS_TREASURY_WALLET } = await import("../src/merd/wallets.js");
   for (const [role, addr] of Object.entries(WALLET_ROLES)) {
-    assert.notEqual(addr.toLowerCase(), RETIRED_WALLET.toLowerCase(), `${role} points at the retired wallet`);
+    for (const dead of [RETIRED_WALLET, PREVIOUS_AGENT_WALLET, PREVIOUS_TREASURY_WALLET]) {
+      assert.notEqual(addr.toLowerCase(), dead.toLowerCase(), `${role} points at a retired wallet`);
+    }
   }
 });
 

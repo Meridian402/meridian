@@ -119,7 +119,10 @@ closed, so close positions first.
 ### Exactly one host may hold the signer key
 
 Setting `AGENT_SIGNER_PRIVATE_KEY` on a box with `MERIDIAN_LP_ENGINE=on` makes
-that process an LP guard over the house wallet. The house-wallet lock is in-process only and cannot coordinate across
+that process an LP guard over the house wallet. Since 2026-07-27 the house
+wallet IS the treasury (single-wallet decision, see merd/wallets.ts), so the
+one-key-holder doctrine now protects x402 revenue and the MERD fee switch too,
+not just working capital. The house-wallet lock is in-process only and cannot coordinate across
 machines, so two key-holding processes each manage the same position
 independently — a genuine double-spend path. It stays invisible while the wallet
 is empty. Any additional instance that only needs to read sets

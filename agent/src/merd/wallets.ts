@@ -1,31 +1,31 @@
-// The project's wallets, and why there are three rather than one.
+// The project's wallets. There were three roles with three keys; as of
+// 2026-07-27, by explicit operator decision, the agent and treasury roles
+// share ONE address so that all money moves in and out of a single wallet.
 //
-// Each role has a different exposure, so they get different keys. Collapsing
-// any two of them means a single compromise costs more than it has to.
+//   AGENT+TREASURY  HOT. One wallet signs unattended market-making AND
+//                   receives x402 revenue AND holds the MERD supply's fee
+//                   switch and seed authority. The operator holds the key and
+//                   places it in Railway themselves; it never transits chat or
+//                   the repo. What the collapse bought: one address to fund
+//                   and watch. What it cost: a host compromise now reaches
+//                   the treasury, not just working capital. The spend caps
+//                   and the wallet-op breaker in risk.ts are the remaining
+//                   blast-radius bound, so do not loosen them casually.
 //
-//   MERD (agent)   HOT. Signs unattended, market-makes, holds working capital.
-//                  We hold this key because the agent cannot ask permission at
-//                  three in the morning. Blast radius is bounded by the spend
-//                  caps and the per-wallet op limits, not by trust.
+//   DEPLOYER       ONE-SHOT. Pays gas for the token deployment and nothing
+//                  else. Still separate on purpose: the once-ever permanent
+//                  action does not ride the always-on key.
 //
-//   TREASURY       COLD. Receives x402 revenue AND holds the entire MERD supply.
-//                  We deliberately do NOT hold this key. It signs nothing, so it
-//                  needs no key on any machine that runs the agent.
+// The deployer is nearly powerless by design: the token goes out through the
+// CREATE2 proxy, so the deploying wallet is NOT an input to the resulting
+// address (any wallet produces the same MERD address), and the token has no
+// owner, so nothing accrues to the deployer afterwards.
 //
-//   DEPLOYER       ONE-SHOT. Pays gas for the token deployment and nothing else.
-//                  Worth separating even though it is nearly powerless, so the
-//                  autonomous key is not the one that performs a permanent,
-//                  once-ever action.
-//
-// The deployer is nearly powerless on purpose, and it is worth being precise
-// about why: the token goes out through the CREATE2 proxy, so the deploying
-// wallet is NOT an input to the resulting address — any wallet produces the
-// same MERD address — and the token has no owner, so nothing accrues to the
-// deployer afterwards. It buys gas and separation of duties, nothing more.
+// Restoring the split design later means: generate a fresh hot key, point
+// MERD_AGENT_WALLET at its address, move working capital there, and swap
+// AGENT_SIGNER_PRIVATE_KEY. The boot assert in venues/signer.ts follows this
+// file either way.
 import type { Address } from "viem";
-
-/** Merd's own wallet. The only one whose key the running agent needs. */
-export const MERD_AGENT_WALLET: Address = "0xB849aa20b21C015e8F5118Dcf4b631366C2e87bB";
 
 /**
  * x402 revenue in, 1,000,000,000 MERD held, and the hook's one-way fee switch.
@@ -37,6 +37,21 @@ export const MERD_AGENT_WALLET: Address = "0xB849aa20b21C015e8F5118Dcf4b631366C2
  * re-mined all four addresses, including MERD's 0x4663 prefix.
  */
 export const TREASURY_WALLET: Address = "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81";
+
+/**
+ * One wallet for the agent and the treasury alike: the 2026-07-27 single
+ * wallet decision. The engine's signer key must derive to this address, and
+ * venues/signer.ts refuses to boot otherwise.
+ */
+export const MERD_AGENT_WALLET: Address = TREASURY_WALLET;
+
+/**
+ * The hot agent wallet this replaced (2026-07-23 to 2026-07-27): generated
+ * locally, key lived only in Railway, retired empty the day the roles
+ * collapsed. Recorded so its appearance in old executions reads as history,
+ * not as live infrastructure.
+ */
+export const PREVIOUS_AGENT_WALLET: Address = "0xB849aa20b21C015e8F5118Dcf4b631366C2e87bB";
 
 /**
  * The treasury this project used until 2026-07-26, superseded by the address
@@ -57,7 +72,10 @@ export const DEPLOYER_WALLET: Address = "0x336e91AE16AC31b4DF4AecA51ba8A0c2B5C82
  */
 export const RETIRED_WALLET: Address = "0x76a4fF023Faa6Ea3E378d9e6d74Eb6B2676FB38c";
 
-/** Roles that must never collapse onto one address. */
+/**
+ * Live roles. Agent and treasury deliberately share one address since
+ * 2026-07-27; the deployer must stay distinct from both.
+ */
 export const WALLET_ROLES = {
   agent: MERD_AGENT_WALLET,
   treasury: TREASURY_WALLET,
