@@ -28,21 +28,27 @@ import {
  * neither M nor R exists in that alphabet at any mining cost. The symbol is
  * what wallets display; the address only ever carries the chain id.
  */
-export const MERD_SALT: Hex = "0x000000000000000000000000000000000000000000000000000000000000746d"; // 29805
+export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000012e8a"; // 77450
 
 /** Where MERD lands. Deterministic, and verified before any broadcast. */
-export const MERD_ADDRESS: Address = "0x4663DE6D3b3B84343AFdDB7D6Ab6c06ea412dA48";
+export const MERD_ADDRESS: Address = "0x4663196C0Ad93594907555b2018457695Db8Ccef";
 
 /**
  * Receives the entire supply, and separately receives x402 revenue. One
  * treasury doing both jobs, by design.
  *
- * Deliberately NOT a wallet whose key we hold. Merd's key is hot — he signs
- * unattended — and a compromise of it must not also be a compromise of the
- * supply or the revenue. deployToken() refuses outright if the treasury is ever
- * the deploying key.
+ * Since the 2026-07-27 single-wallet decision this IS also the hot signing
+ * wallet: the operator chose one address for all money in and out, accepting
+ * that a compromise of the unattended key reaches the supply authority and
+ * the revenue as well. The spend caps and the wallet-op breaker are the
+ * remaining bound. deployToken() still refuses outright if the treasury is
+ * ever the deploying key.
+ *
+ * Rotated 2026-07-27 (third rotation; the prior treasuries are recorded in
+ * wallets.ts and config.ts's retired list). Every launch address below was
+ * re-mined for this value.
  */
-export const MERD_TREASURY: Address = "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81";
+export const MERD_TREASURY: Address = "0x7037b347B21D5e72452dA1445FB1f01D652d40CC";
 
 /**
  * The pool's fee schedule, fixed at hook construction and unchangeable after.
@@ -93,12 +99,12 @@ export const MERD: TokenDeployment = {
  * Holds the hook's one and only authority: disableFeesForever(), which zeroes
  * the fee permanently and can never raise it.
  *
- * The cold treasury rather than Merd's hot key, and the asymmetry is the reason.
- * Needing to pull this switch within minutes is a remote scenario — it exists
- * for a bug that makes the pool too expensive to trade, and the pool keeps
- * trading either way. A compromised hot key permanently zeroing our revenue is
- * the ordinary one. Between a slow remedy and a fast catastrophe, take the slow
- * remedy; transferOwnership() is there if that trade ever stops making sense.
+ * Under the split-wallet design this was the cold treasury precisely so a
+ * compromised hot key could not zero the fee forever. Since the 2026-07-27
+ * single-wallet decision the treasury IS the hot key, so that protection is
+ * gone by choice and the switch rides the same key that signs unattended.
+ * transferOwnership() exists if the operator ever wants the switch on a cold
+ * key again without re-mining anything.
  */
 export const MERD_HOOK_OWNER: Address = MERD_TREASURY;
 
@@ -130,7 +136,7 @@ export const BUYBACK_TARGETS = {
 } as const;
 
 /** Where the buyback lands. Deterministic, and an input to the hook's address. */
-export const MERD_BUYBACK_ADDRESS: Address = "0x6CE0ED8c30C0F0CA86B649D9019b49dd9cEb7A4a";
+export const MERD_BUYBACK_ADDRESS: Address = "0xCC8fA606De11785dbFea8aAE61d3aB98104D5AFC";
 
 /**
  * The hook, fully specified. Every field is in the init code, so this object IS
@@ -156,7 +162,7 @@ export const MERD_HOOK: HookDeployment = {
  * change. This is the tripwire for that: deployHook refuses to broadcast if the
  * fresh mine disagrees with this line, and a test asserts it on every run.
  */
-export const MERD_HOOK_ADDRESS: Address = "0xD4b8c25FCC380364D0dB3ce86E02677BF1814044";
+export const MERD_HOOK_ADDRESS: Address = "0xdF88487623f3613f0a73572f32D72C28557E0044";
 
 /**
  * The lock that will hold MERD's position, fully specified.
@@ -180,7 +186,7 @@ export const MERD_LOCK: LockDeployment = {
  * transaction can be built at all, because that transaction names it as the
  * position's owner. A test asserts it still reproduces from the current build.
  */
-export const MERD_LOCK_ADDRESS: Address = "0xe171056AB66E2F113101Af74441dFEcF1DeEb6B0";
+export const MERD_LOCK_ADDRESS: Address = "0xAD12379483FEed042042560e3b1F3C7A5042A92C";
 
 /**
  * What goes into the pool on day one.

@@ -36,7 +36,15 @@ import type { Address } from "viem";
  * constructor argument to the token, the hook and the lock — so the change
  * re-mined all four addresses, including MERD's 0x4663 prefix.
  */
-export const TREASURY_WALLET: Address = "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81";
+export const TREASURY_WALLET: Address = "0x7037b347B21D5e72452dA1445FB1f01D652d40CC";
+
+/**
+ * Treasury from 2026-07-26 to 2026-07-27, superseded when the operator chose
+ * a fresh wallet for the single-wallet model. STILL HELD 0.45 ETH at
+ * retirement; those funds must be moved to the live treasury by the operator
+ * (only they hold this key).
+ */
+export const PREVIOUS_TREASURY_WALLET_2: Address = "0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81";
 
 /**
  * One wallet for the agent and the treasury alike: the 2026-07-27 single

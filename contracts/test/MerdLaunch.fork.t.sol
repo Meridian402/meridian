@@ -69,15 +69,15 @@ contract MerdLaunchForkTest is Test, IUnlockCallback {
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     // ── exactly what agent/src/launch pins ───────────────────────────────────
-    address constant TREASURY = 0x759DD0DF4dcd3DE442F544c35f3296F5eB5dFF81;
+    address constant TREASURY = 0x7037b347B21D5e72452dA1445FB1f01D652d40CC;
 
-    bytes32 constant MERD_SALT = bytes32(uint256(0x746d));
-    address constant EXPECTED_MERD = 0x4663DE6D3b3B84343AFdDB7D6Ab6c06ea412dA48;
+    bytes32 constant MERD_SALT = bytes32(uint256(0x12e8a));
+    address constant EXPECTED_MERD = 0x4663196C0Ad93594907555b2018457695Db8Ccef;
 
-    bytes32 constant HOOK_SALT = bytes32(uint256(0x1062));
-    address constant EXPECTED_HOOK = 0xD4b8c25FCC380364D0dB3ce86E02677BF1814044;
+    bytes32 constant HOOK_SALT = bytes32(uint256(0x952f));
+    address constant EXPECTED_HOOK = 0xdF88487623f3613f0a73572f32D72C28557E0044;
 
-    address constant EXPECTED_LOCK = 0xe171056AB66E2F113101Af74441dFEcF1DeEb6B0;
+    address constant EXPECTED_LOCK = 0xAD12379483FEed042042560e3b1F3C7A5042A92C;
 
     // MERD_SEED: one ETH against the entire supply.
     uint256 constant SEED_ETH = 1 ether;

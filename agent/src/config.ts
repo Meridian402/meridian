@@ -153,6 +153,7 @@ export const config = {
 const RETIRED_TREASURY_ADDRESSES = [
   "0x76a4ff023faa6ea3e378d9e6d74eb6b2676fb38c", // rotated out 2026-07-23
   "0x475c1fe4d1e7a703eaca6141978b04010e410bf4", // superseded 2026-07-26, custody moved to a key the operator holds
+  "0x759dd0df4dcd3de442f544c35f3296f5eb5dff81", // superseded 2026-07-27, single-wallet rotation to a fresh operator key
 ];
 
 export function assertTreasuryIsLive(address: string = config.treasuryAddress): void {
