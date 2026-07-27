@@ -27,9 +27,9 @@ export const robinhoodChain = {
  *
  * EXACTLY ONE RUNNING PROCESS MAY HOLD THIS KEY.
  *
- * Setting it does more than enable trading: startLpGuard() runs unconditionally
- * (it is NOT gated by AGENT_LIVE_TRADING, because position protection must work
- * even with signal trading off), so every process that can read this key becomes
+ * Setting it does more than enable trading: with MERIDIAN_LP_ENGINE=on,
+ * startLpGuard() runs (NOT gated by AGENT_LIVE_TRADING, because position
+ * protection must work even with signal trading off), so every such process becomes
  * an independent LP guard over the same wallet. withHouseWalletLock serialises
  * house-wallet ops WITHIN a process; it is a module-level lock and cannot
  * coordinate across processes or hosts. Two guards therefore each see the same

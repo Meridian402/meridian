@@ -441,8 +441,8 @@ app.post("/api/index-trade", async (req: Request, res: Response) => {
 // Ledger sync between a key-holding operator machine and a read-only instance.
 //
 // WHICH SIDE IS AUTHORITATIVE FOLLOWS THE SIGNER KEY, NOT THE HOSTNAME. Whoever
-// has AGENT_SIGNER_PRIVATE_KEY runs the LP guard (startLpGuard is unconditional)
-// and therefore writes the real lp-positions/executions rows; the other side is
+// has AGENT_SIGNER_PRIVATE_KEY plus MERIDIAN_LP_ENGINE=on runs the LP guard and
+// therefore writes the real lp-positions/executions rows; the other side is
 // the one that goes stale and needs this push.
 //
 // As deployed today the KEY IS SET IN RAILWAY, so the cloud is the guard and the
@@ -1139,8 +1139,23 @@ startAgentLoop(market, new ResearchStrategy(), decisionLog, config.agentThinkInt
 // landed in the same ledger he reads back as his own history.
 // See src/social/README.md.
 
-startLpGuard();
-startLpAllocator();
+// The autonomous money loops. startLpGuard withdraws, rebalances, retiles and
+// mints REAL liquidity on a 5-minute tick using the house wallet's key, and
+// startLpAllocator scans and moves capital between pools. Neither was gated by
+// anything before, which meant `deploy` and `start managing funds` were the
+// same action — including on a fresh box, on a rollback, or on a restart nobody
+// intended. AGENT_LIVE_TRADING does NOT cover these; it only gates the
+// momentum/index path, which is a different set of transactions entirely.
+//
+// Explicit opt-in, so the default of a newly deployed instance is to serve the
+// API and touch nothing.
+if (process.env.MERIDIAN_LP_ENGINE === "on") {
+  console.log("[boot] LP engine ON — autonomous liquidity management is live");
+  startLpGuard();
+  startLpAllocator();
+} else {
+  console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
+}
 startEquitySnapshotter();
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();

@@ -17,11 +17,12 @@
 // State is derived from the clock and each position's own tick span, so a
 // guard restart loses nothing.
 //
-// This starts UNCONDITIONALLY (see index.ts) — it is not gated by
-// AGENT_LIVE_TRADING, because protecting an open position must keep working
-// when signal trading is off. The practical consequence: any process holding
-// AGENT_SIGNER_PRIVATE_KEY is a live guard over the house wallet, so exactly one
-// may run at a time. See the note on getAgentSigner in venues/signer.ts.
+// This starts only when MERIDIAN_LP_ENGINE=on (see index.ts) — but it is not
+// gated by AGENT_LIVE_TRADING, because protecting an open position must keep
+// working when signal trading is off. The practical consequence: any process
+// running with the engine on and holding AGENT_SIGNER_PRIVATE_KEY is a live
+// guard over the house wallet, so exactly one may run at a time. See the note
+// on getAgentSigner in venues/signer.ts.
 import { openPositionsOnChain, withdrawPosition, mintRange, poolTick, lastMintedPosition, lastPoolOnChain, uncollectedFeesUsd, collectFees, type LpPositionRecord } from "./venues/lpPositions.js";
 import { realBuyStockFromNative, realSellStockForUsdg, poolPricesUsd, isTradable, isAutoExecutable, poolFeePct } from "./venues/stockPools.js";
 import { getAgentSigner, getPublicClient } from "./venues/signer.js";

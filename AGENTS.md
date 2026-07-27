@@ -85,12 +85,17 @@ switches, and conflating them wastes time:
 
 ### Market-making (LP) — what the agent actually does
 
-`AGENT_LIVE_TRADING` is **not** involved. `startLpGuard()` runs unconditionally.
+`AGENT_LIVE_TRADING` is **not** involved. The liquidity engine — `startLpGuard()`
+and `startLpAllocator()` — starts only when `MERIDIAN_LP_ENGINE=on`; any other
+value (including unset) leaves both loops unstarted at boot, so deploying is not
+the same action as managing funds.
 
-1. **Fund the signer wallet** with ETH (gas) *and* USDG (capital). Its address is
+1. **Set `MERIDIAN_LP_ENGINE=on`** on the instance that holds the signer key and
+   redeploy. This is a boot-time gate; changing it needs a restart.
+2. **Fund the signer wallet** with ETH (gas) *and* USDG (capital). Its address is
    the `AGENT_SIGNER_PRIVATE_KEY` wallet. Without ETH it cannot pay gas even when
    it holds USDG, so both are required.
-2. **Open a position** — nothing auto-deploys idle cash:
+3. **Open a position** — nothing auto-deploys idle cash:
    `POST /api/lp-open {"symbol":"NVDA"}` with the `MERIDIAN_MCP_TOKEN` bearer.
    Tradable: NVDA / TSLA / META (0.3%), AAPL / GOOGL (1%).
 
@@ -98,11 +103,13 @@ The guard then manages it: tight ±1% in market hours, wide ±4% over weekends,
 auto-collect above `MERIDIAN_COLLECT_THRESHOLD_USD`.
 
 **To stop:** close the position (`POST /api/lp-close`). Clearing
-`AGENT_LIVE_TRADING` does *not* stop the LP guard.
+`AGENT_LIVE_TRADING` does *not* stop the LP guard. Clearing `MERIDIAN_LP_ENGINE`
+and redeploying does stop it — but an open position is then **unmanaged**, not
+closed, so close positions first.
 
 ### Directional / momentum trading — retired, off
 
-3. **Set `AGENT_LIVE_TRADING=true`** and redeploy to re-enable the rotation loop.
+4. **Set `AGENT_LIVE_TRADING=true`** and redeploy to re-enable the rotation loop.
    It defaults to `false`; while false, the loop logs decisions and signs
    nothing. This is the strategy behind the 2026-07-13 churn incident; leaving it
    off is the deliberate posture.
@@ -111,8 +118,8 @@ auto-collect above `MERIDIAN_COLLECT_THRESHOLD_USD`.
 
 ### Exactly one host may hold the signer key
 
-Setting `AGENT_SIGNER_PRIVATE_KEY` makes that process an LP guard over the house
-wallet. The house-wallet lock is in-process only and cannot coordinate across
+Setting `AGENT_SIGNER_PRIVATE_KEY` on a box with `MERIDIAN_LP_ENGINE=on` makes
+that process an LP guard over the house wallet. The house-wallet lock is in-process only and cannot coordinate across
 machines, so two key-holding processes each manage the same position
 independently — a genuine double-spend path. It stays invisible while the wallet
 is empty. Any additional instance that only needs to read sets
@@ -132,8 +139,9 @@ and it must exceed the book — set below the deployable balance it silently nev
 fires, so a flat wallet stays flat and out of the market. `0` disables recovery
 entirely. Every knob here reads `Number(...)`, so `0` is a real value, not "unset".
 
-**One caveat, so "trading off" is not misread as "nothing moves":** the LP guard
-is position protection, not signal trading, and it runs *even with*
-`AGENT_LIVE_TRADING=false` — it can re-center, widen, or withdraw an existing LP
-position on its own. If you need the engine to touch nothing at all, it must also
-hold no open LP positions.
+**One caveat, so "trading off" is not misread as "nothing moves":** with
+`MERIDIAN_LP_ENGINE=on`, the LP guard is position protection, not signal trading,
+and it runs *even with* `AGENT_LIVE_TRADING=false` — it can re-center, widen, or
+withdraw an existing LP position on its own. If you need the engine to touch
+nothing at all, leave `MERIDIAN_LP_ENGINE` off — remembering that an open
+position is then unmanaged, not closed.
