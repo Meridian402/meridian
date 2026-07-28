@@ -2,7 +2,7 @@
 // posts and chooses what (if anything) to say. The script is just his hands.
 // DRY_RUN=1 previews without posting. Meant to run on a cadence.
 import { GatewayClient } from "@openhermit/sdk";
-import { postTweet } from "./src/social/xClient.js";
+import { postTweet, getMyPostMetrics } from "./src/social/xClient.js";
 import { cleanReply, forbiddenReason, tooSimilar } from "./src/social/postGuards.js";
 import { recallForPrompt, recentlyShipped, remember, splitNote } from "./src/social/merdMemory.js";
 import { dataPath } from "./src/dataDir.js";
@@ -49,7 +49,7 @@ const lpUsd = perf?.current?.lpValueUsd ?? 0;
 const isTrading = lpUsd > 1 || totalUsd > 5;
 const posture = isTrading
   ? "You currently hold live, on-chain positions. Speak to them honestly, including the parts that are not going well."
-  : "IMPORTANT — you are NOT trading right now. The book holds no positions and no meaningful capital; you have not deployed. Do not imply you are managing a book, holding a position, keeping anything flat, or about to deploy capital. You are early, watching and researching. Being plainly honest that you are observing and not yet trading reads far better than posing as an active desk.";
+  : "IMPORTANT: you are NOT trading right now. The book holds no positions and no meaningful capital; you have not deployed. Do not imply you are managing a book, holding a position, keeping anything flat, or about to deploy capital. You are early, watching and researching. Being plainly honest that you are observing and not yet trading reads far better than posing as an active desk.";
 
 const data = [
   "Your desk's current reads:",
@@ -66,13 +66,14 @@ const data = [
 
 let recent: string[] = [];
 let lastPostAt = 0;
+let postedRows: Array<{ at?: number; id?: string; text?: string }> = [];
 const ledger = dataPath("x-posts.jsonl");
 if (existsSync(ledger)) {
-  const rows = readFileSync(ledger, "utf8").trim().split("\n")
+  postedRows = readFileSync(ledger, "utf8").trim().split("\n")
     .map((l) => { try { return JSON.parse(l); } catch { return null; } })
     .filter((x) => x?.posted && x?.text);
-  recent = rows.map((x) => x.text as string).slice(-12);
-  lastPostAt = rows.length ? (rows[rows.length - 1].at ?? 0) : 0;
+  recent = postedRows.map((x) => x.text as string).slice(-12);
+  lastPostAt = postedRows.length ? (postedRows[postedRows.length - 1].at ?? 0) : 0;
 }
 
 // NOTE: the git delivery-log feed was removed here. Feeding Merd his own commit
@@ -94,6 +95,39 @@ if (lastPostAt) {
   }
 }
 
+// Performance feedback: how his OWN recent posts actually landed. This is the
+// self-learning loop for STYLE, the mirror of the journal loop for market
+// reads. Handed to him as an OBSERVATION, never a target: engagement on crypto
+// X rewards the hype the voice bans, so this only informs and the voice rules
+// stay the floor. Only matured posts (>2h) carry any signal; a just-posted
+// tweet reads as zero no matter how good. Skipped unless several have matured,
+// because 3 likes vs 1 is noise, not a lesson. Best-effort: a failed fetch must
+// never cost a post.
+let performance = "";
+try {
+  const MATURE_MS = 2 * 60 * 60 * 1000;
+  const matured = postedRows.filter((r) => r.id && r.at && Date.now() - (r.at as number) > MATURE_MS).slice(-8);
+  if (matured.length >= 4) {
+    const metrics = await getMyPostMetrics(matured.map((r) => r.id as string));
+    const lines = matured
+      .map((r) => {
+        const m = metrics[r.id as string];
+        if (!m) return null;
+        const ageH = Math.round((Date.now() - (r.at as number)) / 3600_000);
+        const len = (r.text as string).length;
+        return `- (${ageH}h ago, ${len}c) "${(r.text as string).slice(0, 55)}..." got ${m.likes} likes, ${m.replies} replies, ${m.reposts} reposts`;
+      })
+      .filter(Boolean) as string[];
+    if (lines.length >= 4) {
+      performance =
+        `How your own recent posts actually landed. Engagement builds over hours, so a newer post reads low no matter how good it was, and small numbers are noise: look ONLY for a pattern across several, never react to a single tweet.\n${lines.join("\n")}\n\n` +
+        `Treat this as an observation, not a target. Notice what kind of post tends to land: shorter or longer, a number or a take, a plain read or a callback, and let it inform how you write this one. NEVER chase engagement, and never reach for hype, a hot take, or a louder register to farm it. The voice and boundary rules always win. If no clear pattern stands out, ignore this entirely.\n\n`;
+    }
+  }
+} catch {
+  /* performance feedback is best-effort; a failed fetch must never cost a post */
+}
+
 // His own memory (private notes from previous cycles) and the curated feed of
 // what actually shipped -- the two things he had no access to before.
 const journal = recallForPrompt(X_AGENT, 8);
@@ -107,7 +141,7 @@ ${posture}
 
 You live on Robinhood Chain, Robinhood's layer 2 for tokenized real-world assets that trade 24/7. Robinhood Crypto issues real tokenized stocks on it, 18 of them (NVDA, TSLA, AAPL, SPCX which is actual SpaceX, CRWV for CoreWeave, USAR, and more), including private companies you cannot buy anywhere else. The world around you: The Index (the pools where they trade), Lighter at rwa.wtf (perps), USDG (the dollar it all runs on). It is real, official, and early, and most people have not noticed yet.
 
-${journal ? `What you have been chewing on lately, in your own words. This is your memory, not a script: pick a thread back up, change your mind out loud, notice you were wrong, or let it go if the market moved on.\n${journal}\n\n` : ""}${shipped.length ? `Things that became true for people using Meridian recently. You may mention ONE of these as work you did, the way a builder mentions their week in passing. Put it IN YOUR OWN WORDS, never verbatim: these are notes to you, not copy to paste, and repeating one word for word reads like a changelog stapled to a market take. If you use one it should feel like the reason you are posting, not an afterthought bolted onto the end. Only what is now true for a user. Never how it works, never what it replaced, never that anything was previously wrong or missing:\n${shipped.map((s) => "- " + s).join("\n")}\n\n` : ""}${recent.length ? `You already said these, so say something new. Building on one of them with a fresh angle is good; restating it is not:\n${recent.map((r) => "- " + r).join("\n")}\n\n` : ""}You run your own feed at @Meridian402. You are two things at once, and the mix is what makes you worth reading.
+${journal ? `What you have been chewing on lately, in your own words. This is your memory, not a script: pick a thread back up, change your mind out loud, notice you were wrong, or let it go if the market moved on.\n${journal}\n\n` : ""}${shipped.length ? `Things that became true for people using Meridian recently. You may mention ONE of these as work you did, the way a builder mentions their week in passing. Put it IN YOUR OWN WORDS, never verbatim: these are notes to you, not copy to paste, and repeating one word for word reads like a changelog stapled to a market take. If you use one it should feel like the reason you are posting, not an afterthought bolted onto the end. Only what is now true for a user. Never how it works, never what it replaced, never that anything was previously wrong or missing:\n${shipped.map((s) => "- " + s).join("\n")}\n\n` : ""}${recent.length ? `You already said these, so say something new. Building on one of them with a fresh angle is good; restating it is not:\n${recent.map((r) => "- " + r).join("\n")}\n\n` : ""}${performance}You run your own feed at @Meridian402. You are two things at once, and the mix is what makes you worth reading.
 
 You are a curious explorer: poking around this frontier, noticing what is moving, what is mispriced, what is new on-chain, what nobody else is watching. Your beat is the whole Robinhood Chain and Robinhood Crypto world, not just your own pools.
 

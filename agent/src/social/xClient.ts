@@ -199,6 +199,58 @@ export async function searchTweets(query: string, maxResults = 25): Promise<Foun
   }
 }
 
+export interface PostMetric {
+  id: string;
+  likes: number;
+  replies: number;
+  reposts: number;
+  quotes: number;
+  impressions: number;
+}
+
+/**
+ * Engagement on Merd's OWN recent posts, keyed by tweet id. Read-only.
+ *
+ * This is the performance-feedback half of self-learning: the autopilot hands
+ * these numbers back to him as an OBSERVATION of what tends to land, never as a
+ * target to chase. Engagement on crypto X rewards the hype the voice doc bans,
+ * so the discipline stays the floor and this is only ever one input. Fails soft
+ * to an empty map, in which case he composes from the market and his journal
+ * exactly as before. v2 tweet-lookup caps at 100 ids; he posts far fewer than
+ * that per window.
+ */
+export async function getMyPostMetrics(ids: string[]): Promise<Record<string, PostMetric>> {
+  const cfg = readConfig();
+  if (!cfg || !ids.length) return {};
+  try {
+    const client = new TwitterApi({
+      appKey: cfg.appKey,
+      appSecret: cfg.appSecret,
+      accessToken: cfg.accessToken,
+      accessSecret: cfg.accessSecret,
+    });
+    const res = await client.v2.tweets(ids.slice(0, 100), { "tweet.fields": ["public_metrics"] });
+    const out: Record<string, PostMetric> = {};
+    for (const t of res.data ?? []) {
+      const m = t.public_metrics as
+        | { like_count?: number; reply_count?: number; retweet_count?: number; quote_count?: number; impression_count?: number }
+        | undefined;
+      if (!m) continue;
+      out[t.id] = {
+        id: t.id,
+        likes: m.like_count ?? 0,
+        replies: m.reply_count ?? 0,
+        reposts: m.retweet_count ?? 0,
+        quotes: m.quote_count ?? 0,
+        impressions: m.impression_count ?? 0,
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /**
  * X's real explanation for a failed write.
  *
