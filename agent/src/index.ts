@@ -7,7 +7,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildServer } from "./mcp/server.js";
 import { config, assertTreasuryIsLive } from "./config.js";
 import { launchpadDeployment } from "./launch/portal.js";
-import { PaymentGate } from "./payments/PaymentGate.js";
+import { PaymentGate, type PaymentAmount, type SettlementAsset } from "./payments/PaymentGate.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
@@ -22,6 +22,18 @@ import { ensureUserAgent, messageUserAgent, userAgentHistory, streamUserAgent, s
 import { vaultStatus, buildVaultSetup, buildVaultRevoke } from "./custody/vault.js";
 import { provisionResearchFleet, triggerResearchRun } from "./research/orchestration.js";
 import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad } from "./chatLimits.js";
+import {
+  balanceOf,
+  trySpend,
+  refundCredit,
+  addPurchase,
+  FREE_CREDITS,
+  packs,
+  packsForApi,
+  merdAsset,
+  merdCreditsEnabled,
+} from "./credits.js";
+import { checkMerdGate, gateMessage } from "./deploy/tokenGate.js";
 import { pendingLaunchFor, clearPendingLaunch } from "./launch/pendingLaunches.js";
 import { ResearchStrategy } from "./strategy/ResearchStrategy.js";
 import { withHouseWalletLock } from "./houseWallet.js";
@@ -593,23 +605,74 @@ function chatGuardSync(address: string): { status: number; error: string } | nul
   return null;
 }
 
+/**
+ * An access-gated wallet gets a 403 that says what it needs, not a generic 502.
+ * Returns true when it answered the request. Checked BEFORE the credit debit on
+ * the chat routes: a wallet that cannot use its agent must not be charged and
+ * refunded on every attempt.
+ */
+async function gateBlocked(address: string, res: Response): Promise<boolean> {
+  const gate = await checkMerdGate(address);
+  if (!gate.enabled || gate.ok) return false;
+  res.status(gate.retryable ? 503 : 403).json({ ok: false, code: "gate", error: gateMessage(gate), gate });
+  return true;
+}
+
 app.options("/api/my-agent/ensure", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
 app.post("/api/my-agent/ensure", async (req: Request, res: Response) => {
   setWalletCors(res);
   const address = requireWallet(req, res);
   if (!address) return;
   try {
+    if (await gateBlocked(address, res)) return;
     const result = await ensureUserAgent(address);
-    res.json({ ok: true, ...result, name: agentDisplayName(address), settings: userAgentSettings(address) });
+    res.json({ ok: true, ...result, name: agentDisplayName(address), settings: userAgentSettings(address), credits: balanceOf(address) });
   } catch (err) {
     console.error("[my-agent] ensure failed:", err instanceof Error ? err.message : err);
     res.status(502).json({ ok: false, error: "could not reach the agent runtime — try again shortly" });
   }
 });
 
+// What this wallet needs to use its agent, and whether it qualifies today. Open
+// to any signed-in wallet so the UI can explain the requirement before the user
+// hits it. Reports nothing while the gate is dormant.
+app.options("/api/my-agent/gate", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/my-agent/gate", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  try {
+    const gate = await checkMerdGate(address);
+    // `ok` here is the request, `allowed` is the answer. Spreading the gate
+    // result directly would overwrite one with the other.
+    res.json({
+      ok: true,
+      enabled: gate.enabled,
+      allowed: gate.ok,
+      conditions: gate.conditions,
+      message: gate.enabled && !gate.ok ? gateMessage(gate) : null,
+    });
+  } catch (err) {
+    console.error("[my-agent] gate check failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: "could not check your access just now, try again shortly" });
+  }
+});
+
 // Customize this wallet's agent (session-gated). Today: rename. The settings
 // store is an extensible object, so future knobs land here without a new route.
 app.options("/api/my-agent/settings", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+
+// The read side of the same object, so the customize panel can render current
+// state (including joinSwarm, this wallet's opt-in to the public agent feed)
+// without having to POST first. Same settings object /ensure returns.
+app.get("/api/my-agent/settings", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  const settings = userAgentSettings(address);
+  res.json({ ok: true, settings, joinSwarm: settings.joinSwarm === true });
+});
+
 app.post("/api/my-agent/settings", async (req: Request, res: Response) => {
   setWalletCors(res);
   const address = requireWallet(req, res);
@@ -637,16 +700,48 @@ app.post("/api/my-agent/message", async (req: Request, res: Response) => {
   if (text.length > 2000) { res.status(400).json({ ok: false, error: "message too long (2000 char max)" }); return; }
   const guard = chatGuardSync(address);
   if (guard) { res.status(guard.status).json({ ok: false, error: guard.error }); return; }
+  if (await gateBlocked(address, res)) { endTurn(address); return; }
+  // One credit per user-initiated turn. Debit lives ONLY on this route and
+  // /stream: system-driven turns (scout runs, sessionKind sessions) call the
+  // agent directly and never charge. After the guards so a rate-limited retry
+  // costs nothing, before the slot wait so a wallet at zero never occupies
+  // capacity it cannot pay for.
+  const spend = trySpend(address);
+  if (!spend.ok) {
+    endTurn(address);
+    res.status(402).json({ ok: false, code: "out_of_credits", error: "you're out of credits. grab a pack to keep talking to your agent.", balance: spend.balance });
+    return;
+  }
   const slot = await acquireSlot();
-  if (!slot) { endTurn(address); res.status(503).json({ ok: false, error: "high demand right now — try again in a few seconds" }); return; }
+  if (!slot) {
+    // Turned away at the door under load: the turn never reached the agent, so
+    // the credit goes straight back.
+    refundCredit(address, 1, "refund:busy");
+    endTurn(address);
+    res.status(503).json({ ok: false, error: "high demand right now, try again in a few seconds" });
+    return;
+  }
   try {
     const reply = await messageUserAgent(address, text);
-    res.json({ ok: true, ...reply });
+    // The gateway reports some failures as a resolved reply carrying an error
+    // instead of throwing. No text means no answer, so it is refunded like any
+    // other failed turn rather than silently charged.
+    if (reply.error && !reply.text) {
+      refundCredit(address, 1, "refund:agent-error");
+      res.status(502).json({ ok: false, error: "your agent could not respond just now, try again shortly" });
+      return;
+    }
+    res.json({ ok: true, ...reply, credits: spend.balance });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[my-agent] message failed:", msg);
+    // A failed turn is never charged. The exception is a timeout: the agent
+    // very likely finished the turn on its side and the answer is readable from
+    // /history, so refunding there would hand out free turns to anyone who can
+    // make a prompt run long.
+    if (!/timed?\s*out|timeout/i.test(msg)) refundCredit(address, 1, "refund:error");
     const status = msg === "gateway_unconfigured" ? 503 : 502;
-    res.status(status).json({ ok: false, error: "your agent could not respond just now — try again shortly" });
+    res.status(status).json({ ok: false, error: "your agent could not respond just now, try again shortly" });
   } finally {
     releaseSlot();
     endTurn(address);
@@ -666,8 +761,22 @@ app.post("/api/my-agent/stream", async (req: Request, res: Response) => {
   // rather than a half-open stream.
   const guard = chatGuardSync(address);
   if (guard) { res.status(guard.status).json({ ok: false, error: guard.error }); return; }
+  if (await gateBlocked(address, res)) { endTurn(address); return; }
+  // Same debit placement as /message: after the guards, before the SSE headers
+  // and the slot wait, so an out-of-credits wallet gets a clean JSON 402.
+  const spend = trySpend(address);
+  if (!spend.ok) {
+    endTurn(address);
+    res.status(402).json({ ok: false, code: "out_of_credits", error: "you're out of credits. grab a pack to keep talking to your agent.", balance: spend.balance });
+    return;
+  }
   const slot = await acquireSlot();
-  if (!slot) { endTurn(address); res.status(503).json({ ok: false, error: "high demand right now — try again in a few seconds" }); return; }
+  if (!slot) {
+    refundCredit(address, 1, "refund:busy"); // never reached the agent, never charged
+    endTurn(address);
+    res.status(503).json({ ok: false, error: "high demand right now, try again in a few seconds" });
+    return;
+  }
 
   // Server-Sent Events: one JSON object per `data:` frame. X-Accel-Buffering
   // off so proxies don't buffer the stream into one chunk.
@@ -687,20 +796,28 @@ app.post("/api/my-agent/stream", async (req: Request, res: Response) => {
   res.on("close", () => ac.abort());
 
   let deltas = 0;
+  let sawError = false;
   try {
     const stream = await streamUserAgent(address, text, ac.signal);
     for await (const ev of stream) {
       if (ev.type === "text_delta") { deltas++; send({ type: "delta", text: sanitizeChunk(ev.text) }); }
       else if (ev.type === "text_final") send({ type: "final", text: sanitizeChunk(ev.text) });
       else if (ev.type === "tool_call") send({ type: "tool", tool: ev.tool });
-      else if (ev.type === "error") send({ type: "error", message: ev.message });
+      else if (ev.type === "error") { sawError = true; send({ type: "error", message: ev.message }); }
       else if (ev.type === "agent_end") break;
     }
-    send({ type: "done" });
+    // A stream that ends normally but produced only an error frame and no text
+    // is a failed turn wearing a clean exit. Refund it like a thrown one.
+    const balance = sawError && deltas === 0 ? refundCredit(address, 1, "refund:agent-error") : spend.balance;
+    send({ type: "done", credits: balance });
     console.error(`[my-agent] stream ok: ${deltas} deltas`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[my-agent] stream failed (aborted=${ac.signal.aborted}, deltas=${deltas}):`, msg);
+    // A hard failure before any output means the user paid for nothing: refund.
+    // A client abort is the user's own hangup, and a stream that already
+    // delivered text was a real (if truncated) answer, so neither refunds.
+    if (!ac.signal.aborted && deltas === 0) refundCredit(address, 1, "refund:error");
     if (!ac.signal.aborted) send({ type: "error", message: "your agent could not respond just now — try again shortly" });
   } finally {
     res.end();
@@ -734,6 +851,117 @@ app.post("/api/my-agent/pending-launch/clear", (req: Request, res: Response) => 
   if (!address) return;
   clearPendingLaunch(address);
   res.json({ ok: true });
+});
+
+// This wallet's credit balance plus what a pack costs. Reading the balance
+// also settles the lazy signup grant, so a first-time visitor sees their free
+// messages instead of a zero.
+app.options("/api/my-agent/credits", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/my-agent/credits", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  // merdPayments and each pack's merdWei let a UI show or hide the MERD option
+  // from what the server actually accepts, instead of guessing at it. Both are
+  // false/absent until MERD exists and a price is set.
+  res.json({
+    ok: true,
+    balance: balanceOf(address),
+    freeMessages: FREE_CREDITS,
+    packs: packsForApi(),
+    merdPayments: merdCreditsEnabled(),
+    merdAsset: merdCreditsEnabled() ? merdAsset() : null,
+  });
+});
+
+// Buy a credit pack. Same x402 flow as priced tools: no X-PAYMENT header gets
+// the payment requirements, a verified header gets credits. The verify step
+// burns the tx, so a payment can never buy two packs, and the purchase lands
+// in both the credits ledger and the revenue ledger under its tx hash.
+//
+// Two ways to pay: USDG (the default, unchanged) or MERD, which stays refused
+// until MERD is deployed AND the operator has set a flat MERD price per pack.
+// Either way the pack is the same pack for the same credits.
+app.options("/api/credits/buy", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post("/api/credits/buy", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  const body = req.body ?? {};
+  const packId = body.pack;
+  const catalogue = packs();
+  const pack = catalogue.find((p) => p.id === packId);
+  if (!pack) {
+    res.status(400).json({ ok: false, error: `unknown pack. choose one of: ${catalogue.map((p) => p.id).join(", ")}` });
+    return;
+  }
+  const pay = String(body.pay ?? "usdg").toLowerCase();
+  if (pay !== "usdg" && pay !== "merd") {
+    res.status(400).json({ ok: false, error: 'unknown payment asset. choose "usdg" or "merd"' });
+    return;
+  }
+
+  // Resolve what is being charged BEFORE any challenge is issued. A 402 for an
+  // asset that cannot actually be paid would send someone to a token that does
+  // not exist, so an unavailable MERD is a plain 400 and never a payment
+  // challenge.
+  let asset: SettlementAsset | undefined;
+  let price: PaymentAmount = pack.usd;
+  if (pay === "merd") {
+    const merd = merdAsset();
+    if (!merdCreditsEnabled() || !merd || pack.merdWei === undefined) {
+      res.status(400).json({
+        ok: false,
+        error: "paying in MERD is not available yet. MERD is not live, so credit packs are USDG only for now.",
+        merdPayments: false,
+      });
+      return;
+    }
+    asset = merd;
+    price = pack.merdWei;
+  }
+
+  const resource = "credits:" + pack.id;
+  const header = req.header("x-payment");
+  if (!header) {
+    res.status(402).json({ ok: false, ...paymentGate.requirements(price, resource, asset), packs: packsForApi() });
+    return;
+  }
+  try {
+    // MERD lands in the treasury, the same address USDG already pays into.
+    // The staking vault is the intended destination later, so credit spending
+    // becomes staker yield, but that contract is not deployed: routing there
+    // today would send real tokens to an address with no code.
+    const result = await paymentGate.verify(header, price, resource, asset);
+    if (!result.ok) {
+      res.status(402).json({ ok: false, error: result.error ?? "payment verification failed", ...paymentGate.requirements(price, resource, asset) });
+      return;
+    }
+    // Verification has already burned the tx, so the credits must land next and
+    // nothing between may throw. Revenue accounting is bookkeeping, not the
+    // user's purchase, so a failure there is logged and never costs them credits.
+    // The credits are the pack's credits whatever it was paid in: MERD buys the
+    // same pack, with no bonus and no discount.
+    const balance = addPurchase(address, pack.id, pack.credits, result.txHash);
+    try {
+      // The revenue ledger's only unit is USD. A MERD sale has no USD figure we
+      // are willing to state (there is no price for MERD, which is exactly why
+      // its pack price is flat), so booking pack.usd here would invent dollars
+      // that never arrived. It records 0 USD under a separate key, with the raw
+      // amount in the reference, so the sale is auditable and the revenue total
+      // stays true.
+      if (asset) revenue.record(`${resource}:merd`, 0, `${result.txHash ?? "unknown-tx"} ${pack.merdWei} MERD-wei`);
+      else revenue.record(resource, pack.usd, result.txHash);
+    } catch (err) {
+      console.error("[credits] revenue record failed (purchase stands):", err instanceof Error ? err.message : err);
+    }
+    res.json({ ok: true, added: pack.credits, balance, paidIn: asset ? asset.symbol : "USDG" });
+  } catch (err) {
+    // Express 4 does not route a rejected async handler to the error middleware,
+    // so an unhandled throw here would hang the request with no response.
+    console.error("[credits] buy failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: "could not verify that payment just now. if it was sent, contact us and we will credit it." });
+  }
 });
 
 app.options("/api/my-agent/history", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });

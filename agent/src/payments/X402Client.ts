@@ -61,6 +61,13 @@ export class X402Client {
     const accept = requirements.accepts?.[0];
     if (!accept) throw new Error("402 challenge carries no payment terms");
     if (accept.network !== "robinhood-chain") throw new Error(`unsupported x402 network: ${accept.network}`);
+    // This client pays in USDG only. A challenge quoted in another asset would
+    // otherwise be "settled" by sending USDG against a raw amount that means
+    // something else entirely, and signed with the wrong authorization, so it is
+    // refused instead. Absence of the field is the USDG case.
+    if (accept.asset && accept.asset.address.toLowerCase() !== USDG.toLowerCase()) {
+      throw new Error(`x402 challenge is priced in ${accept.asset.symbol}, which this client cannot pay`);
+    }
     const amountUsd = Number(accept.maxAmountRequired) / 1_000_000;
     const signer = getAgentSigner();
     const receipt = await this.pay({

@@ -8,6 +8,7 @@
 // talk to that agent through gw.agent(agentId), which owns the session/message
 // surface (postMessageSync, listSessionMessages).
 import { GatewayClient } from "@openhermit/sdk";
+import { assertMerdGate } from "./tokenGate.js";
 import { appendLedger } from "../ledger.js";
 import { config } from "../config.js";
 import { dataPath } from "../dataDir.js";
@@ -229,6 +230,12 @@ export interface EnsureResult {
  * reason when the gateway is not configured, so callers can degrade cleanly.
  */
 export async function ensureUserAgent(address: string): Promise<EnsureResult> {
+  // Access gate: qualify by staking 0.1% of MERD, or holding 0.25% of PONS or
+  // INDEX (any one). No-op while MERD_TOKEN_ADDRESS is unset, so it ships dormant
+  // and stays embargo-safe until the operator flips it at launch. This one
+  // chokepoint covers create, chat, stream, and settings, since every agent path
+  // funnels through here, so a client cannot route around it.
+  await assertMerdGate(address);
   const agentId = agentIdForWallet(address);
   const gw = gateway();
   if (!gw) return { agentId, ready: false, created: false, reason: "gateway_unconfigured" };

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { appendLedger } from "../ledger.js";
-import { verifyMessage, type Address } from "viem";
+import { formatUnits, verifyMessage, type Address } from "viem";
 import { getPublicClient } from "../venues/signer.js";
 import { dataPath } from "../dataDir.js";
 
@@ -13,6 +13,9 @@ export interface X402Requirements {
     resource: string;
     payTo: string;
     description: string;
+    /** Present only for non-USDG settlement, so the USDG challenge body is
+     *  unchanged for clients that already parse it. */
+    asset?: { symbol: string; address: string; decimals: number };
   }>;
   /** How to build the X-PAYMENT header, so the proof requirement is discoverable from the challenge itself. */
   proof: {
@@ -23,29 +26,99 @@ export interface X402Requirements {
   };
 }
 
+/** A token a payment can settle in. The gate never converts between assets: a
+ *  price is quoted and checked in the asset's own units, full stop. */
+export interface SettlementAsset {
+  symbol: string;
+  address: Address;
+  decimals: number;
+}
+
+/** USDG on Robinhood Chain. The default settlement asset: every call site that
+ *  omits an asset means exactly this, which is what it has always meant. */
+export const USDG_ASSET: SettlementAsset = {
+  symbol: "USDG",
+  address: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+  decimals: 6,
+};
+
+/** True for the asset that predates multi-asset settlement. Everything that
+ *  must stay byte-identical for existing payers keys off this. */
+export function isDefaultAsset(asset: SettlementAsset): boolean {
+  return asset.address.toLowerCase() === USDG_ASSET.address.toLowerCase();
+}
+
+/** A price: a USD figure (USDG only) or raw token units for any asset. */
+export type PaymentAmount = number | bigint;
+
+/**
+ * The price in the asset's own raw units.
+ *
+ * A number is a USD figure and only means something for USDG, whose unit IS the
+ * dollar. Any other asset must be priced directly in raw units, because this
+ * gate has no exchange rate and must not acquire one: a rate read from a thin
+ * pool is a rate an attacker can move seconds before paying.
+ */
+function rawUnits(amount: PaymentAmount, asset: SettlementAsset): bigint {
+  if (typeof amount === "bigint") return amount;
+  if (!isDefaultAsset(asset)) {
+    throw new Error(`${asset.symbol} payments must be priced in raw token units, not USD: this gate has no conversion rate`);
+  }
+  return BigInt(Math.round(amount * 1_000_000));
+}
+
+/** Human price for challenges and logs. USD for USDG, token units otherwise. */
+function displayAmount(amount: PaymentAmount, asset: SettlementAsset): string {
+  if (typeof amount === "number" && isDefaultAsset(asset)) return `$${amount.toFixed(4)}`;
+  return `${formatUnits(rawUnits(amount, asset), asset.decimals)} ${asset.symbol}`;
+}
+
 /**
  * The exact message a payer signs to prove the payment is THEIRS.
  *
- * Binds three things: the specific transfer (txHash), the specific tool it pays
- * for (resource), and this deployment (chain + treasury), so a signature cannot
- * be lifted to a different call, a different tool, or a different operator.
+ * Binds four things: the specific transfer (txHash), the specific tool it pays
+ * for (resource), this deployment (chain + treasury), and the asset it settles
+ * in, so a signature cannot be lifted to a different call, a different tool, a
+ * different operator, or a different token.
+ *
+ * The asset matters because the same resource can be priced in more than one
+ * token. Without it, a signature authorising "MERD for credits:pro" would also
+ * authorise "USDG for credits:pro" and vice versa, letting one proof settle in
+ * whichever token happens to be cheaper for the attacker.
+ *
+ * The asset line is APPENDED and only for non-default assets, so the USDG
+ * message is byte-identical to the one payers already sign: absence of the line
+ * IS the USDG commitment. That keeps every 402 challenge currently in flight
+ * valid while still making the two messages provably different.
  *
  * Deliberately does NOT include the price. The transfer already carries the
  * value and the gate checks it covers the cost; including it would only add a
  * failure mode where a price change between the 402 and the retry invalidates an
  * otherwise-honest payment.
  */
-export function paymentMessage(params: { txHash: string; resource: string; treasury: string }): string {
-  return [
+export function paymentMessage(params: { txHash: string; resource: string; treasury: string; asset?: SettlementAsset }): string {
+  const asset = params.asset ?? USDG_ASSET;
+  // The message is newline-delimited and the asset commitment is a line that is
+  // present or absent, so a resource containing a newline could write that line
+  // itself: signing the USDG message for the resource
+  // "credits:pro\nAsset: MERD 0x..." would produce bytes identical to a genuine
+  // MERD authorization. No caller can do that today (every resource is either a
+  // key of the tool price table or "credits:" plus one of three literal pack
+  // ids) which is why this throws instead of escaping. It is an assertion that
+  // the invariant still holds, and it fails loudly the day someone adds a
+  // resource built from user input.
+  if (/[\r\n]/.test(params.resource)) throw new Error("payment resource must not contain a line break");
+  const lines = [
     "Meridian x402 payment authorization",
     "Chain: 4663",
     `Treasury: ${params.treasury.toLowerCase()}`,
     `Resource: ${params.resource}`,
     `Tx: ${params.txHash.toLowerCase()}`,
-  ].join("\n");
+  ];
+  if (!isDefaultAsset(asset)) lines.push(`Asset: ${asset.symbol} ${asset.address.toLowerCase()}`);
+  return lines.join("\n");
 }
 
-const USDG: Address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 // Replay ledger: every accepted payment tx is burned here so one on-chain
 // transfer can never pay for two tool calls, across restarts.
 const USED_TX_PATH = dataPath("x402-used.jsonl");
@@ -65,10 +138,25 @@ const MAX_AGE_SECONDS = 15 * 60;
  */
 export class PaymentGate {
   private usedTx: Set<string> | null = null;
+  // Tx hashes currently being verified. The used-set is only written at the END
+  // of verification, after several awaits, so without this a payer could fire N
+  // concurrent requests with the same X-PAYMENT header and have all N pass the
+  // used-check before any of them burns. Reserving synchronously (no await
+  // between the check and the add) makes verification one-at-a-time per tx, so
+  // one transfer can never settle two calls. It also closes the variant where
+  // the payer signs the same tx for several different resources at once.
+  private reserving = new Set<string>();
 
   constructor(private treasuryAddress: string, private facilitatorUrl: string) {}
 
-  requirements(amountUsd: number, resource: string): X402Requirements {
+  /**
+   * The 402 challenge. `amount` is USD for USDG (as it always was) and raw token
+   * units for any other asset. Omitting `asset` means USDG, and the body it
+   * produces then is unchanged: the asset descriptor is attached only for
+   * non-default assets, so existing payers see exactly the challenge they parse
+   * today while a MERD payer is told which token to send.
+   */
+  requirements(amount: PaymentAmount, resource: string, asset: SettlementAsset = USDG_ASSET): X402Requirements {
     return {
       x402Version: 1,
       accepts: [
@@ -78,18 +166,19 @@ export class PaymentGate {
           // payments settle in USDG there — the old "solana" label predated
           // the Robinhood-only scope and pointed payers at the wrong chain.
           network: "robinhood-chain",
-          maxAmountRequired: String(Math.round(amountUsd * 1_000_000)), // USDG, 6 decimals
+          maxAmountRequired: String(rawUnits(amount, asset)), // the asset's own raw units
           resource,
           payTo: this.treasuryAddress || "unconfigured",
-          description: `Meridian ${resource} - $${amountUsd.toFixed(4)}`,
+          description: `Meridian ${resource} - ${displayAmount(amount, asset)}`,
+          ...(isDefaultAsset(asset) ? {} : { asset: { symbol: asset.symbol, address: asset.address, decimals: asset.decimals } }),
         },
       ],
       proof: {
         header: "X-PAYMENT",
         format: 'base64(JSON) or raw JSON: { "txHash": "0x…", "signature": "0x…" }',
-        signMessage: paymentMessage({ txHash: "<your payment tx hash>", resource, treasury: this.treasuryAddress || "unconfigured" }),
+        signMessage: paymentMessage({ txHash: "<your payment tx hash>", resource, treasury: this.treasuryAddress || "unconfigured", asset }),
         note:
-          "Sign the message above with the wallet that SENT the USDG. A tx hash alone is not proof of payment: " +
+          `Sign the message above with the wallet that SENT the ${asset.symbol}. A tx hash alone is not proof of payment: ` +
           "transfers to the treasury are public, so anyone watching the chain could otherwise present someone else's payment as their own.",
       },
     };
@@ -109,15 +198,25 @@ export class PaymentGate {
     return this.usedTx;
   }
 
-  private burnTx(txHash: string, resource: string, amountUsd: number): void {
+  /**
+   * Burn the tx. The amountUsd column of this ledger is dollars, so a non-USD
+   * settlement records 0 there and carries its real size in raw units instead:
+   * writing a MERD amount into a USD column would misstate every total that
+   * reads this file. Replay protection itself is the txHash and is unchanged.
+   */
+  private burnTx(txHash: string, resource: string, amount: PaymentAmount, asset: SettlementAsset): void {
     this.loadUsed().add(txHash.toLowerCase());
-    appendLedger("x402-used.jsonl", { txHash: txHash.toLowerCase(), resource, amountUsd, at: Date.now() });
+    const row = isDefaultAsset(asset)
+      ? { amountUsd: typeof amount === "number" ? amount : Number(amount) / 1e6 }
+      : { amountUsd: 0, asset: asset.symbol, amountRaw: rawUnits(amount, asset).toString() };
+    appendLedger("x402-used.jsonl", { txHash: txHash.toLowerCase(), resource, ...row, at: Date.now() });
   }
 
   async verify(
     paymentHeader: string,
-    amountUsd: number,
+    amount: PaymentAmount,
     resource: string,
+    asset: SettlementAsset = USDG_ASSET,
   ): Promise<{ ok: boolean; error?: string; txHash?: string }> {
     if (!this.facilitatorUrl) {
       // Stub mode accepts ANY proof without verification. That is fine for local
@@ -134,14 +233,14 @@ export class PaymentGate {
         return { ok: false, error: "payment verification is not configured on this deployment" };
       }
       console.log(
-        `[PaymentGate:stub] accepting $${amountUsd} for ${resource} ` +
+        `[PaymentGate:stub] accepting ${displayAmount(amount, asset)} for ${resource} ` +
           `(no facilitator AND no treasury configured — local dev only, proof not verified)`,
       );
       return { ok: true };
     }
 
     if (this.facilitatorUrl === "self") {
-      return this.verifyOnChain(paymentHeader, amountUsd, resource);
+      return this.verifyOnChain(paymentHeader, amount, resource, asset);
     }
 
     throw new Error("Remote x402 facilitator verification not implemented yet");
@@ -155,9 +254,14 @@ export class PaymentGate {
    * on-chain — so a hash alone is a BEARER token: anyone watching the treasury
    * could lift an honest payer's hash and spend it on their own call first,
    * burning it and leaving the payer's request rejected as "already used". The
-   * signature proves the caller controls the wallet whose USDG actually moved.
+   * signature proves the caller controls the wallet whose tokens actually moved.
    */
-  private async verifyOnChain(header: string, amountUsd: number, resource: string): Promise<{ ok: boolean; error?: string; txHash?: string }> {
+  private async verifyOnChain(
+    header: string,
+    amount: PaymentAmount,
+    resource: string,
+    asset: SettlementAsset,
+  ): Promise<{ ok: boolean; error?: string; txHash?: string }> {
     if (!this.treasuryAddress) return { ok: false, error: "treasury not configured" };
     let txHash: string | undefined;
     let signature: string | undefined;
@@ -171,10 +275,35 @@ export class PaymentGate {
     }
     if (!txHash || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) return { ok: false, error: "invalid txHash" };
     if (!signature || !/^0x[0-9a-fA-F]+$/.test(signature)) {
-      return { ok: false, error: "missing signature — sign the payment authorization message from the 402 challenge with the wallet that sent the USDG" };
+      return {
+        ok: false,
+        error: `missing signature: sign the payment authorization message from the 402 challenge with the wallet that sent the ${asset.symbol}`,
+      };
     }
     if (this.loadUsed().has(txHash.toLowerCase())) return { ok: false, error: "payment tx already used" };
 
+    // Hold this tx for the duration of the on-chain checks. Nothing may await
+    // between the used-check above and this add, or the race reopens.
+    const held = txHash.toLowerCase();
+    if (this.reserving.has(held)) return { ok: false, error: "this payment is already being verified" };
+    this.reserving.add(held);
+    try {
+      return await this.settleOnChain(txHash, signature, amount, resource, asset);
+    } finally {
+      // Released either way: on success the tx is now in the used set, so the
+      // next attempt fails as already-used rather than racing again.
+      this.reserving.delete(held);
+    }
+  }
+
+  /** The awaiting half of on-chain verification, run under the tx reservation. */
+  private async settleOnChain(
+    txHash: string,
+    signature: string,
+    amount: PaymentAmount,
+    resource: string,
+    asset: SettlementAsset,
+  ): Promise<{ ok: boolean; error?: string; txHash?: string }> {
     const client = getPublicClient();
     let receipt;
     try {
@@ -188,15 +317,17 @@ export class PaymentGate {
     const age = Math.floor(Date.now() / 1000) - Number(block.timestamp);
     if (age > MAX_AGE_SECONDS) return { ok: false, error: `payment tx too old (${age}s > ${MAX_AGE_SECONDS}s)` };
 
-    // Sum USDG that reached the treasury, and remember WHO sent it. Transfer is
-    // (from indexed, to indexed, value) so topics[1] is the payer of record —
-    // the token holder whose balance moved, which is who must sign. That is not
-    // always receipt.from (a contract can transfer on someone's behalf), so bind
-    // to the log rather than the transaction submitter.
+    // Sum the transfers of THIS asset that reached the treasury, and remember
+    // WHO sent them. Transfer is (from indexed, to indexed, value) so topics[1]
+    // is the payer of record, the token holder whose balance moved, which is who
+    // must sign. That is not always receipt.from (a contract can transfer on
+    // someone's behalf), so bind to the log rather than the transaction
+    // submitter. Logs of any OTHER token are ignored, so sending a worthless
+    // token cannot pay for a pack priced in a real one.
     const senders = new Set<string>();
-    const required = BigInt(Math.round(amountUsd * 1_000_000));
+    const required = rawUnits(amount, asset);
     const paid = receipt.logs
-      .filter((l) => l.address.toLowerCase() === USDG.toLowerCase())
+      .filter((l) => l.address.toLowerCase() === asset.address.toLowerCase())
       .reduce((sum, l) => {
         try {
           const to = `0x${l.topics[2]!.slice(26)}`.toLowerCase();
@@ -209,14 +340,14 @@ export class PaymentGate {
       }, 0n);
 
     if (paid < required) {
-      return { ok: false, error: `insufficient payment: ${paid} USDG-units < ${required} required` };
+      return { ok: false, error: `insufficient payment: ${paid} ${asset.symbol}-units < ${required} required` };
     }
-    if (senders.size === 0) return { ok: false, error: "no USDG transfer to the treasury in that tx" };
+    if (senders.size === 0) return { ok: false, error: `no ${asset.symbol} transfer to the treasury in that tx` };
 
     // The signature must recover to one of the wallets that actually paid.
     // verifyMessage covers both EOAs and ERC-1271 smart accounts, so an agent
     // paying from a contract wallet still works.
-    const message = paymentMessage({ txHash, resource, treasury: this.treasuryAddress });
+    const message = paymentMessage({ txHash, resource, treasury: this.treasuryAddress, asset });
     let signer: string | null = null;
     for (const addr of senders) {
       try {
@@ -235,8 +366,10 @@ export class PaymentGate {
       };
     }
 
-    this.burnTx(txHash, resource, amountUsd);
-    console.log(`[PaymentGate:self] verified $${amountUsd} for ${resource} from ${signer.slice(0, 10)}… via ${txHash.slice(0, 10)}…`);
+    this.burnTx(txHash, resource, amount, asset);
+    console.log(
+      `[PaymentGate:self] verified ${displayAmount(amount, asset)} for ${resource} from ${signer.slice(0, 10)}… via ${txHash.slice(0, 10)}…`,
+    );
     return { ok: true, txHash };
   }
 }
