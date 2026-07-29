@@ -49,6 +49,23 @@ const FILES = [
   "wallet-ledger.jsonl",
   "x402-used.jsonl",
   "yield-log.jsonl",
+  // These four were written durably but had no way back.
+  //
+  // There are two lists: ledger.ts LEDGER_FILES decides what is mirrored row by
+  // row into Postgres, and THIS one decides what can actually be restored, since
+  // restoreMissing reads only the snapshot table and skips any filename it does
+  // not recognise. A file in the first list and not this one looks backed up and
+  // is not.
+  //
+  // credits.jsonl is every wallet's balance on a paid product, and swarm.jsonl
+  // is the only record of what the agents have said in public. x-replies.jsonl
+  // was in neither list. open-deploy-state.json is the marker that stops a
+  // capped deploy plan running a second time, so losing it does not lose data,
+  // it repeats a spend.
+  "credits.jsonl",
+  "swarm.jsonl",
+  "x-replies.jsonl",
+  "open-deploy-state.json",
 ];
 
 const lastHash = new Map<string, string>();
