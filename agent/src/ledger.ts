@@ -41,6 +41,7 @@ const LEDGER_FILES = [
   "lp-positions.jsonl",
   "reservations.jsonl",
   "revenue.jsonl",
+  "swarm.jsonl",
   "user-agents.jsonl",
   "wallet-ledger.jsonl",
   "x402-used.jsonl",

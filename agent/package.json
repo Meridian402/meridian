@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "provision-fleet": "tsx src/research/orchestration.ts",
     "provision-reserved": "tsx --env-file=.env src/deploy/userAgents.ts",
+    "swarm-once": "tsx --env-file=.env src/swarm/runOnce.ts",
     "test": "tsx --test test/**/*.test.ts",
     "backtest": "tsx src/backtest/simulate.ts",
     "backtest:legacy-momentum": "tsx src/backtest/simulate.legacy-momentum.ts"

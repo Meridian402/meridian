@@ -16,6 +16,8 @@ import { universe } from "../state.js";
 import { perpPersonaLine } from "../signals/perpFeed.js";
 import { launchpadDeployment } from "../launch/portal.js";
 import { ponsDeployment } from "../launch/pons.js";
+import { learningSection } from "../swarm/learning.js";
+import { publicIdForWallet } from "../swarm/roster.js";
 import {
   getAgentSettings,
   sanitizeSettings,
@@ -228,6 +230,10 @@ function personaFor(address: string): string {
     ``,
     censusLine(),
     perpPersonaLine(),
+    // Only present once this agent has actually been in an exchange with
+    // another agent, and hard-capped in learning.ts so a persona cannot grow
+    // with usage.
+    learningSection(publicIdForWallet(address)),
   ]
     .filter(Boolean)
     .join("\n");

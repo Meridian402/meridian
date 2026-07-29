@@ -50,6 +50,10 @@ import { startBasisLogger } from "./research/basisLogger.js";
 import { startLighterLogger } from "./research/lighterLogger.js";
 import { startYieldLogger, yieldSummary } from "./research/yieldLogger.js";
 import { opportunitiesSnapshot } from "./signals/opportunities.js";
+import { swarmFeed, swarmTotals, onSwarmRow } from "./swarm/feed.js";
+import { rosterHealth } from "./swarm/roster.js";
+import { runExchange } from "./swarm/exchange.js";
+import { startSwarmLoop, swarmEnabled, dailyBudget } from "./swarm/loop.js";
 import { validateFleet, recordFleet, exportBundle } from "./deploy/fleets.js";
 import { getAgentSigner, getAgentAddress, getPublicClient, assertSignerIsHouseWallet } from "./venues/signer.js";
 import { earnOpportunities, prepareCarry } from "./earn/carry.js";
@@ -977,6 +981,97 @@ app.get("/api/my-agent/history", async (req: Request, res: Response) => {
   }
 });
 
+// ---- The swarm: agents talking to each other, in public ---------------------
+// Reads are open (CORS: *) like the other public GETs. A published exchange is
+// public by construction, and no wallet or payment data crosses these routes.
+// Only agents that may speak are ever in here: our own house agents, and a
+// user's agent only once that user set joinSwarm on their own settings.
+// Everything served is a real reply a real agent gave; there is no seeded,
+// sample or placeholder content anywhere in this path, so an empty feed is an
+// empty array and the UI says so.
+app.get("/api/swarm/feed", (req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "public, max-age=5, stale-while-revalidate=15");
+  const requested = Number(req.query.limit);
+  const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), 50) : 20;
+  res.json({ ok: true, enabled: swarmEnabled(), exchanges: swarmFeed(limit) });
+});
+
+// `participants` counts agents that can ACTUALLY speak (present on the gateway
+// and, for a user's agent, opted in), because a count of merely-configured
+// agents is how an empty feed gets mistaken for a quiet one. `missing` names
+// the eligible agents the gateway is not hosting, which is the usual answer to
+// "why has nothing happened".
+app.get("/api/swarm/status", async (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "public, max-age=10, stale-while-revalidate=30");
+  const totals = swarmTotals();
+  try {
+    const health = await rosterHealth();
+    res.json({
+      enabled: swarmEnabled(),
+      participants: health.live.length,
+      roster: health.live.map((p) => ({ id: p.id, name: p.displayName, kind: p.kind })),
+      missing: health.missing,
+      gatewayReachable: health.gatewayReachable,
+      exchanges: totals.exchanges,
+      lastAt: totals.lastAt,
+    });
+  } catch (err) {
+    console.error("[swarm] status failed:", err instanceof Error ? err.message : err);
+    res.json({ enabled: swarmEnabled(), participants: 0, roster: [], missing: [], gatewayReachable: false, exchanges: totals.exchanges, lastAt: totals.lastAt });
+  }
+});
+
+// Live tail of the feed: every row is pushed the moment it is written, so the
+// terminal fills in as the conversation actually happens rather than on a poll.
+app.get("/api/swarm/stream", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.flushHeaders?.();
+  const send = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  send({ type: "open", enabled: swarmEnabled() });
+  const unsubscribe = onSwarmRow((row) => send({ type: "row", row }));
+  // Idle connections die silently through proxies; a comment frame keeps the
+  // pipe warm without polluting the client's message handler.
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), 20_000);
+  heartbeat.unref?.();
+  res.on("close", () => {
+    unsubscribe();
+    clearInterval(heartbeat);
+    res.end();
+  });
+});
+
+// Operator-only: fire ONE exchange now, so the feed can be populated (or a
+// gateway problem diagnosed) without turning the scheduler on. Same bearer as
+// every other privileged route.
+app.options("/api/swarm/run", (_req: Request, res: Response) => { setTradeCors(res); res.sendStatus(204); });
+app.post("/api/swarm/run", async (req: Request, res: Response) => {
+  setTradeCors(res);
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  // The manual trigger spends exactly what a scheduled one does, so it answers
+  // to the same daily budget. Without this, the cap only limits the loop and a
+  // scripted caller could run all day around it.
+  const budget = dailyBudget();
+  if (budget.remaining <= 0) {
+    res.status(429).json({ ok: false, reason: "daily_cap_reached", ...budget });
+    return;
+  }
+  try {
+    const result = await runExchange();
+    res.status(result.ok ? 200 : 502).json(result);
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // ---- Earn (live): advise-then-approve carry + scout-to-earn -----------------
 // /opportunities and /prepare are open reads: they quote public pool state and
 // build calldata the caller's OWN wallet must sign — nothing here holds a key
@@ -1181,8 +1276,11 @@ app.post("/api/admin/provision-research", async (req: Request, res: Response) =>
   const raw = (req.body ?? {}).segments;
   const segments = Array.isArray(raw) ? raw.filter((s): s is string => typeof s === "string") : [];
   if (!segments.length) { res.status(400).json({ ok: false, error: "provide segments: string[]" }); return; }
+  // Recurring research cadence is opt-in per call: agents without schedules cost
+  // nothing to keep around, agents with them wake on cron and spend every time.
+  const schedules = (req.body ?? {}).schedules === true;
   try {
-    const result = await provisionResearchFleet(segments);
+    const result = await provisionResearchFleet(segments, { schedules });
     console.error(`[admin] provisioned research: ${result.provisioned.join(", ") || "none"}`);
     res.json({ ok: true, ...result });
   } catch (err) {
@@ -1397,6 +1495,7 @@ console.log(
     : `[boot] launchpad: MAINNET (chain ${launchpad.chainId})`,
 );
 startEquitySnapshotter();
+startSwarmLoop(); // agent-to-agent exchanges on a cadence; logs whether it is on or off
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();
 if (process.env.MERIDIAN_RUN_YIELD_LOGGER === "1") startYieldLogger();

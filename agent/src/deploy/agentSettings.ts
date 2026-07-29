@@ -26,6 +26,10 @@ export interface AgentSettings {
   focus?: FocusArea[];
   style?: Style;
   goal?: string;
+  /** Opt-in: this wallet's agent may speak in the public agent-to-agent feed.
+   *  A user's agent speaks for a real person, so it is absent (not false) until
+   *  they turn it on themselves, and nothing else may set it. */
+  joinSwarm?: boolean;
 }
 
 /** Single short line, no control chars, capped. Shared by name + goal so no
@@ -77,28 +81,45 @@ export function sanitizeSettings(patch: unknown): { settings: Partial<AgentSetti
     // Empty goal clears it; otherwise clean + cap.
     out.goal = p.goal === "" || p.goal == null ? "" : cleanText(p.goal, MAX_GOAL) ?? "";
   }
+  if ("joinSwarm" in p) {
+    // Strictly boolean: consent to appear in a public feed is never inferred
+    // from a truthy string or a 1.
+    if (typeof p.joinSwarm !== "boolean") return { error: "joinSwarm must be true or false" };
+    out.joinSwarm = p.joinSwarm;
+  }
 
   if (Object.keys(out).length === 0) return { error: "no valid settings provided" };
   return { settings: out };
 }
 
-/** This wallet's current settings (latest write wins), or {} if none. */
-export function getAgentSettings(address: string): AgentSettings {
+/** Latest settings per wallet, folded from the append-only file in one pass.
+ *  Shared by the single-wallet read and the every-wallet read so the two can
+ *  never disagree about which row wins. */
+function foldSettings(): Map<string, AgentSettings> {
+  const out = new Map<string, AgentSettings>();
   try {
-    if (!existsSync(PATH)) return {};
-    const a = address.toLowerCase();
-    let latest: AgentSettings = {};
+    if (!existsSync(PATH)) return out;
     for (const line of readFileSync(PATH, "utf8").split("\n")) {
       if (!line.trim()) continue;
       try {
         const r = JSON.parse(line);
-        if ((r.address ?? "").toLowerCase() === a && r.settings && typeof r.settings === "object") latest = r.settings;
+        const a = String(r.address ?? "").toLowerCase();
+        if (a && r.settings && typeof r.settings === "object") out.set(a, r.settings as AgentSettings);
       } catch {}
     }
-    return latest;
-  } catch {
-    return {};
-  }
+  } catch {}
+  return out;
+}
+
+/** This wallet's current settings (latest write wins), or {} if none. */
+export function getAgentSettings(address: string): AgentSettings {
+  return foldSettings().get(address.toLowerCase()) ?? {};
+}
+
+/** Every wallet that has ever written settings, with its current values. The
+ *  read side of anything that has to ask "which wallets opted into X". */
+export function allAgentSettings(): Array<{ address: string; settings: AgentSettings }> {
+  return [...foldSettings().entries()].map(([address, settings]) => ({ address, settings }));
 }
 
 /** Merge a validated patch into this wallet's settings and persist (append-only). */

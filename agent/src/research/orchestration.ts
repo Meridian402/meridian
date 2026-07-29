@@ -50,6 +50,14 @@ function segmentInstruction(segment: RwaSegment, agentId: string): string {
   const cadence = segment.refreshCadenceCron
     ? `discover on "${segment.discoverCadenceCron}" (cron), refresh known venues on "${segment.refreshCadenceCron}"`
     : `discover/refresh combined on "${segment.discoverCadenceCron}" (cron)`;
+  // Deliberately NO swarm learning in this instruction. These agents hold the
+  // operator MCP token (research-write), and this text carries the quality bar
+  // and the submit rule. Takeaway sentences are shaped by conversations that a
+  // user's agent takes part in, so letting them into the same instruction would
+  // put model-authored, indirectly user-influenced text alongside the rules that
+  // gate a privileged tool. The swarm writes them to their own instruction slot
+  // instead (see swarm/exchange.ts applyLearning), where they cannot displace or
+  // precede anything that matters.
   return (
     `Your assigned RWA segment: "${segment.title}".\n` +
     `Known anchor venues (already in our universe — do NOT resubmit these as new; only add genuinely additional venues): ${segment.anchors}.\n` +
@@ -177,10 +185,26 @@ export interface ProvisionResult {
   provisioned: string[];
   skipped: string[];
   errors: Record<string, string>;
+  /** false when the agents were created without any recurring research cadence */
+  scheduled: boolean;
 }
 
-/** Provision a chosen set of research-segment agents on our gateway. */
-export async function provisionResearchFleet(segmentKeys: string[]): Promise<ProvisionResult> {
+/**
+ * Provision a chosen set of research-segment agents on our gateway.
+ *
+ * `schedules` is the money switch, and it is off by default on purpose. Creating
+ * an agent costs nothing and it can hold conversations for the price of the
+ * conversations. The cron schedules are what spend continuously: across all
+ * twelve segments they add up to roughly 22 wakes a day, about 5.6 of them
+ * broad discovery sweeps that each run open-ended web search. So the agents come
+ * online first, and research cadence is a second, deliberate decision, taken per
+ * segment when the data is actually wanted.
+ */
+export async function provisionResearchFleet(
+  segmentKeys: string[],
+  opts: { schedules?: boolean } = {},
+): Promise<ProvisionResult> {
+  const withSchedules = opts.schedules === true;
   if (!config.gatewayAdminToken || !config.gatewayUrl) throw new Error("gateway_unconfigured");
   const gw = new GatewayClient({ baseUrl: config.gatewayUrl, token: config.gatewayAdminToken });
 
@@ -248,7 +272,7 @@ export async function provisionResearchFleet(segmentKeys: string[]): Promise<Pro
       // Schedules are created once; on re-provision they already exist, so a
       // duplicate insert is expected and non-fatal.
       const createdBy = owner();
-      try {
+      if (withSchedules) try {
         await gw.createSchedule(agentId, {
           type: "cron",
           id: `${agentId}-discover`,
@@ -272,7 +296,7 @@ export async function provisionResearchFleet(segmentKeys: string[]): Promise<Pro
     }
   }
 
-  return { publicMcpUrl: config.publicMcpUrl, registered, provisioned, skipped, errors };
+  return { publicMcpUrl: config.publicMcpUrl, registered, provisioned, skipped, errors, scheduled: withSchedules };
 }
 
 /** Manually wake one research agent to run a discovery sweep now (proves the pipe). */

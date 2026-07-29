@@ -111,8 +111,12 @@ export const config = {
   executeToken: process.env.MERIDIAN_EXECUTE_TOKEN ?? "",
   // The URL an OpenHermit gateway uses to reach this MCP server — usually a
   // publicly routable host, not mcpHost (which may be a bind address like 0.0.0.0).
+  // `||`, not `??`: an empty MERIDIAN_PUBLIC_MCP_URL= line in an env file is a
+  // present-but-blank value, which `??` would accept. That blank then gets
+  // written over the gateway's MCP registrations on the next provision, pointing
+  // every agent's tools at nothing. Empty means unset here.
   publicMcpUrl:
-    process.env.MERIDIAN_PUBLIC_MCP_URL ??
+    process.env.MERIDIAN_PUBLIC_MCP_URL ||
     `http://${process.env.MERIDIAN_MCP_HOST ?? "127.0.0.1"}:${process.env.MERIDIAN_MCP_PORT ?? 8787}/mcp`,
 
   // The OpenHermit gateway the research fleet is provisioned on.
