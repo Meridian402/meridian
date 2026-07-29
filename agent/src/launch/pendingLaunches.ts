@@ -15,9 +15,18 @@
 // process restarts the user asks their agent again, which costs one message.
 // Same reasoning as the ensure/session caches in deploy/myAgent.ts.
 
+/**
+ * Which launchpad the transaction goes to. The two venues behave differently
+ * enough (bonding curve vs. a locked v3 position from block one) that a UI
+ * showing "sign this launch" without naming the venue would be hiding the most
+ * important thing about it.
+ */
+export type LaunchVenue = "pons" | "flap";
+
 export interface PendingLaunch {
   /** Lowercased wallet that must sign. */
   creator: string;
+  venue: LaunchVenue;
   chainId: number;
   network: string;
   name: string;
@@ -48,8 +57,16 @@ const key = (address: string) => address.toLowerCase();
  * means the previous proposal is dead, and showing them two sign buttons — one
  * of them stale — is how someone signs the wrong token.
  */
-export function recordPendingLaunch(launch: Omit<PendingLaunch, "createdAt">): void {
-  pending.set(key(launch.creator), { ...launch, creator: key(launch.creator), createdAt: Date.now() });
+export function recordPendingLaunch(launch: Omit<PendingLaunch, "createdAt" | "venue"> & { venue?: LaunchVenue }): void {
+  // Venue defaults to flap because that is the only venue that existed when
+  // this record was introduced, so an older caller that omits it is describing
+  // a Flap launch, not an unknown one. Every reader still sees a venue.
+  pending.set(key(launch.creator), {
+    ...launch,
+    venue: launch.venue ?? "flap",
+    creator: key(launch.creator),
+    createdAt: Date.now(),
+  });
 }
 
 /** The wallet's live proposal, or null. Expired entries are dropped on read. */

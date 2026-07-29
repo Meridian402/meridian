@@ -11,6 +11,7 @@ import { carryQuote } from "../signals/carry.js";
 import { perpSnapshot } from "../signals/perpFeed.js";
 import { lpScores } from "../signals/lpScore.js";
 import { buildStandardLaunch, buildTaxLaunch, simulateLaunch, launchpadDeployment, LAUNCH_STYLES, DIVIDEND_SELF } from "../launch/portal.js";
+import { buildPonsLaunch, simulatePonsLaunch, ponsCanLaunch, ponsDeployment } from "../launch/pons.js";
 import { recordPendingLaunch } from "../launch/pendingLaunches.js";
 import { parseEther, formatEther } from "viem";
 
@@ -513,6 +514,7 @@ export function buildServer(): McpServer {
       // cannot carry a signable transaction; this is how the UI gets one.
       recordPendingLaunch({
         creator: creator as string,
+        venue: "flap",
         chainId: built.chainId,
         network,
         name,
@@ -544,6 +546,142 @@ export function buildServer(): McpServer {
         note:
           "Simulated successfully against the live chain. The transaction has been sent to the user's wallet panel for review and signing — tell them to check it. " +
           "Do NOT recite the calldata. The token trades on a bonding curve and graduates to a Uniswap V2 pair at ~80% of supply sold.",
+      });
+    },
+  );
+
+  /**
+   * The second launch venue, PONS.
+   *
+   * Same safety shape as the Flap tool above: no signer, no funds, unsigned
+   * calldata only, and nothing returned that has not simulated against the live
+   * chain. What differs is the product. PONS mints the whole supply into one
+   * Uniswap v3 position and locks it forever, so there is no curve to graduate
+   * from and no way for anyone to pull the liquidity later. Its factory source
+   * is verified and published, which is why this is the venue we default to.
+   */
+  server.registerTool(
+    "meridian_launch_token_pons",
+    {
+      title: "Prepare a token launch on PONS (Robinhood Chain)",
+      description:
+        "Prepare a token launch on Robinhood Chain via the PONS launch factory, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet: this tool never signs, never holds funds, and never spends. How a PONS launch works: a fixed supply of 1,000,000,000 tokens is minted straight into a single Uniswap v3 position paired against WETH at a 1% pool fee, and that position is transferred to the PONS locker and locked permanently, so nobody can remove the liquidity, not the creator and not Meridian. There is no bonding curve of the Flap kind and no graduation step to wait for: the token is tradeable immediately. For a short anti-sniper window of a couple of blocks after launch, buys from the pool are capped per wallet and buying in the launch block itself is blocked; after that window the token trades with no maximum wallet and no maximum transaction. Trading fees collect into the locked position, PONS keeps a percentage of every claim and the creator gets the rest, and someone has to call collectFees on the locker to claim them: they are not streamed automatically. The creator pays a launch fee read live from the contract, plus whatever they choose to spend on their own first buy.",
+      inputSchema: {
+        creator: z
+          .string()
+          .regex(/^0x[0-9a-fA-F]{40}$/)
+          .describe("The wallet that will sign, fund and own the launch. Must be the user's own wallet."),
+        name: z.string().min(1).max(64).describe("Token name, e.g. 'Meridian Test'"),
+        symbol: z.string().min(1).max(16).describe("Ticker, e.g. MTEST"),
+        logo: z.string().optional().describe("URL or IPFS URI for the token image, stored on-chain in the token's params. Optional."),
+        description: z.string().optional().describe("Short description stored on-chain with the token. Optional."),
+        twitter: z.string().optional().describe("Twitter/X URL or handle for the token. Optional."),
+        telegram: z.string().optional().describe("Telegram URL for the token. Optional."),
+        discord: z.string().optional().describe("Discord invite URL for the token. Optional."),
+        website: z.string().optional().describe("Website URL for the token. Optional."),
+        farcaster: z.string().optional().describe("Farcaster profile or channel URL for the token. Optional."),
+        feeWallet: z
+          .string()
+          .regex(/^0x[0-9a-fA-F]{40}$/)
+          .optional()
+          .describe(
+            "Optional. This one address does TWO jobs: it receives the token's trading fees, and it also receives the tokens bought by the creator's initial buy. Setting it to any address other than the creator's own wallet sends BOTH the fees and the initial buy there instead of to the creator. Leave it unset and the creator's own wallet receives both.",
+          ),
+        initialBuyEth: z
+          .number()
+          .min(0)
+          .max(5)
+          .optional()
+          .describe(
+            "Creator's own first buy in ETH, paid on top of the launch fee in the same transaction and swapped for tokens at launch. Optional; omit or 0 to launch without buying.",
+          ),
+      },
+    },
+    async ({ creator, name, symbol, logo, description, twitter, telegram, discord, website, farcaster, feeWallet, initialBuyEth }) => {
+      const dep = ponsDeployment();
+      const wallet = creator as `0x${string}`;
+
+      // Ask the factory's real rule (enabled OR whitelisted) before building, so
+      // a paused launchpad is reported as paused rather than as a failed launch.
+      let permission;
+      try {
+        permission = await ponsCanLaunch(wallet, dep);
+      } catch (e) {
+        return json({ ok: false, venue: "pons", error: `could not read PONS launch state: ${(e as Error).message}` });
+      }
+      if (!permission.allowed) {
+        return json({ ok: false, venue: "pons", error: permission.reason, launchEnabled: permission.launchEnabled, whitelisted: permission.whitelisted });
+      }
+
+      let built;
+      try {
+        built = await buildPonsLaunch(
+          {
+            name,
+            symbol,
+            creator: wallet,
+            logo,
+            description,
+            socials: { twitter, telegram, discord, website, farcaster },
+            ...(feeWallet ? { feeWallet: feeWallet as `0x${string}` } : {}),
+            initialBuyWei: parseEther(String(initialBuyEth ?? 0)),
+          },
+          dep,
+        );
+      } catch (e) {
+        return json({ ok: false, venue: "pons", error: (e as Error).message });
+      }
+
+      // Simulating is not optional. It is the proof that this wallet, at this
+      // block, with this balance, actually lands the launch.
+      const sim = await simulatePonsLaunch(built, wallet, dep);
+      if (!sim.ok) {
+        return json({
+          ok: false,
+          venue: "pons",
+          network: "robinhood-mainnet",
+          error: sim.error,
+          underfunded: sim.underfunded ?? false,
+          ...(sim.underfunded ? { needsWei: String(sim.requiredWei), needsEth: formatEther(sim.requiredWei ?? 0n) } : {}),
+        });
+      }
+
+      recordPendingLaunch({
+        creator: creator as string,
+        venue: "pons",
+        chainId: built.chainId,
+        network: "robinhood-mainnet",
+        name,
+        symbol,
+        style: "locked-liquidity",
+        tokenAddress: String(sim.token),
+        explorer: `${dep.explorer}/address/${sim.token}`,
+        economics: built.economics,
+        transaction: { to: built.to, data: built.data, value: String(built.value) },
+      });
+
+      return json({
+        ok: true,
+        venue: "pons",
+        network: "robinhood-mainnet",
+        chainId: built.chainId,
+        tokenAddress: sim.token,
+        addressMatchedPrediction: sim.matchesPrediction,
+        explorer: `${dep.explorer}/address/${sim.token}`,
+        launchFeeEth: formatEther(built.launchFeeWei),
+        initialBuyEth: formatEther(built.initialBuyWei),
+        totalCostEth: formatEther(built.value),
+        initialBuyGoesTo: built.initialBuyRecipient,
+        // Restated in plain terms, from the config read off the chain for this
+        // launch. A user signing this deserves to read what it means.
+        economics: built.economics,
+        // What the user signs. Nothing here is broadcast by us.
+        transaction: { to: built.to, data: built.data, value: String(built.value) },
+        simulated: true,
+        awaitingSignature: true,
+        note:
+          "Simulated successfully against the live chain. The transaction has been sent to the user's wallet panel for review and signing, tell them to check it. " +
+          "Do NOT recite the calldata. Tell them the total cost in ETH, that the liquidity is locked permanently in the PONS locker, and, if they set an initial buy, which address receives those tokens.",
       });
     },
   );
