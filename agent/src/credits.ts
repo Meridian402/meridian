@@ -6,7 +6,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { appendLedger } from "./ledger.js";
 import { dataPath } from "./dataDir.js";
-import { noteSpend } from "./spendGuards.js";
+import { recordTurn } from "./spendGuards.js";
 import { merdTokenAddress } from "./deploy/tokenGate.js";
 import type { SettlementAsset } from "./payments/PaymentGate.js";
 
@@ -156,7 +156,6 @@ function append(wallet: string, kind: CreditEvent["kind"], credits: number, extr
   // spend ceiling can be told about a spend without a route being able to skip
   // it. The ledger stays the source of truth; this only keeps the cached fold
   // current between refolds.
-  if (kind === "spend") noteSpend(wallet);
   const map = loadBalances();
   const next = applyEvent(map.get(wallet) ?? 0, ev);
   map.set(wallet, next);
@@ -178,16 +177,28 @@ export function balanceOf(address: string): number {
 }
 
 /**
- * Debit n credits if the wallet can afford it. With enforcement off nothing is
- * written: reporting a balance is fine, but a spend row written while the
- * switch is off would charge users for messages the product said were free.
+ * Debit n credits if the wallet can afford it. With enforcement off no spend row
+ * is written: reporting a balance is fine, but charging while the switch is off
+ * would bill users for messages the product said were free.
+ *
+ * The TURN is metered on both paths, and only once the turn is actually going to
+ * happen. Metering is not billing: the daily ceilings in spendGuards bound model
+ * spend, which we incur whether or not this wallet pays, so tying the meter to
+ * the credits switch is what previously let MERIDIAN_CREDITS=off disarm it. A
+ * wallet turned away for being broke is NOT metered, because no tokens are spent
+ * on a turn that never reaches the gateway.
  */
 export function trySpend(address: string, n = 1): { ok: boolean; balance: number } {
   const w = address.toLowerCase();
-  if (!creditsEnforced()) return { ok: true, balance: balanceOf(w) };
+  if (!creditsEnforced()) {
+    recordTurn(w);
+    return { ok: true, balance: balanceOf(w) };
+  }
   const balance = balanceOf(w);
   if (balance < n) return { ok: false, balance };
-  return { ok: true, balance: append(w, "spend", n) };
+  const next = append(w, "spend", n);
+  recordTurn(w);
+  return { ok: true, balance: next };
 }
 
 /**

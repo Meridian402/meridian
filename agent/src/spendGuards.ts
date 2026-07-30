@@ -11,26 +11,42 @@
 // Counted FROM THE LEDGER, the same doctrine as the swarm's daily budget in
 // swarm/loop.ts: a process counter resets on deploy, and a crash loop would hand
 // the box a fresh allowance on every restart, which is precisely the failure a
-// spend ceiling exists to stop. credits.jsonl already writes one spend row per
-// charged turn with a timestamp, so the fold is over data we already keep and
-// there is nothing new to record.
+// spend ceiling exists to stop.
+//
+// METERED IN ITS OWN FILE, and that is the correction that matters. This first
+// folded credits.jsonl spend rows, which tied the ceiling to whether the turn was
+// CHARGED. With MERIDIAN_CREDITS=off no spend row is written, so the fold saw an
+// empty window and both ceilings went inert: the kill switch and the escape hatch
+// cancelled each other out, and the one configuration you would reach for in an
+// incident was the one that removed the backstop. Model spend happens whether or
+// not the user pays for it, so the meter cannot depend on the money path. Turns
+// are recorded here instead, on every turn that reaches the gateway.
+//
+// A SEPARATE FILE rather than a new row kind in credits.jsonl, deliberately: that
+// ledger's fold treats any kind other than "spend" as credits coming IN, so a
+// "turn" row added there would quietly hand every caller free credits. Keeping
+// the meter out of the money file makes that mistake unrepresentable.
 //
 // A refunded turn still counts here. The meter is model spend, not revenue: a
 // turn that reached the gateway and failed cost us the same tokens as one that
 // worked, and a caller who can make turns fail must not get unlimited ones.
 import { existsSync, readFileSync } from "node:fs";
+import { appendLedger } from "./ledger.js";
 import { dataPath } from "./dataDir.js";
 
-const PATH = dataPath("credits.jsonl");
+/** One row per metered turn. Mirrored to Postgres like every other ledger. */
+export const TURNS_FILE = "turns.jsonl";
+
+const PATH = dataPath(TURNS_FILE);
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_MAX_PER_DAY = 5000;
 const DEFAULT_MAX_PER_WALLET_PER_DAY = 200;
 const DEFAULT_CACHE_MS = 10_000;
 
-/** The only fields of a credits row this file cares about. Declared locally
- *  rather than imported from credits.ts so the dependency runs one way: credits
- *  tells this module about a spend, this module never reaches back. */
+/** The only fields of a turn row this file cares about. Declared locally rather
+ *  than imported so the dependency runs one way: credits tells this module about
+ *  a turn, this module never reaches back. */
 interface LedgerRow {
   wallet?: unknown;
   kind?: unknown;
@@ -54,7 +70,10 @@ export function foldSpend(rows: LedgerRow[], since: number): SpendWindow {
   const byWallet = new Map<string, number>();
   let total = 0;
   for (const row of rows) {
-    if (!row || row.kind !== "spend") continue;
+    // "turn" is what this file writes. "spend" is still counted so the window
+    // does not go blind on the deploy that introduces turns.jsonl, when the only
+    // rows inside it are the ones already in the credit ledger.
+    if (!row || (row.kind !== "turn" && row.kind !== "spend")) continue;
     if (typeof row.at !== "number" || !Number.isFinite(row.at) || row.at < since) continue;
     if (typeof row.wallet !== "string" || !row.wallet) continue;
     const w = row.wallet.toLowerCase();
@@ -131,6 +150,26 @@ export function noteSpend(wallet: string): void {
   const w = wallet.toLowerCase();
   cached.view.total += 1;
   cached.view.byWallet.set(w, (cached.view.byWallet.get(w) ?? 0) + 1);
+}
+
+/**
+ * Record one metered turn: the durable row plus the live cache bump, in one call
+ * so a caller cannot do half of it. Called for EVERY turn that reaches the
+ * gateway, charged or not, which is what keeps the ceiling armed while credits
+ * are switched off.
+ *
+ * Never throws. A meter that can fail the request it is metering would turn a
+ * disk hiccup into an outage, and the ceiling exists to prevent outages.
+ */
+export function recordTurn(wallet: string): void {
+  const w = wallet.toLowerCase();
+  try {
+    appendLedger(TURNS_FILE, { wallet: w, kind: "turn", at: Date.now() });
+  } catch {
+    // The cache bump below still bounds this process. A dropped row only means
+    // the window under-counts after a restart, which is the safe direction.
+  }
+  noteSpend(w);
 }
 
 /** Drop the cached fold. For tests, and for anything that rewrites the ledger. */

@@ -42,6 +42,7 @@ const LEDGER_FILES = [
   "reservations.jsonl",
   "revenue.jsonl",
   "swarm.jsonl",
+  "turns.jsonl",
   "user-agents.jsonl",
   "wallet-ledger.jsonl",
   "x402-used.jsonl",
