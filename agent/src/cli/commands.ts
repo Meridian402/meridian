@@ -65,6 +65,7 @@ const HELP = [
   "    /style <style>     concise | balanced | deep",
   "    /focus <a,b>       market-making, yield, directional, research",
   "    /goal <text>       what you want it working toward",
+  "    /voice <text>      how it should sound. dry, warm, blunt, your call",
   "    /swarm on|off      let it speak in the public agent feed",
   "    /reset <field>     clear one setting back to default",
   "",
@@ -243,6 +244,18 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
       return ok([], { kind: "settings", patch: { goal: arg } });
     }
 
+    case "voice": {
+      if (!arg) {
+        return err([
+          "usage: /voice <how it should sound>",
+          `currently: ${settings.voice ?? "not set"}`,
+          `  eg  /voice dry and skeptical, never enthusiastic`,
+          `      /voice explain like i am new to this, no jargon`,
+        ]);
+      }
+      return ok([], { kind: "settings", patch: { voice: arg } });
+    }
+
     case "swarm": {
       const v = arg.toLowerCase();
       if (v !== "on" && v !== "off") {
@@ -259,6 +272,7 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
       const fields: Record<string, Record<string, unknown>> = {
         name: { name: "" },
         goal: { goal: "" },
+        voice: { voice: "" },
         risk: { riskAppetite: "balanced" },
         style: { style: "balanced" },
         focus: { focus: [...FOCUS_AREAS] },
@@ -280,7 +294,7 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
  * exploring, and exploring is the whole point of putting this in front of them.
  */
 function suggest(cmd: string): string[] {
-  const vocab = ["help", "whoami", "name", "risk", "style", "focus", "goal", "swarm", "reset", "credits", "buy", "explore", "clear", ...DESK];
+  const vocab = ["help", "whoami", "name", "risk", "style", "focus", "goal", "voice", "swarm", "reset", "credits", "buy", "explore", "clear", ...DESK];
   let best: string | null = null;
   let bestD = Infinity;
   for (const v of vocab) {
@@ -311,6 +325,7 @@ export function describeSettings(s: AgentSettings): string[] {
     `style   ${s.style ?? "balanced (default)"}`,
     `focus   ${s.focus?.length ? s.focus.join(", ") : "all areas (default)"}`,
     `goal    ${s.goal ?? "not set"}`,
+    `voice   ${s.voice ?? "not set"}`,
     `swarm   ${s.joinSwarm === true ? "on, your agent may speak publicly" : "off"}`,
   ];
 }

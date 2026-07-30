@@ -12,6 +12,7 @@ import { dataPath } from "../dataDir.js";
 const PATH = dataPath("agent-settings.jsonl");
 const MAX_NAME = 32;
 const MAX_GOAL = 280;
+const MAX_VOICE = 200;
 
 export const RISK_LEVELS = ["conservative", "balanced", "aggressive"] as const;
 export const STYLES = ["concise", "balanced", "deep"] as const;
@@ -26,6 +27,13 @@ export interface AgentSettings {
   focus?: FocusArea[];
   style?: Style;
   goal?: string;
+  /**
+   * How the agent should SOUND. `style` is length; this is character: dry and
+   * skeptical, warm and patient, blunt. Free text because a fixed list of
+   * personalities is exactly the thing people want to escape, and capped short
+   * because a paragraph here is really an instruction in disguise.
+   */
+  voice?: string;
   /** Opt-in: this wallet's agent may speak in the public agent-to-agent feed.
    *  A user's agent speaks for a real person, so it is absent (not false) until
    *  they turn it on themselves, and nothing else may set it. */
@@ -81,6 +89,10 @@ export function sanitizeSettings(patch: unknown): { settings: Partial<AgentSetti
     // Empty goal clears it; otherwise clean + cap.
     out.goal = p.goal === "" || p.goal == null ? "" : cleanText(p.goal, MAX_GOAL) ?? "";
   }
+
+  if ("voice" in p) {
+    out.voice = p.voice === "" || p.voice == null ? "" : cleanText(p.voice, MAX_VOICE) ?? "";
+  }
   if ("joinSwarm" in p) {
     // Strictly boolean: consent to appear in a public feed is never inferred
     // from a truthy string or a 1.
@@ -127,6 +139,7 @@ export function updateAgentSettings(address: string, patch: Partial<AgentSetting
   const merged = { ...getAgentSettings(address), ...patch };
   // A cleared goal ("") should drop the key rather than persist an empty string.
   if (merged.goal === "") delete merged.goal;
+  if (merged.voice === "") delete merged.voice;
   appendLedger("agent-settings.jsonl", { address: address.toLowerCase(), settings: merged, at: Date.now() });
   return merged;
 }
