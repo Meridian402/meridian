@@ -40,7 +40,26 @@ export const TURNS_FILE = "turns.jsonl";
 const PATH = dataPath(TURNS_FILE);
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const DEFAULT_MAX_PER_DAY = 5000;
+// The global ceiling is a runaway stop, not a budget. It exists so a bug or an
+// abusive caller cannot spend the month in an afternoon, and it should sit well
+// above any plausible honest day, because the failure it causes is total: every
+// wallet gets a 503 until it rolls off.
+//
+// 5,000 was too low for that job in a way the ratio makes obvious. At 200 per
+// wallet it took only TWENTY FIVE keen users to close the door on everybody
+// else, which is precisely the shape of a launch day. 50,000 needs 250, while
+// still stopping a runaway inside a day.
+//
+// What a turn costs, measured rather than assumed (Haiku 4.5 via OpenRouter,
+// $1/M in, $5/M out, $0.10/M cached read): the fixed prefix is ~4,100 tokens of
+// persona plus tool definitions, so a cached turn with a short reply lands near
+// $0.002 and an uncached one near $0.006. 50,000 turns is therefore roughly
+// $100 on a day that actually hit the ceiling, against 4 turns on a normal one
+// today. Raise it further by env, but price it first.
+const DEFAULT_MAX_PER_DAY = 50_000;
+// Deliberately unchanged. Lowering it would buy a better ratio at the cost of
+// the people who use this most, and the global ceiling is the right place to
+// hold the line.
 const DEFAULT_MAX_PER_WALLET_PER_DAY = 200;
 const DEFAULT_CACHE_MS = 10_000;
 

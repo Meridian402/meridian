@@ -132,8 +132,16 @@ test("ceiling: a zero max closes chat, which is the point of the knob", () => {
 });
 
 test("limits: generous defaults, env override, mistyped values fall back", () => {
-  assert.equal(chatMaxTurnsPerDay(), 5000);
+  // The global ceiling is a runaway stop, not a budget. It has to sit above any
+  // plausible honest day, because tripping it 503s every wallet at once: at
+  // 5,000 global against 200 per wallet, twenty five keen users closed the door
+  // on everyone, which is the exact shape of a launch.
+  assert.equal(chatMaxTurnsPerDay(), 50_000);
   assert.equal(chatMaxTurnsPerWalletPerDay(), 200);
+  assert.ok(
+    chatMaxTurnsPerDay() / chatMaxTurnsPerWalletPerDay() >= 100,
+    "the global ceiling must take a crowd to reach, not a handful of enthusiasts",
+  );
 
   process.env.CHAT_MAX_TURNS_PER_DAY = "12";
   process.env.CHAT_MAX_TURNS_PER_WALLET_PER_DAY = "0";
@@ -142,7 +150,7 @@ test("limits: generous defaults, env override, mistyped values fall back", () =>
 
   process.env.CHAT_MAX_TURNS_PER_DAY = "not a number";
   process.env.CHAT_MAX_TURNS_PER_WALLET_PER_DAY = "-5";
-  assert.equal(chatMaxTurnsPerDay(), 5000);
+  assert.equal(chatMaxTurnsPerDay(), 50_000);
   assert.equal(chatMaxTurnsPerWalletPerDay(), 200);
 
   delete process.env.CHAT_MAX_TURNS_PER_DAY;

@@ -376,9 +376,28 @@ export async function ensureUserAgent(address: string): Promise<EnsureResult> {
       max_tokens: typeof curModel.max_tokens === "number" ? curModel.max_tokens : 8192,
     },
   });
-  await gw.setInstruction(agentId, "persona", personaFor(address));
+  await writePersona(gw, agentId, address);
   ensuredAt.set(agentId, Date.now());
   return { agentId, ready: true, created };
+}
+
+// The persona text last written per agent, so an unchanged one is not written
+// again. ensureUserAgent runs every 5 minutes per active wallet and used to
+// rewrite the instruction unconditionally, which is a write to the cached
+// prefix of every subsequent turn. Prompt caching is prefix-matched, so
+// touching the system instruction discards the cache for the persona, the tool
+// definitions and the ENTIRE conversation behind them: on Haiku 4.5 that is
+// $1.00/M instead of $0.10/M, and it grows with the length of the chat, so the
+// users it punishes hardest are the ones talking to us most.
+//
+// In-memory: a restart re-writes once per agent, which is correct and cheap.
+const personaWritten = new Map<string, string>();
+
+async function writePersona(gw: GatewayClient, agentId: string, address: string): Promise<void> {
+  const persona = personaFor(address);
+  if (personaWritten.get(agentId) === persona) return;
+  await gw.setInstruction(agentId, "persona", persona);
+  personaWritten.set(agentId, persona);
 }
 
 /**
@@ -395,7 +414,10 @@ export async function setUserAgentSettings(address: string, patch: unknown): Pro
   if (gw) {
     try {
       await ensureUserAgent(address); // guarantees the agent exists (cheap after first call)
-      await gw.setInstruction(agentIdForWallet(address), "persona", personaFor(address));
+      // A real settings change genuinely alters the persona, so this write is
+      // earned; writePersona still skips it if the text came out identical
+      // (renaming to the same name, re-picking the same risk level).
+      await writePersona(gw, agentIdForWallet(address), address);
     } catch (err) {
       // Settings are saved regardless; the persona also refreshes on the next ensure.
       console.error("[my-agent] settings persona refresh failed:", err instanceof Error ? err.message : err);

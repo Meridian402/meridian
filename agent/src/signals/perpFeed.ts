@@ -105,10 +105,25 @@ export function perpPersonaLine(): string {
       if (!Array.isArray(row.m)) continue;
       const ms = row.m as [string, number, number, number, number | null, number | null][];
       const total = ms.reduce((s, m) => s + (m[2] || 0), 0);
-      const top = [...ms].sort((a, b) => (b[2] || 0) - (a[2] || 0)).slice(0, 5)
-        .map((m) => `${m[0]} $${Math.round((m[2] || 0) / 1000)}k`).join(", ");
+      // Names, not per-book dollar figures, and the daily total quantized to the
+      // nearest $5M.
+      //
+      // This line goes into a SYSTEM INSTRUCTION, which is the cached prefix of
+      // every turn. Exact figures made it change on essentially every sampler
+      // write: a 0.4% tick in volume rewrote the string, which rewrites the
+      // instruction, which invalidates the cached prefix, which on Haiku 4.5 is
+      // the difference between $0.10/M and $1.00/M on ~4,000 tokens of persona
+      // plus tools plus the whole conversation behind it. Ten times the price
+      // of the turn, to keep two decimal places nobody asked for.
+      //
+      // Nothing is lost: the agent has live tools and is told to use them when
+      // precision matters. A persona is for what is durably true, and "Lighter
+      // runs about $40M a day, busiest books are these" stays true for days.
+      const top = [...ms].sort((a, b) => (b[2] || 0) - (a[2] || 0)).slice(0, 5).map((m) => m[0]).join(", ");
+      const approxM = Math.max(5, Math.round(total / 1e6 / 5) * 5);
       return (
-        `Robinhood Chain also runs a zero-fee perp orderbook venue (Lighter, the venue behind rwa.wtf): ${ms.length} markets doing about $${(total / 1e6).toFixed(1)}M a day, USDG margined. Busiest books right now: ${top}. ` +
+        `Robinhood Chain also runs a zero-fee perp orderbook venue (Lighter, the venue behind rwa.wtf): ${ms.length} markets doing roughly $${approxM}M a day, USDG margined. Busiest books lately: ${top}. ` +
+        `Those are round numbers for orientation, so quote them as approximate and reach for a live tool when the exact figure matters. ` +
         `Funding is near flat baselines (roughly 28% APR stocks, 84% APR crypto, annualized) until real imbalance shows. You can analyze and discuss this venue with live numbers, but neither you nor Meridian executes perp trades yet.`
       );
     }
