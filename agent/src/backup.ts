@@ -66,6 +66,22 @@ const FILES = [
   "swarm.jsonl",
   "x-replies.jsonl",
   "open-deploy-state.json",
+  // Merd's memory, and it was in neither list.
+  //
+  // copywriter-journal.jsonl is the only copy of what Merd has concluded across
+  // its whole run: the notes it writes to itself each cycle and reads back the
+  // next one. The posting voice depends on it directly, because the callback form
+  // ("i said i would watch whether X closed, it did not") is generated FROM these
+  // entries. Lose the file and Merd does not just lose data, it loses continuity
+  // and starts writing like it has never thought anything before, which is the
+  // exact quality that makes it read as a person rather than a feed.
+  //
+  // x-posts.jsonl is the record of what actually published, which is also the
+  // dedupe source that stops it repeating itself, and merd-decisions.jsonl is its
+  // own log of post-versus-hold calls.
+  "copywriter-journal.jsonl",
+  "x-posts.jsonl",
+  "merd-decisions.jsonl",
 ];
 
 const lastHash = new Map<string, string>();
