@@ -1389,6 +1389,75 @@ app.get("/api/admin/agents", async (req: Request, res: Response) => {
   }
 });
 
+// Operator-only: repair a gateway agent whose stored config is incomplete.
+//
+// An agent can exist, appear in the roster, and still be unable to receive a
+// single message: the gateway validates the STORED config when it uses the
+// agent, so one provisioned with missing fields fails every call with a
+// validation error rather than at creation time. Production had exactly that in
+// a fleet agent (workspace_root, model.max_tokens and memory all undefined),
+// and because swarm pairing is deterministic it silently killed every exchange
+// that agent's slot came up for.
+//
+// Get-merge-put, and only ever FILLS what is missing: an existing value is never
+// overwritten, so repairing a half-broken agent cannot quietly change the model
+// or the memory settings of a working one. workspace_root is derived from a
+// healthy sibling ON THE SAME GATEWAY rather than guessed, because the path
+// convention differs between a container and a laptop and a wrong root would
+// swap one silent failure for another.
+app.post("/api/admin/agents/repair-config", async (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  const agentId = (req.body ?? {}).agentId;
+  if (typeof agentId !== "string" || !agentId) { res.status(400).json({ error: "agentId required" }); return; }
+  try {
+    const gw = new GatewayClient({ baseUrl: config.gatewayUrl, token: config.gatewayAdminToken });
+    const before = ((await gw.getAgentConfig(agentId)) ?? {}) as Record<string, unknown>;
+
+    // A sibling whose config carries the fields we need, so every default we
+    // apply is one this gateway is already running rather than one we invented.
+    let ref: Record<string, unknown> | null = null;
+    for (const a of await gw.listAgents()) {
+      if (a.agentId === agentId) continue;
+      const c = ((await gw.getAgentConfig(a.agentId).catch(() => null)) ?? {}) as Record<string, unknown>;
+      if (typeof c.workspace_root === "string" && c.memory && typeof c.memory === "object") { ref = c; break; }
+    }
+    if (!ref) { res.status(409).json({ ok: false, error: "no healthy sibling agent to copy conventions from" }); return; }
+
+    const filled: string[] = [];
+    const next: Record<string, unknown> = { ...before };
+
+    if (typeof next.workspace_root !== "string" || !next.workspace_root) {
+      // Same parent directory as the sibling, this agent's own id as the leaf.
+      const sibling = ref.workspace_root as string;
+      const parent = sibling.slice(0, sibling.lastIndexOf("/"));
+      next.workspace_root = `${parent}/${agentId}`;
+      filled.push("workspace_root");
+    }
+    const model = { ...((before.model ?? {}) as Record<string, unknown>) };
+    if (typeof model.max_tokens !== "number") {
+      const refModel = (ref.model ?? {}) as Record<string, unknown>;
+      model.max_tokens = typeof refModel.max_tokens === "number" ? refModel.max_tokens : 8192;
+      filled.push("model.max_tokens");
+    }
+    if (typeof model.provider !== "string") { model.provider = (ref.model as any)?.provider ?? "openrouter"; filled.push("model.provider"); }
+    if (typeof model.model !== "string") { model.model = (ref.model as any)?.model ?? "anthropic/claude-haiku-4.5"; filled.push("model.model"); }
+    next.model = model;
+
+    if (!next.memory || typeof next.memory !== "object") { next.memory = ref.memory; filled.push("memory"); }
+    if (!next.channels || typeof next.channels !== "object") { next.channels = ref.channels ?? {}; filled.push("channels"); }
+    if (!next.web || typeof next.web !== "object") { next.web = ref.web ?? {}; filled.push("web"); }
+
+    if (!filled.length) { res.json({ ok: true, agentId, filled: [], note: "config already complete" }); return; }
+
+    await gw.putAgentConfig(agentId, next);
+    const after = ((await gw.getAgentConfig(agentId)) ?? {}) as Record<string, unknown>;
+    console.error(`[admin] repaired config for ${agentId}: filled ${filled.join(", ")}`);
+    res.json({ ok: true, agentId, filled, workspaceRoot: after.workspace_root, model: after.model });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 app.post("/api/admin/agents/delete", async (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
   const agentId = (req.body ?? {}).agentId;
