@@ -307,6 +307,20 @@ export function personaFor(address: string): string {
  * Scoped to ensureUserAgent, so the research fleet and the house agents keep
  * whatever their own provisioning gives them.
  */
+const DEFAULT_USER_MAX_TOKENS = 1536;
+
+/**
+ * Output ceiling for a user's chat agent. Generous for the longest honest
+ * answer this surface produces (a walked-through explanation is a few hundred
+ * tokens) and far below the point where a runaway generation gets expensive.
+ * Floored in code, because a mistyped zero would make every reply empty.
+ */
+function userMaxTokens(): number {
+  const raw = Number(process.env.MERIDIAN_USER_MAX_TOKENS ?? DEFAULT_USER_MAX_TOKENS);
+  if (!Number.isFinite(raw) || raw < 256) return DEFAULT_USER_MAX_TOKENS;
+  return Math.floor(raw);
+}
+
 function userMemoryConfig(currentMemory: unknown): Record<string, unknown> {
   const base = currentMemory && typeof currentMemory === "object" ? { ...(currentMemory as Record<string, unknown>) } : {};
   const currentIntrospection =
@@ -373,7 +387,24 @@ export async function ensureUserAgent(address: string): Promise<EnsureResult> {
       ...curModel,
       provider: process.env.MERIDIAN_USER_MODEL_PROVIDER ?? "openrouter",
       model: process.env.MERIDIAN_USER_MODEL_ID ?? "anthropic/claude-haiku-4.5",
-      max_tokens: typeof curModel.max_tokens === "number" ? curModel.max_tokens : 8192,
+      // Set, not preserved. This used to keep whatever was already on the agent
+      // and only fall back to 8192, so every agent ever created kept 8192
+      // forever and this line could never actually change anything.
+      //
+      // 8192 is wrong for this agent by two orders of magnitude. The persona
+      // asks for two or three sentences and goes longer only on request, which
+      // is a couple of hundred tokens; 8192 is eighty times that. Unused output
+      // tokens are not billed, so this is not a direct saving, but it is the
+      // tail: a single runaway generation costs $0.04 at 8192 against $0.008 at
+      // 1536, and nothing legitimate on this surface needs the room.
+      //
+      // It also decides whether we degrade or fall over. OpenRouter checks
+      // affordability against max_tokens, not against expected output, so a low
+      // balance refuses an 8192 request outright while comfortably serving a
+      // 1536 one. Production hit exactly that: "you requested up to 8192 tokens,
+      // but can only afford 2466", and every user chat turn failed rather than
+      // getting shorter.
+      max_tokens: userMaxTokens(),
     },
   });
   await writePersona(gw, agentId, address);
