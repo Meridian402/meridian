@@ -208,7 +208,13 @@ function launchPersonaLine(): string {
   ].join("\n");
 }
 
-function personaFor(address: string): string {
+/**
+ * The instruction this wallet's agent actually runs on. Exported so the parts
+ * that are policy rather than prose (the swarm gate, the voice scope guard) can
+ * be asserted against the real string the model receives, instead of against a
+ * reimplementation of it in a test.
+ */
+export function personaFor(address: string): string {
   const s = getAgentSettings(address);
   const name = s.name || DEFAULT_AGENT_NAME;
   return [
@@ -275,7 +281,13 @@ function personaFor(address: string): string {
     // Only present once this agent has actually been in an exchange with
     // another agent, and hard-capped in learning.ts so a persona cannot grow
     // with usage.
-    learningSection(publicIdForWallet(address)),
+    //
+    // Gated on the toggle still being ON. Leaving already withdraws the
+    // conversations from the public feed, and it should stop the other half
+    // too: a switch whose effects outlive it is one people are right not to
+    // trust. The rows are not deleted, so rejoining brings the conclusions
+    // back rather than starting the agent over.
+    s.joinSwarm === true ? learningSection(publicIdForWallet(address)) : "",
   ]
     .filter(Boolean)
     .join("\n");

@@ -29,6 +29,8 @@ const { publicIdForWallet, userParticipants, houseParticipantFor, rosterHealth, 
 const { agentIdForWallet } = await import("../src/deploy/myAgent.js");
 const { appendSwarmRow, publishableRows, swarmFeed, resetSwarmCache } = await import("../src/swarm/feed.js");
 const { priorWith } = await import("../src/swarm/exchange.js");
+const { standingFor, learningSection } = await import("../src/swarm/learning.js");
+const { personaFor } = await import("../src/deploy/myAgent.js");
 type SwarmRow = import("../src/swarm/feed.js").SwarmRow;
 
 const row = (exchangeId: string, seq: number, kind: SwarmRow["kind"], id: string, name: string, k: SwarmRow["speakerKind"], text: string): SwarmRow => ({
@@ -161,4 +163,81 @@ test("publicIdFor redacts a wallet id into the same speaker the feed publishes",
   assert.equal(publicIdFor(`mrdn-u-${IN.slice(2).toUpperCase()}`), publicIdForWallet(IN));
   // A house id names a desk, not a person, and passes through.
   assert.equal(publicIdFor("rwa-research-equities"), "rwa-research-equities");
+});
+
+// ---- what opting in actually returns, and who may see it -------------------
+
+// A wallet of its own: the rows are append-only and shared across this file, so
+// reusing IN would count the exchanges an earlier test wrote for it.
+const SOLO = "0x00000000000000000000000000000000000000d3";
+
+test("standingFor reports an agent's own conversations and what it concluded", () => {
+  const me = publicIdForWallet(SOLO);
+  resetSwarmCache();
+  appendSwarmRow(row("s1", 0, "topic", "swarm", "Topic", "system", "a question"));
+  appendSwarmRow(row("s1", 1, "turn", "rwa-research-equities", "Equities Desk", "house", "house line"));
+  appendSwarmRow(row("s1", 2, "turn", me, "Atlas", "user", "my line"));
+  appendSwarmRow(row("s1", 3, "takeaway", me, "Atlas", "user", "thin pools punish size"));
+  appendSwarmRow(row("s1", 4, "takeaway", "rwa-research-equities", "Equities Desk", "house", "their conclusion"));
+  // An exchange this agent had nothing to do with must not be counted as its own.
+  appendSwarmRow(row("s2", 0, "topic", "swarm", "Topic", "system", "another"));
+  appendSwarmRow(row("s2", 1, "turn", "rwa-research-bonds", "Bonds Desk", "house", "not mine"));
+  appendSwarmRow(row("s2", 2, "takeaway", "rwa-research-bonds", "Bonds Desk", "house", "not my conclusion"));
+
+  const mine = standingFor(me);
+  assert.equal(mine.exchanges, 1, "only exchanges this agent spoke in");
+  assert.deepEqual(mine.partners, ["Equities Desk"], "who it met, and not itself");
+  assert.deepEqual(mine.takeaways, ["thin pools punish size"]);
+  assert.ok(!mine.takeaways.includes("their conclusion"), "the partner's conclusion is not this agent's");
+
+  // A wallet that never joined has nothing, and asking does not invent any.
+  const stranger = standingFor(publicIdForWallet("0x00000000000000000000000000000000000000d9"));
+  assert.equal(stranger.exchanges, 0);
+  assert.deepEqual(stranger.takeaways, []);
+  assert.equal(stranger.lastAt, null);
+});
+
+test("leaving stops the learning being used, without destroying it", () => {
+  // Two halves, and the toggle has to govern both or it does not mean what it
+  // says. publishableRows withdraws the conversations from the feed (asserted
+  // above); personaFor stops injecting the conclusions, because a switch whose
+  // effects outlive it is one people are right not to trust.
+  //
+  // The rows survive, so rejoining restores the agent rather than starting it
+  // over. Dormant, not deleted, which is exactly what the CLI tells them.
+  // Bee (OUT) spoke and concluded something, then turned the toggle off.
+  resetSwarmCache();
+  const bee = publicIdForWallet(OUT);
+  appendSwarmRow(row("s3", 0, "topic", "swarm", "Topic", "system", "a question"));
+  appendSwarmRow(row("s3", 1, "turn", "rwa-research-bonds", "Bonds Desk", "house", "house line"));
+  appendSwarmRow(row("s3", 2, "turn", bee, "Bee", "user", "my line"));
+  appendSwarmRow(row("s3", 3, "takeaway", bee, "Bee", "user", "duration is the whole trade"));
+
+  // The conclusion exists and is readable: nothing was deleted.
+  assert.ok(learningSection(bee).includes("duration is the whole trade"));
+  assert.ok(standingFor(bee).exchanges > 0, "the ledger still records that it happened");
+
+  // But it does NOT reach the model, because Bee is out.
+  assert.ok(!personaFor(OUT).includes("duration is the whole trade"),
+    "an opted-out agent must not still be running on what the swarm taught it");
+
+  // Atlas (IN) is still in, so the same machinery does reach the model. Without
+  // this the test above would pass just as well if learning were broken outright.
+  const atlas = publicIdForWallet(IN);
+  appendSwarmRow(row("s4", 0, "topic", "swarm", "Topic", "system", "a question"));
+  appendSwarmRow(row("s4", 1, "turn", "rwa-research-bonds", "Bonds Desk", "house", "house line"));
+  appendSwarmRow(row("s4", 2, "turn", atlas, "Atlas", "user", "my line"));
+  appendSwarmRow(row("s4", 3, "takeaway", atlas, "Atlas", "user", "thin books punish size"));
+  assert.ok(personaFor(IN).includes("thin books punish size"),
+    "an opted-in agent should be running on what it learned");
+});
+
+test("standing is keyed by public id, so asking for it never needs a wallet", () => {
+  // The CLI hands this the hash, not the address. If it took a wallet, the
+  // wallet would have to travel to every caller that wants to render the payoff.
+  const me = publicIdForWallet(SOLO);
+  assert.ok(!me.includes(SOLO.slice(2).toLowerCase()));
+  assert.equal(standingFor(me).exchanges, 1);
+  // The gateway id is not an alias for it: nothing keyed by wallet resolves.
+  assert.equal(standingFor(agentIdForWallet(SOLO)).exchanges, 0);
 });

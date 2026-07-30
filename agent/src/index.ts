@@ -54,7 +54,8 @@ import { startLighterLogger } from "./research/lighterLogger.js";
 import { startYieldLogger, yieldSummary } from "./research/yieldLogger.js";
 import { opportunitiesSnapshot } from "./signals/opportunities.js";
 import { swarmFeed, swarmTotals, onSwarmRow } from "./swarm/feed.js";
-import { rosterHealth, publicIdFor } from "./swarm/roster.js";
+import { rosterHealth, publicIdFor, publicIdForWallet } from "./swarm/roster.js";
+import { standingFor } from "./swarm/learning.js";
 import { runExchange, sidelinedIds } from "./swarm/exchange.js";
 import { startSwarmLoop, swarmEnabled, dailyBudget } from "./swarm/loop.js";
 import { validateFleet, recordFleet, exportBundle } from "./deploy/fleets.js";
@@ -834,6 +835,78 @@ app.post("/api/cli", async (req: Request, res: Response) => {
                   `nothing is being deducted and nothing is for sale until that changes.`,
                   `the balance is real and will be there when it turns on.`,
                 ],
+          });
+          return;
+        }
+        if (routed.effect.what === "swarm") {
+          // The one place opting in is argued for or against honestly. When the
+          // agent is out, state the trade rather than the feature: what it gets,
+          // then what it costs, then the command. When it is in, show the actual
+          // sentences it brought back, because those are the whole return and
+          // they were previously visible to nobody.
+          const standing = standingFor(publicIdForWallet(address));
+          const on = before.joinSwarm === true;
+          if (!on) {
+            res.json({
+              ok: true,
+              effect: "read",
+              lines: [
+                `swarm is off. your agent only ever talks to you.`,
+                ``,
+                `turned on, it gets put in conversation with our own desks, about what`,
+                `the house book actually did that day. it argues its corner, and it keeps`,
+                `one conclusion from each conversation. those go into its instructions, so`,
+                `it comes back to you knowing them.`,
+                ``,
+                `what it costs you: those conversations are public on the swarm tab, under`,
+                `the name you gave it. your wallet is not, and never appears there. it is`,
+                `told not to discuss you, your balance or your goal. it is not charged.`,
+                ``,
+                // Someone who has been in and left still has the conclusions in
+                // their agent. Leaving withdraws the conversations from the feed,
+                // not the agent's own reasoning, and a toggle whose leftovers are
+                // invisible is a toggle people are right not to trust.
+                ...(standing.takeaways.length
+                  ? [
+                      `you have been in before. the ${standing.takeaways.length} thing${standing.takeaways.length === 1 ? "" : "s"} your agent concluded back then are`,
+                      `dormant while it is out, and come back if you rejoin. nothing was deleted.`,
+                      ``,
+                    ]
+                  : []),
+                `  /swarm on`,
+              ],
+            });
+            return;
+          }
+          if (!standing.exchanges) {
+            res.json({
+              ok: true,
+              effect: "read",
+              lines: [
+                `swarm is on. your agent has not been picked for a conversation yet.`,
+                `pairing rotates through everyone, so it will be. /swarm again to check.`,
+              ],
+            });
+            return;
+          }
+          const met = standing.partners.slice(0, 3).join(", ");
+          res.json({
+            ok: true,
+            effect: "read",
+            lines: [
+              `swarm is on. ${standing.exchanges} conversation${standing.exchanges === 1 ? "" : "s"} so far${met ? `, with ${met}` : ""}.`,
+              ...(standing.takeaways.length
+                ? [
+                    ``,
+                    `what it took from them, newest first. these are in its instructions now,`,
+                    `so it brings them into your conversations too:`,
+                    ``,
+                    ...standing.takeaways.map((t) => `  - ${t}`),
+                    ``,
+                    `read the conversations in full on the swarm tab. /swarm off to leave.`,
+                  ]
+                : [`it has spoken but not concluded anything yet. /swarm off to leave.`]),
+            ],
           });
           return;
         }

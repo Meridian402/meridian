@@ -56,6 +56,42 @@ export function fitTakeaways(texts: string[], budget = MAX_INJECTED_CHARS): stri
 }
 
 /**
+ * What one agent has actually got out of the swarm.
+ *
+ * The learning above is real but was entirely invisible to the person who owns
+ * the agent: takeaways went straight into the instruction and were never shown
+ * to anyone. So opting in read as pure cost (your agent speaks in public) with
+ * a benefit you had to take on faith. This is the benefit, stated in the
+ * agent's own words, and it is derived from the same rows the feed publishes
+ * rather than from a counter that could drift away from them.
+ *
+ * Keyed by publicId, like everything else that touches this ledger, so no
+ * caller needs a wallet to ask the question.
+ */
+export function standingFor(publicId: string): {
+  exchanges: number;
+  partners: string[];
+  takeaways: string[];
+  lastAt: number | null;
+} {
+  const rows = readSwarmRows();
+  const mine = new Set(rows.filter((r) => r.speakerId === publicId).map((r) => r.exchangeId));
+  const partners: string[] = [];
+  for (const r of rows) {
+    if (!mine.has(r.exchangeId) || r.speakerKind === "system") continue;
+    if (r.speakerId === publicId || partners.includes(r.speakerName)) continue;
+    partners.push(r.speakerName);
+  }
+  const takeaways = takeawaysFor(publicId);
+  return {
+    exchanges: mine.size,
+    partners,
+    takeaways: takeaways.map((t) => t.text),
+    lastAt: takeaways[0]?.at ?? null,
+  };
+}
+
+/**
  * The block appended to an agent's instruction. Empty string when the agent has
  * never been in an exchange, so a fresh agent's persona is untouched.
  */

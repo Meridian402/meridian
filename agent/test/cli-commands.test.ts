@@ -198,3 +198,31 @@ test("/whoami reports voice, so a setting cannot be invisible after you set it",
   assert.ok(describeSettings({ voice: "blunt" }).join("\n").includes("blunt"));
   assert.ok(describeSettings(empty).join("\n").includes("voice"));
 });
+
+test("a bare /swarm asks what you would get, rather than scolding you", () => {
+  // It used to be an error listing the usage, which meant the only way to find
+  // out what opting in buys you was to opt in. The router cannot answer it (the
+  // takeaways are in a ledger it cannot see), so it must delegate rather than
+  // invent a summary that would drift from the real one.
+  const r = routeCli("/swarm", empty);
+  assert.ok(!r.error);
+  assert.equal(r.effect.kind, "read");
+  assert.equal((r.effect as any).what, "swarm");
+
+  // on/off still set, and still only as an intent.
+  assert.deepEqual((routeCli("/swarm on", empty).effect as any).patch, { joinSwarm: true });
+  // Anything else is a genuine mistake and says so, pointing at the read.
+  const bad = routeCli("/swarm maybe", empty);
+  assert.ok(bad.error);
+  assert.equal(bad.effect.kind, "none");
+  assert.ok(bad.lines.some((l) => l.includes("/swarm to see")));
+});
+
+test("help sells the swarm by what it gives, not only by what it costs", () => {
+  // One opted-in user out of twenty-two. The line described the price (your
+  // agent speaks in public) and never the return (it learns from ours), which
+  // is a strange way to ask someone to say yes.
+  const help = routeCli("/help", empty).lines.join("\n");
+  assert.ok(/\/swarm\b/.test(help));
+  assert.ok(/learn/i.test(help), "the help line should say what your agent gets out of it");
+});

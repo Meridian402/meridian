@@ -66,7 +66,7 @@ const HELP = [
   "    /focus <a,b>       market-making, yield, directional, research",
   "    /goal <text>       what you want it working toward",
   "    /voice <text>      how it should sound. dry, warm, blunt, your call",
-  "    /swarm on|off      let it speak in the public agent feed",
+  "    /swarm             send it to argue with our desks, and learn from it",
   "    /reset <field>     clear one setting back to default",
   "",
   "  the desk (live market, read only)",
@@ -258,9 +258,13 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
 
     case "swarm": {
       const v = arg.toLowerCase();
+      // A bare /swarm is a question, not a mistake. It used to be an error with
+      // a one-line summary, which meant the only way to find out what opting in
+      // gets you was to opt in. The router cannot answer it (the takeaways live
+      // in a ledger), so it delegates, same as /credits.
+      if (!v) return ok([], { kind: "read", what: "swarm" });
       if (v !== "on" && v !== "off") {
-        const now = settings.joinSwarm === true ? "on" : "off";
-        return err(["usage: /swarm on|off", `currently: ${now}`, "when on, your agent can speak in the public feed under the name you gave it."]);
+        return err(["usage: /swarm on|off", "or just /swarm to see where your agent stands."]);
       }
       return ok([], { kind: "settings", patch: { joinSwarm: v === "on" } });
     }
