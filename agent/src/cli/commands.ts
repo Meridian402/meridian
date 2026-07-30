@@ -78,11 +78,68 @@ const HELP = [
   "    /buy <pack>        start a purchase",
   "",
   "  session",
+  "    /explore           a short tour, one thing at a time",
   "    /clear             clear this transcript",
   "    /help              this",
   "",
   "anything that is not a command is a message to your agent.",
   "commands are free. only messages cost a credit.",
+];
+
+/**
+ * The tour. Ordered by what a new person actually wants to know, which is not
+ * the order the features were built in: what is this thing, is it telling the
+ * truth, can I shape it, and only then the parts that need consent or money.
+ */
+const TOUR: Array<{ title: string; lines: string[]; tryIt: string }> = [
+  {
+    title: "your agent is yours",
+    lines: [
+      "it is provisioned to your wallet, with its own memory. it remembers this",
+      "conversation between visits, and nobody else's agent shares it.",
+    ],
+    tryIt: "how would you approach making markets on a thin pool?",
+  },
+  {
+    title: "it reads a live desk, not a training set",
+    lines: [
+      "the numbers come from a desk reading the chain continuously. you can read",
+      "the same thing it does, directly, without asking it.",
+    ],
+    tryIt: "/status",
+  },
+  {
+    title: "check it rather than trust it",
+    lines: [
+      "every figure traces to a timestamped reading. /proof is the honest one:",
+      "fees earned minus impermanent loss, against simply holding.",
+    ],
+    tryIt: "/proof",
+  },
+  {
+    title: "shape how it works",
+    lines: [
+      "risk, style, focus and goal change how it reasons and they stick. /whoami",
+      "shows the current setting any time you lose track.",
+    ],
+    tryIt: "/style concise",
+  },
+  {
+    title: "the market it watches",
+    lines: [
+      "tokenized stocks trade 24/7 while the real market sleeps, so the on-chain",
+      "price drifts from the real one. that gap is most of the opportunity here.",
+    ],
+    tryIt: "/basis",
+  },
+  {
+    title: "agents talking to each other",
+    lines: [
+      "our agents hold conversations in public on the swarm tab. yours can join,",
+      "but only if you say so: it speaks under the name you gave it.",
+    ],
+    tryIt: "/swarm",
+  },
 ];
 
 const list = (xs: readonly string[]) => xs.join(" | ");
@@ -116,6 +173,21 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
 
     case "clear":
       return ok([], { kind: "clear" });
+
+    case "explore":
+    case "tour": {
+      // A tour that prints a manual is a manual. Each step is ONE capability and
+      // a line the reader can actually type, so exploring means running things
+      // rather than reading about them. Stateless: the step is in the argument,
+      // so it survives a refresh, is linkable, and can be jumped into anywhere.
+      const step = Math.max(1, Math.min(TOUR.length, parseInt(arg, 10) || 1));
+      const t = TOUR[step - 1];
+      const next =
+        step < TOUR.length
+          ? `/explore ${step + 1} for the next one.`
+          : `that is the tour. /help has the full list whenever you want it.`;
+      return ok([`(${step}/${TOUR.length}) ${t.title}`, ``, ...t.lines, ``, `  try:  ${t.tryIt}`, ``, next]);
+    }
 
     case "credits":
       return ok([], { kind: "read", what: "credits" });
@@ -208,7 +280,7 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
  * exploring, and exploring is the whole point of putting this in front of them.
  */
 function suggest(cmd: string): string[] {
-  const vocab = ["help", "whoami", "name", "risk", "style", "focus", "goal", "swarm", "reset", "credits", "buy", "clear", ...DESK];
+  const vocab = ["help", "whoami", "name", "risk", "style", "focus", "goal", "swarm", "reset", "credits", "buy", "explore", "clear", ...DESK];
   let best: string | null = null;
   let bestD = Infinity;
   for (const v of vocab) {

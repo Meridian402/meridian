@@ -157,3 +157,21 @@ test("help states the cost model, because a CLI is where it finally makes sense"
   assert.ok(lines.includes("commands are free"), "the free/paid split must be visible without asking");
   assert.ok(lines.includes("/buy"));
 });
+
+test("/explore is a tour you run, not a manual you read", () => {
+  const r = routeCli("/explore", empty);
+  assert.ok(r.lines.some((l) => l.includes("(1/")), "should say where you are in it");
+  assert.ok(r.lines.some((l) => l.trim().startsWith("try:")), "every step must offer something to actually run");
+  assert.ok(r.lines.some((l) => l.includes("/explore 2")), "and a way onward");
+});
+
+test("/explore clamps rather than erroring on a bad step", () => {
+  // Someone typing /explore 99 wants the end, not a scolding.
+  const last = routeCli("/explore 99", empty);
+  assert.ok(!last.error);
+  assert.ok(last.lines.some((l) => l.includes("that is the tour")));
+  const first = routeCli("/explore 0", empty);
+  assert.ok(first.lines.some((l) => l.includes("(1/")));
+  const junk = routeCli("/explore banana", empty);
+  assert.ok(junk.lines.some((l) => l.includes("(1/")), "unparseable step starts at the beginning");
+});
