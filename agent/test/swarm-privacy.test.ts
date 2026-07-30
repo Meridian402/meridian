@@ -25,7 +25,8 @@ writeFileSync(
     .join("\n") + "\n",
 );
 
-const { publicIdForWallet, userParticipants, houseParticipantFor } = await import("../src/swarm/roster.js");
+const { publicIdForWallet, userParticipants, houseParticipantFor, rosterHealth, publicIdFor } = await import("../src/swarm/roster.js");
+const { agentIdForWallet } = await import("../src/deploy/myAgent.js");
 const { appendSwarmRow, publishableRows, swarmFeed, resetSwarmCache } = await import("../src/swarm/feed.js");
 const { priorWith } = await import("../src/swarm/exchange.js");
 type SwarmRow = import("../src/swarm/feed.js").SwarmRow;
@@ -128,4 +129,36 @@ test("recall is bounded, so a long history cannot grow the prompt without limit"
   const recall = priorWith("a", "b", rows);
   assert.ok(recall);
   assert.ok(recall!.length <= 401, `recall should be capped, got ${recall!.length}`);
+});
+
+// ---- the status endpoint is public, so its roster is held to the same rule ---
+
+test("rosterHealth never carries anything address-shaped, on any path", async () => {
+  // /api/swarm/status is unauthenticated with `*` CORS, and a user agent's
+  // gateway id IS its owner's address: mrdn-u-<40 hex>. Projecting the obvious
+  // field published every opted-in wallet, tied to the name its owner chose and
+  // to everything that agent had said. It shipped that way. The property is the
+  // shape of the whole object, not one field, because the next leak will be a
+  // field nobody thought about.
+  //
+  // There is no gateway in a test, so `live` is empty and `missing` holds the
+  // opted-in wallet. That is the path that matters: it is derived from settings
+  // alone and needs no gateway to be served.
+  const health = await rosterHealth();
+  assert.ok(health.missing.length, "the fixture's opted-in wallet should show as missing here");
+  const blob = JSON.stringify(health);
+  assert.ok(!/[0-9a-fA-F]{40}/.test(blob), `roster health leaked something address-shaped: ${blob}`);
+  assert.ok(!blob.toLowerCase().includes(IN.slice(2).toLowerCase()));
+});
+
+test("publicIdFor redacts a wallet id into the same speaker the feed publishes", () => {
+  const redacted = publicIdFor(agentIdForWallet(IN));
+  assert.ok(!redacted.includes(IN.slice(2).toLowerCase()));
+  // Must equal the feed's id, or opting in would give one agent two identities
+  // that no one could connect.
+  assert.equal(redacted, publicIdForWallet(IN));
+  // Case is not a way around it.
+  assert.equal(publicIdFor(`mrdn-u-${IN.slice(2).toUpperCase()}`), publicIdForWallet(IN));
+  // A house id names a desk, not a person, and passes through.
+  assert.equal(publicIdFor("rwa-research-equities"), "rwa-research-equities");
 });

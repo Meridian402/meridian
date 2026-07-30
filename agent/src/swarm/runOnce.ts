@@ -10,7 +10,7 @@ import { rosterHealth } from "./roster.js";
 // never had two speakers to begin with.
 const health = await rosterHealth();
 console.log(`[swarm-once] gateway reachable: ${health.gatewayReachable}`);
-console.log(`[swarm-once] ${health.live.length} live participant(s): ${health.live.map((p) => `${p.displayName} (${p.kind})`).join(", ") || "none"}`);
+console.log(`[swarm-once] ${health.live.length} live participant(s): ${health.live.map((p) => `${p.name} (${p.kind})`).join(", ") || "none"}`);
 if (health.missing.length) {
   console.log(`[swarm-once] ${health.missing.length} eligible but not provisioned on the gateway: ${health.missing.map((m) => m.id).join(", ")}`);
 }

@@ -264,12 +264,47 @@ function disambiguate(list: Participant[]): Participant[] {
 }
 
 /**
- * What the operator needs to see when the feed is empty: who is eligible, who is
- * really there, and who is missing. Missing means configured or opted in but not
+ * A speaker as it may be shown OUTSIDE the backend.
+ *
+ * Deliberately a different type from Participant. Participant carries the
+ * gateway id and, for a user, the wallet itself; this carries neither. The
+ * status route used to project Participant's fields by hand and reached for
+ * `id`, which for a user's agent is `mrdn-u-<40 hex>`: the address with a
+ * prefix and nothing else. That served every opted-in wallet from an
+ * unauthenticated, `*`-CORS endpoint, tied to the name its owner chose and to
+ * everything that agent had ever said in the feed. Opting in is supposed to
+ * publish an agent's opinions, not its owner.
+ *
+ * Structural, not a patch: nothing here hands out a Participant any more, so
+ * the next caller cannot repeat the mistake by picking the obvious field.
+ */
+export interface PublicSpeaker {
+  id: string;
+  name: string;
+  kind: "house" | "user";
+}
+
+/**
+ * Redact a raw gateway id for public display. House ids are already public (they
+ * name a desk, not a person); a user id is reduced to the same hash the feed
+ * uses, so a speaker stays recognisable across both surfaces.
+ */
+export function publicIdFor(agentId: string): string {
+  const wallet = /^mrdn-u-([0-9a-fA-F]{40})$/.exec(agentId);
+  return wallet ? publicIdForWallet(`0x${wallet[1]}`) : agentId;
+}
+
+/**
+ * What anyone needs to see when the feed is empty: who is really there, and who
+ * is eligible but missing. Missing means configured or opted in but not
  * provisioned on the gateway, which is the usual reason nothing is happening.
+ *
+ * A missing user agent is named by hash like any other, so this cannot be used
+ * to enumerate wallets. Repairing one is an admin route's job, and that route
+ * already authenticates.
  */
 export async function rosterHealth(): Promise<{
-  live: Participant[];
+  live: PublicSpeaker[];
   missing: { id: string; kind: "house" | "user" }[];
   gatewayReachable: boolean;
 }> {
@@ -278,6 +313,10 @@ export async function rosterHealth(): Promise<{
   const liveIds = new Set(live.map((p) => p.id));
   const missing = listParticipants()
     .filter((p) => !liveIds.has(p.id))
-    .map((p) => ({ id: p.id, kind: p.kind }));
-  return { live, missing, gatewayReachable: ids.size > 0 };
+    .map((p) => ({ id: p.publicId, kind: p.kind }));
+  return {
+    live: live.map((p) => ({ id: p.publicId, name: p.displayName, kind: p.kind })),
+    missing,
+    gatewayReachable: ids.size > 0,
+  };
 }

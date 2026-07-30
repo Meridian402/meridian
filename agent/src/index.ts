@@ -54,7 +54,7 @@ import { startLighterLogger } from "./research/lighterLogger.js";
 import { startYieldLogger, yieldSummary } from "./research/yieldLogger.js";
 import { opportunitiesSnapshot } from "./signals/opportunities.js";
 import { swarmFeed, swarmTotals, onSwarmRow } from "./swarm/feed.js";
-import { rosterHealth } from "./swarm/roster.js";
+import { rosterHealth, publicIdFor } from "./swarm/roster.js";
 import { runExchange, sidelinedIds } from "./swarm/exchange.js";
 import { startSwarmLoop, swarmEnabled, dailyBudget } from "./swarm/loop.js";
 import { validateFleet, recordFleet, exportBundle } from "./deploy/fleets.js";
@@ -1277,12 +1277,14 @@ app.get("/api/swarm/status", async (_req: Request, res: Response) => {
     res.json({
       enabled: swarmEnabled(),
       participants: health.live.length,
-      roster: health.live.map((p) => ({ id: p.id, name: p.displayName, kind: p.kind })),
+      roster: health.live,
       missing: health.missing,
       // Present on the gateway but unable to speak. Distinct from `missing`,
       // which is not provisioned at all, and the distinction matters when
       // diagnosing an empty feed: this list means the agent exists and is broken.
-      sidelined: sidelinedIds(),
+      // Raw gateway ids, so they get the same redaction as the roster: a broken
+      // agent is still somebody's, and "which wallets are failing" is not public.
+      sidelined: sidelinedIds().map(publicIdFor),
       gatewayReachable: health.gatewayReachable,
       exchanges: totals.exchanges,
       lastAt: totals.lastAt,
