@@ -18,7 +18,7 @@
 // write. Worst case rows land only in the file and the snapshot mirror covers
 // them. Duplicate rows in the mirror (e.g. the tiny boot race between backfill
 // and a live write) are acceptable — it is a mirror, not the source of truth.
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { getPool } from "./db.js";
 
@@ -75,6 +75,61 @@ export function appendLedger(file: string, row: object): void {
 
 export function ledgerStatus() {
   return { ...status, queued: pending.length };
+}
+
+/**
+ * A folded view of an append-only ledger, rebuilt only when the file changes.
+ *
+ * These files are read far more often than they are written, and the naive
+ * shape (read the whole file, JSON.parse every line, fold to latest-wins, on
+ * every call) is invisible at twenty users and is a wall later: the file grows
+ * with usage and the parse is SYNCHRONOUS, so the cost is not just latency on
+ * that request, it is the event loop stalled for everyone. Measured on the
+ * settings ledger: 0.06ms at 22 users, 3ms at 1k, 32ms at 10k, on a path that
+ * every visitor to the swarm page hits and every chat turn hits twice.
+ *
+ * Invalidated on size+mtime, not on our own writes, because more than one
+ * process appends to these (the swarm CLI, the autopilot) and a cache that
+ * only trusted its own writes would serve a stale view forever. Same approach
+ * the swarm feed already uses; this is that made reusable rather than copied.
+ */
+export function ledgerView<T>(file: string, fold: (rows: unknown[]) => T): { get(): T; reset(): void } {
+  let cached: { value: T; size: number; mtimeMs: number } | null = null;
+  return {
+    get(): T {
+      const path = dataPath(file);
+      let st: { size: number; mtimeMs: number } | null = null;
+      try {
+        const s = statSync(path);
+        st = { size: s.size, mtimeMs: s.mtimeMs };
+      } catch {
+        st = null; // missing file: fold an empty list, and do not cache the absence
+      }
+      if (cached && st && cached.size === st.size && cached.mtimeMs === st.mtimeMs) return cached.value;
+
+      const rows: unknown[] = [];
+      if (st) {
+        try {
+          for (const line of readFileSync(path, "utf8").split("\n")) {
+            if (!line.trim()) continue;
+            try {
+              rows.push(JSON.parse(line));
+            } catch {
+              // One malformed line must not lose the rest of the ledger.
+            }
+          }
+        } catch {
+          return fold([]);
+        }
+      }
+      const value = fold(rows);
+      if (st) cached = { value, size: st.size, mtimeMs: st.mtimeMs };
+      return value;
+    },
+    reset(): void {
+      cached = null;
+    },
+  };
 }
 
 /** Create the table, backfill missing history, then start draining live rows. */

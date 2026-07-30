@@ -6,7 +6,7 @@
 // it authorizes no transaction and moves no funds.
 import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, ledgerView } from "./ledger.js";
 import { verifyMessage, type Address } from "viem";
 import { dataPath } from "./dataDir.js";
 
@@ -135,36 +135,49 @@ export interface AccountData {
   profiles: AccountProfile[];
 }
 
-function readReservationsFor(address: string): AccountProfile[] {
-  if (!existsSync(RESERVATIONS_PATH)) return [];
-  const a = address.toLowerCase();
-  const latest = new Map<string, AccountProfile>();
-  for (const line of readFileSync(RESERVATIONS_PATH, "utf8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const r = JSON.parse(line);
-      if ((r.wallet ?? "").toLowerCase() !== a) continue;
-      latest.set(r.callsign, { callsign: r.callsign, mandate: r.mandate, posture: r.posture, at: r.at });
-    } catch {}
+// Both ledgers are folded once and indexed BY WALLET, then cached on the file's
+// stat. The old shape scanned each whole file per call and kept only the rows
+// matching one address, so the cost of answering for one wallet grew with every
+// other wallet's history. This route runs on every page load with a wallet
+// connected, which is the worst place to put a scan that scales with signups.
+const reservationsByWallet = ledgerView<Map<string, AccountProfile[]>>("reservations.jsonl", (rows) => {
+  // callsign is unique per wallet and the latest row wins, matching the
+  // append-only semantics every other reader here uses.
+  const latest = new Map<string, Map<string, AccountProfile>>();
+  for (const r of rows as Array<Record<string, any>>) {
+    const w = String(r.wallet ?? "").toLowerCase();
+    if (!w || !r.callsign) continue;
+    const forWallet = latest.get(w) ?? new Map<string, AccountProfile>();
+    forWallet.set(r.callsign, { callsign: r.callsign, mandate: r.mandate, posture: r.posture, at: r.at });
+    latest.set(w, forWallet);
   }
-  return [...latest.values()].sort((x, y) => y.at - x.at);
+  const out = new Map<string, AccountProfile[]>();
+  for (const [w, byCallsign] of latest) out.set(w, [...byCallsign.values()].sort((x, y) => y.at - x.at));
+  return out;
+});
+
+const linkedAtByWallet = ledgerView<Map<string, number>>("accounts.jsonl", (rows) => {
+  const out = new Map<string, number>();
+  for (const r of rows as Array<Record<string, any>>) {
+    const a = String(r.address ?? "").toLowerCase();
+    if (a && typeof r.linkedAt === "number") out.set(a, r.linkedAt);
+  }
+  return out;
+});
+
+/** Drop both parsed views (tests, and anything that rewrites the files). */
+export function resetAccountCache(): void {
+  reservationsByWallet.reset();
+  linkedAtByWallet.reset();
 }
 
 /** Public read of an account: everything linked to a wallet. The address is public on-chain, so this is open. */
 export function accountData(address: string): AccountData | null {
   if (!isAddress(address)) return null;
   const a = address.toLowerCase();
-  let linkedAt = 0;
-  if (existsSync(ACCOUNTS_PATH)) {
-    for (const line of readFileSync(ACCOUNTS_PATH, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const r = JSON.parse(line);
-        if ((r.address ?? "").toLowerCase() === a) linkedAt = r.linkedAt ?? linkedAt;
-      } catch {}
-    }
-  }
-  return { address: a, linkedAt, profiles: readReservationsFor(a) };
+  // Copies, because the cached arrays and objects are shared across requests.
+  const profiles = (reservationsByWallet.get().get(a) ?? []).map((p) => ({ ...p }));
+  return { address: a, linkedAt: linkedAtByWallet.get().get(a) ?? 0, profiles };
 }
 
 /** Verify a signed challenge and link the account. Returns the account data on success. */

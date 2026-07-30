@@ -5,11 +5,9 @@
 // preference only exists if it genuinely changes how the agent reasons or talks.
 // Enums are validated against fixed sets; the one free-text field (goal) is
 // sanitized, so nothing a user types can smuggle instructions into the persona.
-import { existsSync, readFileSync } from "node:fs";
-import { appendLedger } from "../ledger.js";
-import { dataPath } from "../dataDir.js";
+import { appendLedger, ledgerView } from "../ledger.js";
 
-const PATH = dataPath("agent-settings.jsonl");
+const FILE = "agent-settings.jsonl";
 const MAX_NAME = 32;
 const MAX_GOAL = 280;
 const MAX_VOICE = 200;
@@ -106,32 +104,38 @@ export function sanitizeSettings(patch: unknown): { settings: Partial<AgentSetti
 
 /** Latest settings per wallet, folded from the append-only file in one pass.
  *  Shared by the single-wallet read and the every-wallet read so the two can
- *  never disagree about which row wins. */
-function foldSettings(): Map<string, AgentSettings> {
+ *  never disagree about which row wins.
+ *
+ *  Cached on the file's stat: this is read on every chat turn (twice: the
+ *  display name and the persona) and on every public swarm feed request, which
+ *  made it the hottest synchronous file read in the process. */
+const settingsView = ledgerView<Map<string, AgentSettings>>(FILE, (rows) => {
   const out = new Map<string, AgentSettings>();
-  try {
-    if (!existsSync(PATH)) return out;
-    for (const line of readFileSync(PATH, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const r = JSON.parse(line);
-        const a = String(r.address ?? "").toLowerCase();
-        if (a && r.settings && typeof r.settings === "object") out.set(a, r.settings as AgentSettings);
-      } catch {}
-    }
-  } catch {}
+  for (const r of rows as Array<{ address?: unknown; settings?: unknown }>) {
+    const a = String(r.address ?? "").toLowerCase();
+    if (a && r.settings && typeof r.settings === "object") out.set(a, r.settings as AgentSettings);
+  }
   return out;
+});
+
+/** Drop the parsed view (tests, and anything that rewrites the file). */
+export function resetSettingsCache(): void {
+  settingsView.reset();
 }
 
+// The cached map is shared, so both readers hand out a COPY. Callers previously
+// got a freshly parsed object every time and are entitled to keep treating what
+// they get as theirs; one object spread is nothing next to reparsing the file.
 /** This wallet's current settings (latest write wins), or {} if none. */
 export function getAgentSettings(address: string): AgentSettings {
-  return foldSettings().get(address.toLowerCase()) ?? {};
+  const found = settingsView.get().get(address.toLowerCase());
+  return found ? { ...found } : {};
 }
 
 /** Every wallet that has ever written settings, with its current values. The
  *  read side of anything that has to ask "which wallets opted into X". */
 export function allAgentSettings(): Array<{ address: string; settings: AgentSettings }> {
-  return [...foldSettings().entries()].map(([address, settings]) => ({ address, settings }));
+  return [...settingsView.get().entries()].map(([address, settings]) => ({ address, settings: { ...settings } }));
 }
 
 /** Merge a validated patch into this wallet's settings and persist (append-only). */
@@ -140,6 +144,6 @@ export function updateAgentSettings(address: string, patch: Partial<AgentSetting
   // A cleared goal ("") should drop the key rather than persist an empty string.
   if (merged.goal === "") delete merged.goal;
   if (merged.voice === "") delete merged.voice;
-  appendLedger("agent-settings.jsonl", { address: address.toLowerCase(), settings: merged, at: Date.now() });
+  appendLedger(FILE, { address: address.toLowerCase(), settings: merged, at: Date.now() });
   return merged;
 }

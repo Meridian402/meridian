@@ -30,7 +30,7 @@ const DEPLOY_URL = "https://meridian402.xyz/#launchpad";
 const MCP_ENDPOINT = "https://meridian402-api-production.up.railway.app/mcp";
 
 const HELP = [
-  "meridian console — you're talking to a live trading desk. commands:",
+  "meridian console, you're talking to a live trading desk. commands:",
   "",
   "  watch the agent (proof it works)",
   "    status     what it's doing right now",
@@ -54,7 +54,7 @@ const HELP = [
 ];
 
 const WELCOME = [
-  "welcome — this is Merd, Meridian's own trading agent, live and auditable.",
+  "welcome, this is Merd, Meridian's own trading agent, live and auditable.",
   "it makes markets in tokenized stocks on Robinhood Chain from a public wallet.",
   "",
   "  · see it work:     try  status  ·  pnl  ·  trades",
@@ -65,7 +65,7 @@ const WELCOME = [
 ];
 
 const INTEGRATE = [
-  "point your agent at Meridian and pay per call — no accounts, no API keys.",
+  "point your agent at Meridian and pay per call, no accounts, no API keys.",
   "",
   `  1. endpoint:  ${MCP_ENDPOINT}`,
   "  2. call a tool with no payment → you get an HTTP 402 quoting the price in USDG",
@@ -76,7 +76,7 @@ const INTEGRATE = [
 ];
 
 const DEPLOY_HELP = [
-  "get your own agent — sign in with your wallet and it's live to talk to in seconds.",
+  "get your own agent: sign in with your wallet and it's live to talk to in seconds.",
   "no waitlist. your wallet is your account; custody stays yours, always.",
   "it runs the same market-making playbook as the agent you see here.",
   "",
@@ -131,7 +131,7 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
           `live trading: ${config.liveTradingEnabled ? "ARMED" : "paused (observe mode)"}`,
           `think cadence: every ${config.agentThinkIntervalMs / 1000}s · process up ${uptimeH.toFixed(1)}h`,
           `risk caps: $${config.maxTradeUsd}/trade · $${config.maxDailyUsd}/day · one trade per ${config.rotationCooldownHours}h`,
-          latest ? `latest decision: ${latest.action.toUpperCase()} — ${latest.reason}` : "no decisions yet this session",
+          latest ? `latest decision: ${latest.action.toUpperCase()}, ${latest.reason}` : "no decisions yet this session",
         ];
       }
 
@@ -171,7 +171,7 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
         total += usdg + eth * ethUsd;
         lines.push(`USDG   ${usdg.toFixed(2)}`);
         lines.push(`ETH    ${eth.toFixed(4)} (~$${(eth * ethUsd).toFixed(2)}, gas reserve)`);
-        lines.push(`total ≈ $${total.toFixed(2)} — verify: ${EXPLORER}/address/${address}`);
+        lines.push(`total ≈ $${total.toFixed(2)} · verify: ${EXPLORER}/address/${address}`);
         return lines;
       }
 
@@ -193,14 +193,14 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
         const p = await marketMakingProof();
         // "nothing to measure" and "we hold positions we can't measure" are very
         // different states — never let the second read as the first.
-        const unmeasuredLines = p.unmeasured.map((u) => `  ${u.symbol}/USDG #${u.tokenId} — not measured: ${u.reason}`);
+        const unmeasuredLines = p.unmeasured.map((u) => `  ${u.symbol}/USDG #${u.tokenId} · not measured: ${u.reason}`);
         if (p.positions.length === 0) {
           return p.unmeasured.length
             ? ["holding positions we cannot measure against cost right now:", "", ...unmeasuredLines]
             : ["no open market-making position to measure right now"];
         }
         const lines = [
-          "market-making proof — fees minus impermanent loss minus gas, vs simply holding:",
+          "market-making proof: fees minus impermanent loss minus gas, vs simply holding:",
           "",
         ];
         for (const pos of p.positions) {
@@ -216,14 +216,14 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
         }
         lines.push("");
         lines.push(`lifetime fees collected: $${p.lifetimeFeesCollectedUsd.toFixed(2)} · every figure reproducible on-chain.`);
-        lines.push("(early data — proof is the trend over weeks, not any one reading. watch it live.)");
+        lines.push("(early data. proof is the trend over weeks, not any one reading. watch it live.)");
         return lines;
       }
 
       case "why": {
         const latest = decisionLog.recent(1)[0];
         if (!latest) return ["no decisions yet this session"];
-        return [`[${new Date(latest.timestamp).toISOString()}] ${latest.action.toUpperCase()} — ${latest.reason}`, ...latest.thoughts.map((t) => `  ${t}`)];
+        return [`[${new Date(latest.timestamp).toISOString()}] ${latest.action.toUpperCase()}, ${latest.reason}`, ...latest.thoughts.map((t) => `  ${t}`)];
       }
 
       case "trades": {
@@ -251,7 +251,7 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
         const report = lpScoresIfCached();
         if (!report) return ["LP scores warm up on first tool call (a ~1min on-chain scan). Ask again soon, or buy meridian_lp_score ($0.05) to trigger it."];
         const lines = report.pools.map(
-          (p) => `${p.pool.padEnd(16)} fees $${p.feesUsd} · markout $${p.markoutUsd} · LP net $${p.lpNetUsd} — ${p.verdict}`,
+          (p) => `${p.pool.padEnd(16)} fees $${p.feesUsd} · markout $${p.markoutUsd} · LP net $${p.lpNetUsd} · ${p.verdict}`,
         );
         lines.push(`(trailing ${report.windowDays}d window, 30min markout; the meridian_lp_score tool, $0.05/call)`);
         return lines;
@@ -267,7 +267,7 @@ export async function runConsoleCommand(raw: string): Promise<string[]> {
 
       case "tools":
         return [
-          "the shelf — pay per call in USDG on Robinhood Chain, no accounts, no keys:",
+          "the shelf. pay per call in USDG on Robinhood Chain, no accounts, no keys:",
           ...Object.entries(config.toolPricesUsd).map(([t, p]) => `  ${t.padEnd(26)} $${p.toFixed(2)} / call`),
           "  free: meridian_list_chains, meridian_list_assets, meridian_agent_thoughts, meridian_index_yield",
           "",
