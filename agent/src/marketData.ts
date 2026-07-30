@@ -71,7 +71,67 @@ interface LiveQuote {
  * session (≈flat) and the agent naturally holds. Returns null on any failure
  * so the caller keeps the last-known value rather than reasoning over a hole.
  */
+/**
+ * The trailing % move over `lookbackMinutes`, from one session's 5-minute bars.
+ * Exported because this is where the feed silently died and a pure function is
+ * the only way to pin the edge that killed it.
+ *
+ * The window is anchored to the LAST BAR, not to wall-clock, so an off-hours
+ * call measures the end of the last session rather than a window full of
+ * nothing. Returns null only when the bars cannot support any answer at all.
+ */
+export function trailingMovePct(timestamps: number[], closes: Array<number | null>, lookbackMinutes: number): number | null {
+  if (timestamps.length !== closes.length) return null;
+  let lastIdx = -1;
+  for (let i = closes.length - 1; i >= 0; i--) {
+    if (closes[i] != null) {
+      lastIdx = i;
+      break;
+    }
+  }
+  if (lastIdx < 0) return null;
+
+  const windowStart = timestamps[lastIdx] - lookbackMinutes * 60;
+  let baseline: number | null = null;
+  for (let i = lastIdx; i >= 0; i--) {
+    if (timestamps[i] <= windowStart && closes[i] != null) {
+      baseline = closes[i];
+      break;
+    }
+  }
+
+  // Early in the session the full lookback does not exist yet: a 4-hour window
+  // needs 4 hours of bars, and at 10am there is one. Refusing the quote here is
+  // what this used to do, and since a calendar day holds only ~6.5 hours of
+  // regular-session bars, it meant NO live quote until nearly four hours into
+  // every session, and none overnight, at a weekend or on a holiday. Production
+  // logged "live refresh: 0/18" on every cycle for weeks: dataSource().live was
+  // false, the site showed seed prices, and the swarm never once opened a
+  // conversation on live prices because its topic builder correctly refuses to
+  // reason over a feed that says it is not live.
+  //
+  // So fall back to the session's FIRST bar, making the figure "since the open"
+  // until the window fills. Still strictly intraday: the caller requests one
+  // session, so this can never reach across the overnight gap and quietly turn
+  // a 4-hour move into a 21-hour one.
+  if (baseline == null) {
+    for (let i = 0; i <= lastIdx; i++) {
+      if (closes[i] != null) {
+        baseline = closes[i];
+        break;
+      }
+    }
+  }
+  if (baseline == null || baseline === 0) return null;
+  return ((closes[lastIdx]! - baseline) / baseline) * 100;
+}
+
 async function fetchLiveQuote(symbol: string): Promise<LiveQuote | null> {
+  // range=1d is deliberate and load-bearing: it returns ONE session, so every
+  // bar considered below is from the same day and a baseline can never be
+  // picked from across the overnight gap. Widening it to satisfy the lookback
+  // would quietly restore the since-previous-close behaviour this was tightened
+  // away from on 2026-07-11.
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=5m&includePrePost=false`;
   try {
     const res = await fetch(url, {
@@ -92,27 +152,9 @@ async function fetchLiveQuote(symbol: string): Promise<LiveQuote | null> {
     const price = result?.meta?.regularMarketPrice;
     if (typeof price !== "number") return null;
 
-    const timestamps = result?.timestamp ?? [];
-    const closes = result?.indicators?.quote?.[0]?.close ?? [];
-    let lastIdx = -1;
-    for (let i = closes.length - 1; i >= 0; i--) {
-      if (closes[i] != null) {
-        lastIdx = i;
-        break;
-      }
-    }
-    if (lastIdx < 0 || timestamps.length !== closes.length) return null;
-    const windowStart = timestamps[lastIdx] - config.momentumLookbackMinutes * 60;
-    let baseline: number | null = null;
-    for (let i = lastIdx; i >= 0; i--) {
-      if (timestamps[i] <= windowStart && closes[i] != null) {
-        baseline = closes[i];
-        break;
-      }
-    }
-    if (baseline == null || baseline === 0) return null;
-    const last = closes[lastIdx]!;
-    return { priceUsd: round(price, 2), changePct: round(((last - baseline) / baseline) * 100, 2) };
+    const pct = trailingMovePct(result?.timestamp ?? [], result?.indicators?.quote?.[0]?.close ?? [], config.momentumLookbackMinutes);
+    if (pct == null) return null;
+    return { priceUsd: round(price, 2), changePct: round(pct, 2) };
   } catch {
     return null;
   }
