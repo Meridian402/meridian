@@ -242,6 +242,34 @@ export interface ExchangeResult extends FeedExchange {
 // turns from different conversations into the same agent sessions.
 let running = false;
 
+// Agents that just failed to speak, and until when.
+//
+// A gateway agent can be present in the roster and still be unable to receive a
+// message: production has a fleet agent whose stored config is missing
+// workspace_root, model.max_tokens and memory, so the gateway rejects every
+// message to it with a validation error. Because the pairing is deterministic,
+// that one agent permanently killed every exchange its slot came up for, and the
+// public feed stayed empty while the roster looked healthy.
+//
+// So a failure to speak sidelines that agent for a while and the exchange is
+// retried with a different pair. Time-boxed rather than permanent: the usual
+// cause is transient (a restart, a timeout), and an agent that gets fixed should
+// come back on its own without anyone redeploying.
+const SIDELINE_MS = Number(process.env.SWARM_SIDELINE_MS ?? 30 * 60_000);
+const sidelined = new Map<string, number>();
+
+function isSidelined(id: string, now = Date.now()): boolean {
+  const until = sidelined.get(id);
+  if (until === undefined) return false;
+  if (until <= now) { sidelined.delete(id); return false; }
+  return true;
+}
+
+/** For /api/swarm/status, so an operator can see WHY a roster is thinner than it looks. */
+export function sidelinedIds(now = Date.now()): string[] {
+  return [...sidelined.keys()].filter((id) => isSidelined(id, now));
+}
+
 // A failed exchange writes no rows, so the ledger-derived counter does not move
 // and the very next tick would pick the same pair, and the same topic, forever.
 // Counting attempts too means a broken pairing is stepped over instead of
@@ -271,7 +299,11 @@ export async function runExchange(): Promise<ExchangeResult> {
   try {
     // Live, not merely eligible: an agent that is not on the gateway cannot
     // speak, and picking one would kill the exchange at its first turn.
-    const pool = await listLiveParticipants();
+    const all = await listLiveParticipants();
+    const pool = all.filter((p) => !isSidelined(p.id));
+    if (pool.length < all.length) {
+      console.error(`[swarm] ${all.length - pool.length} participant(s) sidelined after recent failures: ${sidelinedIds().join(", ")}`);
+    }
     const counter = exchangeCount() + attempts;
     attempts++;
     const pair = pickPair(pool, counter);
@@ -329,7 +361,11 @@ export async function runExchange(): Promise<ExchangeResult> {
         turns.push(write("turn", { id: speaker.publicId, name: speaker.displayName, kind: speaker.kind }, text));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[swarm] ${exchangeId} stopped at turn ${i + 1}/${total} (${speaker.id}): ${msg}`);
+        // Sideline the speaker, not the exchange. Whatever the cause, this agent
+        // could not answer, and picking it again on the next deterministic
+        // rotation would reproduce the same failure.
+        sidelined.set(speaker.id, Date.now() + SIDELINE_MS);
+        console.error(`[swarm] ${exchangeId} stopped at turn ${i + 1}/${total} (${speaker.id}, sidelined ${Math.round(SIDELINE_MS / 60000)}min): ${msg}`);
         return result(false, `turn_failed: ${msg}`);
       }
     }
