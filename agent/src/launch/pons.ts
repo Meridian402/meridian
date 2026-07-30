@@ -1,12 +1,12 @@
-// Token launching on Robinhood Chain through PONS, the second venue.
+// Token launching on Robinhood Chain through PONS, the only venue Meridian
+// builds launches on.
 //
-// Unlike the Flap portal in ./portal.ts, this factory's source IS verified and
-// published on Blockscout, so every ABI shape below is read off that source
-// rather than inferred from docs. That changes what simulation is FOR: on the
-// portal it is the only proof the encoding is right at all, here it is proof
-// that this creator, with this balance, at this block, would actually land the
-// launch. Both paths still refuse to hand over a transaction that has not
-// simulated clean.
+// This factory's source is verified and published on Blockscout, so every ABI
+// shape below is read off that source rather than inferred from documentation.
+// Simulation is therefore not proving the encoding is even right, which is what
+// it had to do against an unverified proxy: here it proves that this creator,
+// with this balance, at this block, would actually land the launch. Either way
+// nothing is handed over that has not simulated clean.
 //
 // SIGNING: this module never signs and never holds funds. launchToken is
 // payable and msg.value is launchFee plus the creator's own initial buy, so the
@@ -256,9 +256,10 @@ export function validateTokenIdentity(rawName: string, rawSymbol: string): { nam
 }
 
 /**
- * PONS puts no vanity requirement on the deployed address, so unlike Flap's
- * 8888 / 7777 suffixes there is nothing to mine: any salt is as good as any
- * other and the build is instant. Deriving it from the creator, the identity
+ * PONS puts no vanity requirement on the deployed address, so there is nothing
+ * to mine: any salt is as good as any other and the build is instant, unlike a
+ * launchpad that encodes the token's implementation in an address suffix and
+ * makes you search for one. Deriving it from the creator, the identity
  * and a caller-supplied nonce keeps the address reproducible, so the same
  * request twice predicts the same token and a caller who wants a different one
  * bumps the nonce rather than hunting for randomness.

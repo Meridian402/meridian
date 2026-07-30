@@ -21,7 +21,8 @@
  * showing "sign this launch" without naming the venue would be hiding the most
  * important thing about it.
  */
-export type LaunchVenue = "pons" | "flap";
+/** Only PONS. Flap was removed: see launchPersonaLine in deploy/myAgent.ts. */
+export type LaunchVenue = "pons";
 
 export interface PendingLaunch {
   /** Lowercased wallet that must sign. */
@@ -58,12 +59,13 @@ const key = (address: string) => address.toLowerCase();
  * of them stale — is how someone signs the wrong token.
  */
 export function recordPendingLaunch(launch: Omit<PendingLaunch, "createdAt" | "venue"> & { venue?: LaunchVenue }): void {
-  // Venue defaults to flap because that is the only venue that existed when
-  // this record was introduced, so an older caller that omits it is describing
-  // a Flap launch, not an unknown one. Every reader still sees a venue.
+  // PONS is the only venue, so the default is not a guess. The field is kept
+  // rather than dropped because the UI states the venue to the person before
+  // they sign, and "which launchpad is this" should stay an explicit answer in
+  // the payload rather than something a reader has to assume.
   pending.set(key(launch.creator), {
     ...launch,
-    venue: launch.venue ?? "flap",
+    venue: launch.venue ?? "pons",
     creator: key(launch.creator),
     createdAt: Date.now(),
   });

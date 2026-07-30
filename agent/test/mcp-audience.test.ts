@@ -54,8 +54,11 @@ test("the public build drops exactly the tools a credential-free caller cannot c
   assert.deepEqual(publicNames.filter((n) => !operator.includes(n)), []);
 });
 
-test("the launch tools stay on the public list, because that is who they are for", async () => {
+test("the launch tool stays on the public list, because that is who it is for", async () => {
   const publicNames = await toolNames("public");
-  assert.ok(publicNames.includes("meridian_launch_token"));
   assert.ok(publicNames.includes("meridian_launch_token_pons"));
+  // Flap was removed on purpose. Asserting its ABSENCE keeps it removed: a
+  // re-add would otherwise reappear silently on the credential-free surface,
+  // which is the exact audience it was worst for.
+  assert.ok(!publicNames.includes("meridian_launch_token"), "the Flap tool must not come back");
 });

@@ -6,8 +6,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildServer, type McpAudience } from "./mcp/server.js";
 import { config, assertTreasuryIsLive } from "./config.js";
-import { launchpadDeployment } from "./launch/portal.js";
 import { PaymentGate, type PaymentAmount, type SettlementAsset } from "./payments/PaymentGate.js";
+import { ponsDeployment } from "./launch/pons.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
@@ -1788,14 +1788,12 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
 }
-// Which chain user-facing token launches land on. Testnet is the safe default;
-// the silent part is the problem, so every boot log says it out loud.
-const launchpad = launchpadDeployment();
-console.log(
-  launchpad.chainId === 46630
-    ? "[boot] launchpad: TESTNET (chain 46630). User launches are rehearsals until LAUNCH_NETWORK=mainnet."
-    : `[boot] launchpad: MAINNET (chain ${launchpad.chainId})`,
-);
+// Which chain user-facing token launches land on. PONS only exists on mainnet,
+// so this is stated at boot rather than inferred from an env var.
+{
+  const pons = ponsDeployment();
+  console.log(`[boot] launchpad: PONS on chain ${pons.chainId} (${pons.factory})`);
+}
 startEquitySnapshotter();
 startSwarmLoop(); // agent-to-agent exchanges on a cadence; logs whether it is on or off
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();

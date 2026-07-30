@@ -10,7 +10,6 @@ import { basisSnapshot } from "../signals/basis.js";
 import { carryQuote } from "../signals/carry.js";
 import { perpSnapshot } from "../signals/perpFeed.js";
 import { lpScores } from "../signals/lpScore.js";
-import { buildStandardLaunch, buildTaxLaunch, simulateLaunch, launchpadDeployment, LAUNCH_STYLES, DIVIDEND_SELF } from "../launch/portal.js";
 import { buildPonsLaunch, simulatePonsLaunch, ponsCanLaunch, ponsDeployment } from "../launch/pons.js";
 import { recordPendingLaunch } from "../launch/pendingLaunches.js";
 import { parseEther, formatEther } from "viem";
@@ -429,176 +428,11 @@ export function buildServer(opts: BuildServerOptions = {}): McpServer {
   }
 
   /**
-   * Token launching, agent-native.
+   * Token launching, agent-native. PONS is the only venue.
    *
-   * Deliberately NOT in EXECUTE_TOOLS, and that is a design statement rather
-   * than an oversight: this tool returns unsigned calldata and holds no signer,
-   * so it is structurally incapable of moving anyone's funds — ours or the
-   * caller's. That is precisely what makes it safe to expose on the
-   * credential-free "meridian-public" registration every user's chat agent
-   * connects through. A gate would add no safety and would lock out the exact
-   * audience the feature is for.
-   *
-   * The user signs. newTokenV5 is payable and msg.value is the creator's own
-   * initial buy, so the transaction can only ever originate from their wallet,
-   * and the Portal's TokenCreated event records THEM as creator — not us.
-   */
-  server.registerTool(
-    "meridian_launch_token",
-    {
-      title: "Prepare a token launch on Robinhood Chain",
-      // Short on purpose: this is re-sent on every turn of every chat, most of
-      // which are about something else. What the USER must be told (bonding
-      // curve, graduation odds, the commission on tax styles) is in the agent
-      // persona and on the LaunchCard at signing time, which is where they can
-      // actually read it. Nothing was dropped from the product, only from the
-      // per-turn bill.
-      description:
-        "Prepare a token launch on Robinhood Chain via the Flap launchpad, simulated against the live chain. Returns an UNSIGNED transaction for the user to sign in their own wallet: never signs, never holds funds, never spends. Styles: 'standard' is a plain ERC-20 with no tax; 'marketing', 'dividend', 'deflationary' and 'liquidity' take a cut of every trade and route it differently. Flap tokens trade on a bonding curve and only reach a Uniswap V2 pair if ~80% of supply sells.",
-      inputSchema: {
-        name: z.string().min(1).max(64).describe("Token name, e.g. 'Meridian Test'"),
-        symbol: z.string().min(1).max(16).describe("Ticker, e.g. MTEST"),
-        creator: z
-          .string()
-          .regex(/^0x[0-9a-fA-F]{40}$/)
-          .describe("The wallet that will sign, fund and own the launch. Must be the user's own wallet."),
-        style: z
-          .enum(["standard", "marketing", "dividend", "deflationary", "liquidity"])
-          .default("standard")
-          .describe(
-            "standard: plain ERC-20, no tax. marketing: trade tax funds the creator. dividend: tax is paid back to holders. deflationary: tax is burned. liquidity: tax deepens the pool.",
-          ),
-        initialBuyEth: z
-          .number()
-          .min(0)
-          .max(5)
-          .optional()
-          .describe("Creator's own first buy in ETH, paid as msg.value. Optional; 0 means launch without buying."),
-        meta: z
-          .string()
-          .optional()
-          .describe("IPFS CID from the launchpad's upload API. Without it the token has no image or description in any terminal."),
-        buyTaxPct: z.number().min(0).max(10).optional().describe("Tax styles only. Percent taken on buys, max 10."),
-        sellTaxPct: z.number().min(0).max(10).optional().describe("Tax styles only. Percent taken on sells, max 10."),
-        taxDurationDays: z.number().int().min(1).max(36500).optional().describe("Tax styles only. How long the tax stays on."),
-        dividendsInOwnToken: z
-          .boolean()
-          .optional()
-          .describe("Dividend style only. True pays holders in the launched token; default pays in ETH."),
-      },
-    },
-    async ({ name, symbol, creator, style, initialBuyEth, meta, buyTaxPct, sellTaxPct, taxDurationDays, dividendsInOwnToken }) => {
-      const dep = launchpadDeployment();
-      const common = { name, symbol, meta, creator: creator as `0x${string}`, quoteAmt: parseEther(String(initialBuyEth ?? 0)) };
-      let built;
-      try {
-        if (style === "standard") {
-          // Tax knobs are meaningless without a tax; say so rather than
-          // silently ignoring them and handing back a token that does not do
-          // what the user just asked for.
-          if (buyTaxPct || sellTaxPct || dividendsInOwnToken) {
-            return json({
-              ok: false,
-              error: "the 'standard' style has no tax — pass style='marketing' (or dividend/deflationary/liquidity) to set tax rates",
-            });
-          }
-          built = buildStandardLaunch(common, dep);
-        } else {
-          const overrides: Record<string, number | bigint> = {};
-          if (buyTaxPct != null) overrides.buyTaxRate = Math.round(buyTaxPct * 100);
-          if (sellTaxPct != null) overrides.sellTaxRate = Math.round(sellTaxPct * 100);
-          if (taxDurationDays != null) overrides.taxDurationSec = BigInt(taxDurationDays) * 86400n;
-          built = buildTaxLaunch(
-            {
-              ...common,
-              style,
-              overrides,
-              ...(dividendsInOwnToken ? { dividendToken: DIVIDEND_SELF } : {}),
-            },
-            dep,
-          );
-        }
-      } catch (e) {
-        return json({ ok: false, error: (e as Error).message });
-      }
-
-      // Simulating is not optional. The Portal implementation's source is
-      // unverified, so this is the only proof the encoding is right before a
-      // user is asked to sign and pay gas.
-      const sim = await simulateLaunch(built, creator as `0x${string}`, dep);
-      if (!sim.ok) {
-        return json({
-          ok: false,
-          network: dep.chainId === 4663 ? "robinhood-mainnet" : "robinhood-testnet",
-          error: sim.error,
-          underfunded: sim.underfunded ?? false,
-          ...(sim.underfunded ? { needsWei: String(sim.requiredWei), needsEth: formatEther(sim.requiredWei ?? 0n) } : {}),
-        });
-      }
-
-      const shape = style === "standard" ? null : { ...LAUNCH_STYLES[style], ...(buyTaxPct != null ? { buyTaxRate: Math.round(buyTaxPct * 100) } : {}), ...(sellTaxPct != null ? { sellTaxRate: Math.round(sellTaxPct * 100) } : {}) };
-      const network = dep.chainId === 4663 ? "robinhood-mainnet" : "robinhood-testnet";
-      const economics =
-        shape == null
-          ? { tax: "none", note: "a plain ERC-20 — no tax on any trade" }
-          : {
-              buyTax: `${shape.buyTaxRate / 100}%`,
-              sellTax: `${shape.sellTaxRate / 100}%`,
-              split: {
-                toCreator: `${shape.mktBps / 100}%`,
-                burned: `${shape.deflationBps / 100}%`,
-                toHolders: `${shape.dividendBps / 100}%`,
-                toLiquidity: `${shape.lpBps / 100}%`,
-              },
-              ...(shape.dividendBps > 0 ? { dividendsPaidIn: dividendsInOwnToken ? "the launched token" : "ETH" } : {}),
-            };
-
-      // Hand the payload to the wallet channel. The agent's reply is prose and
-      // cannot carry a signable transaction; this is how the UI gets one.
-      recordPendingLaunch({
-        creator: creator as string,
-        venue: "flap",
-        chainId: built.chainId,
-        network,
-        name,
-        symbol,
-        style,
-        tokenAddress: String(sim.token),
-        explorer: `${dep.explorer}/address/${sim.token}`,
-        economics,
-        transaction: { to: built.to, data: built.data, value: String(built.value) },
-      });
-
-      return json({
-        ok: true,
-        network,
-        chainId: built.chainId,
-        style,
-        tokenAddress: sim.token,
-        addressMatchedPrediction: sim.matchesPrediction,
-        explorer: `${dep.explorer}/address/${sim.token}`,
-        // Restated in plain terms. The struct is 26 fields of basis points; a
-        // user signing this deserves to read what it means.
-        economics,
-        // What the user signs. Nothing here is broadcast by us.
-        transaction: { to: built.to, data: built.data, value: String(built.value) },
-        simulated: true,
-        // The agent is told the wallet has it, so it can say "check the panel"
-        // rather than reciting calldata at someone.
-        awaitingSignature: true,
-        note:
-          "Simulated successfully against the live chain. The transaction has been sent to the user's wallet panel for review and signing — tell them to check it. " +
-          "Do NOT recite the calldata. The token trades on a bonding curve and graduates to a Uniswap V2 pair at ~80% of supply sold.",
-      });
-    },
-  );
-
-  /**
-   * The second launch venue, PONS.
-   *
-   * Same safety shape as the Flap tool above: no signer, no funds, unsigned
-   * calldata only, and nothing returned that has not simulated against the live
-   * chain. What differs is the product. PONS mints the whole supply into one
+   * Deliberately NOT in EXECUTE_TOOLS: it returns unsigned calldata and holds no
+   * signer and no funds, so it cannot move anything. Nothing is returned that has
+   * not simulated against the live chain first. PONS mints the whole supply into one
    * Uniswap v3 position and locks it forever, so there is no curve to graduate
    * from and no way for anyone to pull the liquidity later. Its factory source
    * is verified and published, which is why this is the venue we default to.

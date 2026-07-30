@@ -134,7 +134,7 @@ test("lists all expected tools", async () => {
     "meridian_submit_research",
     "meridian_index_yield",
     "meridian_index_yield_execute",
-    "meridian_launch_token",
+    "meridian_launch_token_pons",
   ]) {
     assert.ok(names.includes(expected), `missing tool: ${expected}`);
   }
@@ -162,7 +162,7 @@ async function rejectedWithoutAuthGate(args: Record<string, unknown>) {
   let transportError: unknown = null;
   let result: Awaited<ReturnType<Client["callTool"]>> | null = null;
   try {
-    result = await client.callTool({ name: "meridian_launch_token", arguments: args });
+    result = await client.callTool({ name: "meridian_launch_token_pons", arguments: args });
   } catch (err) {
     transportError = err;
   }
