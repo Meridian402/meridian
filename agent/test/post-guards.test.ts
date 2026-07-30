@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isSkip, forbiddenReason } from "../src/social/postGuards.js";
+import { splitNote } from "../src/social/merdMemory.js";
 
 /**
  * Token launching is built but deliberately unannounced. The pre-existing
@@ -190,4 +191,26 @@ test("an unknown trend claims no direction at all", async () => {
     const [t] = composeMerdTweets({ topYield: { label: "$INDEX distributions", aprPct: 34, trend } });
     assert.ok(!/climbing|cooling/i.test(t), `claimed a direction with no data: ${t}`);
   }
+});
+
+// The model stopped following the template: it writes the tweet as prose, then
+// repeats a labelled version of its first sentence underneath. The old strip was
+// anchored to the start, so it never matched that, and the marker plus the echo
+// went out on the timeline. It also pushed the text past the 500 cap, which
+// silently skipped the next three cycles and took the account quiet for a day.
+test("a POST: echo below the tweet is dropped, not published", () => {
+  const raw =
+    "maple credit has ticked 5.6 to 5.4 to 5.2 to 5.1. that is the only number out here with a direction. " +
+    "POST: maple credit has ticked 5.6 to 5.4 to 5.2 to 5.1.\nNOTE: keep counting maple.";
+  const { text, note } = splitNote(raw);
+  assert.doesNotMatch(text, /POST:/i, "the marker must never reach the timeline");
+  assert.ok(text.endsWith("with a direction."), "the tweet is the prose, not the echo");
+  assert.equal(note, "keep counting maple.");
+  assert.ok(text.length < raw.length, "the echo is removed, so length drops back under the cap");
+});
+
+test("a leading POST: label is still just a label", () => {
+  const { text, note } = splitNote("POST: a normal tweet.\nNOTE: a private thought");
+  assert.equal(text, "a normal tweet.");
+  assert.equal(note, "a private thought");
 });

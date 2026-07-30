@@ -115,7 +115,26 @@ export function splitNote(raw: string): { text: string; note: string } {
   const noteMatch = s.match(/^[\s>*-]*NOTE\s*:\s*([\s\S]*)$/im);
   const note = noteMatch ? noteMatch[1].trim() : "";
   let text = note ? s.slice(0, noteMatch!.index).trim() : s;
-  // Strip a leading POST: label if the model used one.
-  text = text.replace(/^[\s>*-]*POST\s*:\s*/i, "").trim();
+
+  // The POST: marker shows up in two shapes and only one of them was handled.
+  //
+  // Leading, "POST: <tweet>", is the template being followed: the label is
+  // noise and the tweet is what follows.
+  //
+  // Mid-text is the shape that actually shipped. The model writes the tweet as
+  // prose, then repeats a labelled version of its first sentence underneath.
+  // The old anchored strip could never match that, so the marker AND the echo
+  // went to the timeline: a real post went out ending "... POST: four reads
+  // running now, maple credit has ticked 5.6 to 5.4 to 5.2 to 5.1." It also
+  // pushed the length past the 500 cap, so the next three cycles were skipped
+  // outright and the account went quiet for a day. Everything from the marker
+  // on is the echo, so the tweet is what came before it.
+  const leading = text.match(/^[\s>*-]*POST\s*:\s*/i);
+  if (leading) {
+    text = text.slice(leading[0].length).trim();
+  } else {
+    const echo = text.search(/(?:^|\s)POST\s*:/i);
+    if (echo >= 0) text = text.slice(0, echo).trim();
+  }
   return { text, note };
 }

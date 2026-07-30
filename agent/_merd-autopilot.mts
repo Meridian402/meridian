@@ -19,7 +19,27 @@ const X_AGENT = process.env.MERD_X_AGENT_ID ?? "copywriter";
 const API = "https://meridian402-api-production.up.railway.app";
 const DRY = process.env.DRY_RUN === "1";
 
-const j = async (p: string) => (await fetch(API + p)).json().catch(() => null);
+// The catch has to cover fetch itself, not just the json parse. A transient
+// network error (laptop asleep, wifi switching, EADDRNOTAVAIL) rejects the
+// fetch, and when that escaped the Promise.all below it killed the whole run,
+// so one dropped packet cost an entire posting slot with nothing published.
+// Every consumer downstream already optional-chains, so null is a safe answer
+// for one endpoint. One retry, because the common case is a blip that is gone
+// a second later.
+const j = async (p: string) => {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await (await fetch(API + p, { signal: AbortSignal.timeout(20_000) })).json();
+    } catch (err) {
+      if (attempt === 1) {
+        console.error(`[autopilot] ${p} unavailable:`, err instanceof Error ? err.message : err);
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  return null;
+};
 const [th, opps, mkt, uni, perf] = await Promise.all([
   j("/api/agent-thoughts"), j("/api/opportunities"), j("/api/market-data"), j("/api/research-universe"), j("/api/performance"),
 ]);
@@ -192,13 +212,23 @@ const { text: rawText, note } = splitNote(resp.text ?? "");
 const tweet = cleanReply(rawText);
 const held = /^pass\b/i.test(tweet) || tweet.length < 15;
 
+// A DRY_RUN is a rehearsal and must leave NO trace. It used to write both
+// records below and only check DRY further down, at the posting step, so a
+// preview taught Merd he had published something he had not. The next real
+// cycle then read that back, saw its own observation already "said", and held.
+// One preview cost a posting slot. A rehearsal that mutates memory is worse
+// than useless, because the state it leaves behind is false.
+const persist = !DRY;
+
 // Merd's decision log (his own record of what he chose, so there is a memory of it)
 const logLine = { at: Date.now(), decision: held ? "hold" : "post", text: tweet.slice(0, 300) };
-try { appendFileSync(dataPath("merd-decisions.jsonl"), JSON.stringify(logLine) + "\n"); } catch {}
-// The journal is the half he reads back. Written on HOLD too: deciding there is
-// nothing worth saying is itself a thought worth keeping, and a cycle that
-// journals nothing is a gap in his continuity.
-remember(X_AGENT, { decision: held ? "hold" : "post", note });
+if (persist) {
+  try { appendFileSync(dataPath("merd-decisions.jsonl"), JSON.stringify(logLine) + "\n"); } catch {}
+  // The journal is the half he reads back. Written on HOLD too: deciding there is
+  // nothing worth saying is itself a thought worth keeping, and a cycle that
+  // journals nothing is a gap in his continuity.
+  remember(X_AGENT, { decision: held ? "hold" : "post", note });
+}
 if (note) console.log(`  note to self: ${note}`);
 
 if (held) { console.log("Merd chose to hold this cycle."); process.exit(0); }
