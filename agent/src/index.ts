@@ -813,17 +813,83 @@ app.post("/api/cli", async (req: Request, res: Response) => {
         if (routed.effect.what === "credits") {
           const balance = balanceOf(address);
           const enforced = creditsEnforced();
+          // The cost model is worth stating every time, because it is the thing
+          // a CLI makes legible that a chat box could not: a command is routed
+          // and read locally, a message calls a model. Only one of those costs.
           res.json({
             ok: true,
             effect: "read",
             lines: enforced
-              ? [`${balance} credits. one credit per message.`]
-              : [`${balance} credits, and charging is currently off so messages are free.`],
+              ? [
+                  `${balance} credits`,
+                  ``,
+                  `  1 credit   one message to your agent`,
+                  `  free       every /command, including the desk ones`,
+                  ``,
+                  balance > 0 ? `/buy to top up before you run out.` : `you are out. /buy to keep going.`,
+                ]
+              : [
+                  `${balance} credits, but charging is OFF right now, so messages are free.`,
+                  ``,
+                  `nothing is being deducted and nothing is for sale until that changes.`,
+                  `the balance is real and will be there when it turns on.`,
+                ],
+          });
+          return;
+        }
+        if (routed.effect.what === "packs") {
+          if (!creditsEnforced()) {
+            res.json({
+              ok: true,
+              effect: "read",
+              lines: [
+                `nothing to buy: charging is off, so messages are free right now.`,
+                `your ${balanceOf(address)} credits stay yours for when it turns on.`,
+              ],
+            });
+            return;
+          }
+          const rows = packs().map(
+            (p) => `  ${p.id.padEnd(9)} $${String(p.usd).padEnd(4)} ${p.credits} credits${p.bonusPct ? `  (+${p.bonusPct}%)` : ""}`,
+          );
+          res.json({
+            ok: true,
+            effect: "read",
+            lines: [`credit packs, paid in USDG:`, ``, ...rows, ``, `/buy <pack> to start. you sign the payment in your wallet.`],
           });
           return;
         }
         const status = swarmEnabled();
         res.json({ ok: true, effect: "read", lines: [`the public agent feed is ${status ? "running" : "paused"}.`, `your agent is ${before.joinSwarm === true ? "in it" : "not in it"} (/swarm on|off).`] });
+        return;
+      }
+
+      case "buy": {
+        // Captured before the first call: TypeScript drops the narrowing on a
+        // property access once an arbitrary function has run in between.
+        const wanted = routed.effect.pack;
+        if (!creditsEnforced()) {
+          res.json({ ok: false, effect: "buy", lines: [`charging is off, so there is nothing to buy right now. messages are free.`] });
+          return;
+        }
+        const pack = packs().find((p) => p.id === wanted);
+        if (!pack) {
+          res.json({
+            ok: false,
+            effect: "buy",
+            lines: [`no pack called "${wanted}".`, `choose one of: ${packs().map((p) => p.id).join(", ")}`],
+          });
+          return;
+        }
+        // The client takes it from here: it holds the wallet, so it runs the
+        // x402 challenge and the signature. Returning the pack rather than a
+        // half-finished purchase keeps signing in exactly one place.
+        res.json({
+          ok: true,
+          effect: "buy",
+          pack: pack.id,
+          lines: [`${pack.credits} credits for $${pack.usd} in USDG.`, `check your wallet to approve the payment.`],
+        });
         return;
       }
 
@@ -1067,6 +1133,12 @@ app.get("/api/my-agent/credits", (req: Request, res: Response) => {
     balance: balanceOf(address),
     freeMessages: FREE_CREDITS,
     packs: packsForApi(),
+    // Whether a message is ACTUALLY being charged for. Without this the site
+    // advertises a paywall it may not be running: the pricing page said "20 free
+    // messages" and sold packs while charging was switched off, so every number
+    // on it was a claim about a rule nothing was enforcing. A UI can now say
+    // what is true today rather than what the price list says.
+    enforced: creditsEnforced(),
     merdPayments: merdCreditsEnabled(),
     merdAsset: merdCreditsEnabled() ? merdAsset() : null,
   });

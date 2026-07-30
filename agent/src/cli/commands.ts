@@ -30,8 +30,10 @@ export type CliEffect =
   | { kind: "desk"; command: string }
   /** Send this to the user's own agent as a chat turn. */
   | { kind: "chat"; text: string }
-  /** Read something the router cannot: balance, roster, history. */
-  | { kind: "read"; what: "credits" | "settings" | "swarm" }
+  /** Read something the router cannot: balance, prices, roster, settings. */
+  | { kind: "read"; what: "credits" | "settings" | "swarm" | "packs" }
+  /** Start a purchase. The CLI cannot sign, so the client runs the wallet flow. */
+  | { kind: "buy"; pack: string }
   /** Client-side only: wipe the visible transcript. */
   | { kind: "clear" };
 
@@ -70,12 +72,17 @@ const HELP = [
   "    /status /pnl /position /proof /why /trades",
   "    /basis /lp /scan /universe /tools /wallet",
   "",
+  "  credits",
+  "    /credits           your balance and what spends it",
+  "    /buy               credit packs",
+  "    /buy <pack>        start a purchase",
+  "",
   "  session",
-  "    /credits           how many messages you have left",
   "    /clear             clear this transcript",
   "    /help              this",
   "",
   "anything that is not a command is a message to your agent.",
+  "commands are free. only messages cost a credit.",
 ];
 
 const list = (xs: readonly string[]) => xs.join(" | ");
@@ -112,6 +119,13 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
 
     case "credits":
       return ok([], { kind: "read", what: "credits" });
+
+    case "buy": {
+      // No argument lists the packs; an argument starts that purchase. The
+      // router does not know prices, so both are reads and the route answers.
+      if (!arg) return ok([], { kind: "read", what: "packs" });
+      return ok([], { kind: "buy", pack: arg.toLowerCase() });
+    }
 
     case "whoami":
     case "settings":
@@ -194,7 +208,7 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
  * exploring, and exploring is the whole point of putting this in front of them.
  */
 function suggest(cmd: string): string[] {
-  const vocab = ["help", "whoami", "name", "risk", "style", "focus", "goal", "swarm", "reset", "credits", "clear", ...DESK];
+  const vocab = ["help", "whoami", "name", "risk", "style", "focus", "goal", "swarm", "reset", "credits", "buy", "clear", ...DESK];
   let best: string | null = null;
   let bestD = Infinity;
   for (const v of vocab) {

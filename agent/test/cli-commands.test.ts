@@ -133,3 +133,27 @@ test("describeSettings is honest about defaults versus chosen values", () => {
   assert.ok(!c.includes("default"), "every field is set here");
   assert.ok(c.includes("publicly"), "swarm being on has a public consequence and should say it");
 });
+
+test("/buy with no argument lists packs, with one starts that purchase", () => {
+  const list = routeCli("/buy", empty);
+  assert.equal(list.effect.kind, "read");
+  assert.equal((list.effect as any).what, "packs");
+
+  const one = routeCli("/buy starter", empty);
+  assert.equal(one.effect.kind, "buy");
+  assert.equal((one.effect as any).pack, "starter");
+});
+
+test("/buy never completes a purchase in the router", () => {
+  // The router cannot see prices or hold a wallet. It only ever names the pack,
+  // so signing stays in exactly one place instead of acquiring a second path.
+  const r = routeCli("/buy pro", empty);
+  assert.equal(r.effect.kind, "buy");
+  assert.deepEqual(Object.keys(r.effect as any).sort(), ["kind", "pack"]);
+});
+
+test("help states the cost model, because a CLI is where it finally makes sense", () => {
+  const lines = routeCli("/help", empty).lines.join("\n");
+  assert.ok(lines.includes("commands are free"), "the free/paid split must be visible without asking");
+  assert.ok(lines.includes("/buy"));
+});
