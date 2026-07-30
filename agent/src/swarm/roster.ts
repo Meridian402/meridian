@@ -238,7 +238,29 @@ export async function listLiveParticipants(): Promise<Participant[]> {
     if (p) house.push(p);
   }
   const users = userParticipants().filter((p) => live.has(p.id));
-  return [...house, ...users];
+  return disambiguate([...house, ...users]);
+}
+
+/**
+ * Make every speaker's name unique before it reaches a published feed.
+ *
+ * Fleet display names come from the MANDATE, so two agents running the same
+ * mandate both render as "Market Maker Desk" (production has exactly that
+ * today). Two identically named speakers in a transcript does not read as two
+ * desks, it reads as a bug, and it also makes the takeaways impossible to
+ * attribute. Only collisions get a suffix, so the common case of one desk per
+ * mandate stays clean, and the suffix is the fleet's own short id so the same
+ * agent always carries the same label rather than one that shifts with roster
+ * order.
+ */
+function disambiguate(list: Participant[]): Participant[] {
+  const counts = new Map<string, number>();
+  for (const p of list) counts.set(p.displayName, (counts.get(p.displayName) ?? 0) + 1);
+  return list.map((p) => {
+    if ((counts.get(p.displayName) ?? 0) < 2) return p;
+    const tag = /^mrdn-fleet-([a-z0-9]+)-/.exec(p.id)?.[1];
+    return tag ? { ...p, displayName: `${p.displayName} ${tag.toUpperCase()}` } : p;
+  });
 }
 
 /**
