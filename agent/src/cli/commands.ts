@@ -84,7 +84,10 @@ const HELP = [
   "    /help              this",
   "",
   "anything that is not a command is a message to your agent.",
-  "commands are free. only messages cost a credit.",
+  "",
+  "  what costs: a message to your agent. one credit each.",
+  "  what does not: every command above, the whole desk, and all of earn.",
+  "                 earning is never behind the paywall.",
 ];
 
 /**

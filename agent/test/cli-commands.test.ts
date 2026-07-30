@@ -154,7 +154,10 @@ test("/buy never completes a purchase in the router", () => {
 
 test("help states the cost model, because a CLI is where it finally makes sense", () => {
   const lines = routeCli("/help", empty).lines.join("\n");
-  assert.ok(lines.includes("commands are free"), "the free/paid split must be visible without asking");
+  // Asserted on the SPLIT, not on a sentence, so the copy can be improved
+  // without the test demanding the old wording back.
+  assert.match(lines, /what costs/i, "the paid thing must be named without being asked");
+  assert.match(lines, /what does not/i, "and so must the free things, which are most of them");
   assert.ok(lines.includes("/buy"));
 });
 

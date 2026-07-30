@@ -23,7 +23,7 @@ import { ensureUserAgent, messageUserAgent, userAgentHistory, streamUserAgent, s
 import { vaultStatus, buildVaultSetup, buildVaultRevoke } from "./custody/vault.js";
 import { provisionResearchFleet, triggerResearchRun } from "./research/orchestration.js";
 import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad, streamIdleTimeoutMs } from "./chatLimits.js";
-import { chatSpendBlocked, chatSpendStatus } from "./spendGuards.js";
+import { chatSpendBlocked, chatSpendStatus, recordTurn } from "./spendGuards.js";
 import {
   balanceOf,
   trySpend,
@@ -826,6 +826,13 @@ app.post("/api/cli", async (req: Request, res: Response) => {
                   ``,
                   `  1 credit   one message to your agent`,
                   `  free       every /command, including the desk ones`,
+                  `  free       earn: park idle cash, stock payouts, scout to earn`,
+                  ``,
+                  // Stated plainly because it is the part people will not
+                  // assume: running out of credits stops the conversation, not
+                  // the earning. Scouting is capped at three runs a day on its
+                  // own terms and never looks at this balance.
+                  `running out stops the conversation, not your agent's earning.`,
                   ``,
                   balance > 0 ? `/buy to top up before you run out.` : `you are out. /buy to keep going.`,
                 ]
@@ -1528,38 +1535,35 @@ app.post("/api/earn/scout", async (req: Request, res: Response) => {
   if (!allowed.ok) { res.status(429).json({ ok: false, error: allowed.reason }); return; }
   const guard = chatGuardSync(address);
   if (guard) { res.status(guard.status).json({ ok: false, code: guard.code, error: guard.error }); return; }
-  // A scout run is a full LLM turn, so it is charged like one. Same position and
-  // shape as /api/my-agent/message: after the guards so a rate-limited retry
-  // costs nothing, before the slot wait so a wallet at zero never occupies
-  // capacity it cannot pay for. This route ran the model for free until now.
-  const spend = trySpend(address);
-  if (!spend.ok) {
-    endTurn(address);
-    res.status(402).json({ ok: false, code: "out_of_credits", error: "you're out of credits. grab a pack to keep talking to your agent.", balance: spend.balance });
-    return;
-  }
+  // METERED, NEVER CHARGED.
+  //
+  // A scout run is a real model turn, so it is recorded against the global
+  // ceiling exactly like a chat turn: the runaway stop has to see every turn we
+  // pay for or it is not a stop. But it does not take a credit.
+  //
+  // Credits buy conversation with your agent. Earning is not conversation, and
+  // charging here inverts the whole proposition: it asks somebody to spend
+  // money for the chance to be paid $0.10, and it puts the paywall in front of
+  // the one surface whose entire point is that value flows the other way. The
+  // cost is already bounded without it, and bounded harder than credits ever
+  // bounded it: three runs per wallet per day, and a global bounty pool that
+  // closes for the day once it is spent. Those caps are checked above.
+  recordTurn(address);
   const slot = await acquireSlot();
   if (!slot) {
-    refundCredit(address, 1, "refund:busy"); // never reached the agent, never charged
     endTurn(address);
     res.status(503).json({ ok: false, error: "high demand right now, try again in a few seconds" });
     return;
   }
   try {
-    const { refundable, ...result } = await runScout(address);
-    // The gateway reports some failures as a resolved reply carrying an error
-    // instead of throwing. A run that produced nothing is refunded, same as on
-    // /message, rather than silently charged.
-    const credits = refundable ? refundCredit(address, 1, "refund:agent-error") : spend.balance;
-    res.json({ ...result, credits });
+    // `refundable` is what the run reports when it produced nothing. There is
+    // nothing to refund now, but it stays part of the result so the shape does
+    // not change under callers.
+    const { refundable: _refundable, ...result } = await runScout(address);
+    res.json({ ...result, credits: balanceOf(address) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[earn/scout] failed:", msg);
-    // A failed turn is never charged, with the same timeout exception /message
-    // documents: a timed-out run very likely completed on the gateway's side and
-    // really did spend the tokens, so refunding it would hand out free turns to
-    // anyone who can make a run go long.
-    if (!/timed?\s*out|timeout/i.test(msg)) refundCredit(address, 1, "refund:error");
     const status = msg === "gateway_unconfigured" ? 503 : 502;
     res.status(status).json({ ok: false, error: "your agent could not scout just now, try again shortly" });
   } finally {
