@@ -13,6 +13,20 @@ const RATE_BURST = Number(process.env.CHAT_RATE_BURST ?? 5); // tokens
 const RATE_REFILL_MS = Number(process.env.CHAT_RATE_REFILL_MS ?? 3000); // +1 token / 3s
 const MAX_CONCURRENT = Number(process.env.CHAT_MAX_CONCURRENT ?? 40);
 const ACQUIRE_TIMEOUT_MS = Number(process.env.CHAT_ACQUIRE_TIMEOUT_MS ?? 15000);
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * How long an SSE turn may go with NO event from the gateway before the route
+ * gives up on it. This is the guard that stops a hung upstream holding a global
+ * slot and a wallet's single-flight lock forever. Read at call time so it can be
+ * changed without a rebuild, and floored in code because a zero or negative
+ * value would abort every stream the instant it started.
+ */
+export function streamIdleTimeoutMs(): number {
+  const raw = Number(process.env.STREAM_IDLE_TIMEOUT_MS ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  return Math.max(1000, Math.floor(raw));
+}
 
 // ---- #4 per-wallet token bucket ----------------------------------------------
 const buckets = new Map<string, { tokens: number; last: number }>();

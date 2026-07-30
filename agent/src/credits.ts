@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { appendLedger } from "./ledger.js";
 import { dataPath } from "./dataDir.js";
+import { noteSpend } from "./spendGuards.js";
 import { merdTokenAddress } from "./deploy/tokenGate.js";
 import type { SettlementAsset } from "./payments/PaymentGate.js";
 
@@ -151,6 +152,11 @@ function loadBalances(): Map<string, number> {
 function append(wallet: string, kind: CreditEvent["kind"], credits: number, extra?: { reason?: string; tx?: string }): number {
   const ev: CreditEvent = { wallet, kind, credits, ...extra, at: Date.now() };
   appendLedger(FILE, ev);
+  // Every charged turn passes through here, so this is the one place the daily
+  // spend ceiling can be told about a spend without a route being able to skip
+  // it. The ledger stays the source of truth; this only keeps the cached fold
+  // current between refolds.
+  if (kind === "spend") noteSpend(wallet);
   const map = loadBalances();
   const next = applyEvent(map.get(wallet) ?? 0, ev);
   map.set(wallet, next);

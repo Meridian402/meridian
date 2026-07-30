@@ -54,3 +54,59 @@ export function globalRateLimit(req: Request, res: Response, next: NextFunction)
 
 // Strict guard for the unauthenticated, CPU-heavy auth endpoints.
 export const authRateLimit = makeLimiter(Number(process.env.AUTH_RATE_PER_MIN ?? 30));
+
+// The route prefixes this server actually serves, as the first one or two path
+// segments. Request accounting is keyed off this list rather than off whatever
+// the caller typed: the counter map used to take its key straight from the
+// request path, which meant anyone could grow it without limit just by asking
+// for random URLs, and the 404s they were generating were also the least
+// interesting rows in the table.
+const KNOWN_ROUTES = new Set([
+  "/health",
+  "/mcp",
+  "/api/account",
+  "/api/admin",
+  "/api/agent-thoughts",
+  "/api/console",
+  "/api/credits",
+  "/api/custody",
+  "/api/earn",
+  "/api/fleet",
+  "/api/index-trade",
+  "/api/lp-close",
+  "/api/lp-open",
+  "/api/lp-pnl",
+  "/api/lp-scan",
+  "/api/market-data",
+  "/api/my-agent",
+  "/api/open-deploy",
+  "/api/opportunities",
+  "/api/ops",
+  "/api/performance",
+  "/api/portfolio",
+  "/api/proof",
+  "/api/research-universe",
+  "/api/reserve-profile",
+  "/api/swarm",
+  "/api/sync-state",
+]);
+
+export const OTHER_ROUTE_KEY = "other";
+
+/**
+ * The accounting key for a request path: a known prefix, or "other". Bounded by
+ * construction, so the stats map can hold at most KNOWN_ROUTES.size + 1 entries
+ * no matter what anyone requests.
+ */
+export function routeKey(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  if (!segments.length) return OTHER_ROUTE_KEY;
+  const two = "/" + segments.slice(0, 2).join("/");
+  if (KNOWN_ROUTES.has(two)) return two;
+  const one = "/" + segments[0];
+  return KNOWN_ROUTES.has(one) ? one : OTHER_ROUTE_KEY;
+}
+
+/** How many distinct keys routeKey can ever produce. Used by the test that
+ *  proves the stats map is bounded. */
+export const ROUTE_KEY_LIMIT = KNOWN_ROUTES.size + 1;

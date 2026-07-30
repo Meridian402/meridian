@@ -27,7 +27,9 @@ interface BountyRow {
   ts: number;
   kind: "scout" | "payout";
   wallet: string;
-  status: "accrued" | "duplicate" | "invalid" | "paid";
+  // "attempt" is written before the model runs and is what the per-wallet daily
+  // cap counts. The other scout statuses are outcomes, recorded after.
+  status: "attempt" | "accrued" | "duplicate" | "invalid" | "paid";
   amountUsd: number;
   name?: string;
   url?: string;
@@ -125,19 +127,35 @@ export interface ScoutResult {
   balanceUsd?: number;
   agentName?: string;
   message: string;
+  /** The gateway resolved with an error and no text, so this run produced
+   *  nothing at all. The route refunds the credit, exactly as /message does for
+   *  the same case. Internal: the route strips it before replying. */
+  refundable?: boolean;
 }
 
-/** Caps checked BEFORE spending model tokens on a run. */
+/**
+ * Caps checked BEFORE spending model tokens on a run.
+ *
+ * The per-wallet cap counts ATTEMPTS, not wins. Counting accruals was the wrong
+ * meter: an accrual is the outcome, and the cost is incurred at the attempt. A
+ * run that finds nothing, returns unparsable output, or names a venue we already
+ * track burns exactly as many model tokens as one that earns a bounty, so
+ * metering on wins left every unsuccessful run uncapped and free, and the
+ * cheapest way to spend our model budget without limit was to scout badly.
+ *
+ * The global cap still meters on accrued USD, which is correct: that one is a
+ * bound on money owed, and money is only owed when a find lands.
+ */
 export function scoutAllowed(wallet: string): { ok: boolean; reason?: string } {
   const rows = readRows();
   const cutoff = Date.now() - DAY_MS;
   const w = wallet.toLowerCase();
-  const mine = rows.filter((r) => r.kind === "scout" && r.status === "accrued" && r.ts >= cutoff);
-  if (mine.filter((r) => r.wallet === w).length >= config.scoutMaxPerWalletPerDay) {
-    return { ok: false, reason: `your agent has hit today's ${config.scoutMaxPerWalletPerDay}-find bounty cap — scout again tomorrow` };
+  const today = rows.filter((r) => r.kind === "scout" && r.ts >= cutoff);
+  if (today.filter((r) => r.status === "attempt" && r.wallet === w).length >= config.scoutMaxPerWalletPerDay) {
+    return { ok: false, reason: `your agent has used today's ${config.scoutMaxPerWalletPerDay} scout runs, successful or not. scout again tomorrow.` };
   }
-  if (mine.reduce((s, r) => s + r.amountUsd, 0) >= config.scoutMaxDailyTotalUsd) {
-    return { ok: false, reason: "today's global bounty pool is spent — scout again tomorrow" };
+  if (today.filter((r) => r.status === "accrued").reduce((s, r) => s + r.amountUsd, 0) >= config.scoutMaxDailyTotalUsd) {
+    return { ok: false, reason: "today's global bounty pool is spent, scout again tomorrow" };
   }
   return { ok: true };
 }
@@ -151,10 +169,24 @@ export async function runScout(wallet: string): Promise<ScoutResult> {
   const w = wallet.toLowerCase();
   const agentName = agentDisplayName(wallet);
 
+  // Recorded BEFORE the model runs, because this is the row the per-wallet daily
+  // cap counts and the cost is incurred here, whatever comes back. A run that
+  // throws still leaves its attempt behind, which is the point.
+  appendLedger(LOG, { ts: Date.now(), kind: "scout", wallet: w, status: "attempt", amountUsd: 0 } satisfies BountyRow);
+
   const reply = await messageUserAgent(wallet, scoutPrompt(), { sessionKind: "scout" });
   const parsed = extractJson(reply.text);
   if (!parsed) {
-    return { ok: false, agentName, message: `${agentName} did not return a usable finding this run — nothing recorded, try again.` };
+    // Same distinction /message draws: an error with no text means the turn
+    // produced nothing and is refunded, while unusable text is a real answer we
+    // simply could not use.
+    const produced = Boolean(reply.text.trim());
+    return {
+      ok: false,
+      agentName,
+      refundable: !produced && Boolean(reply.error),
+      message: `${agentName} did not return a usable finding this run, nothing recorded. Try again.`,
+    };
   }
   if (parsed.name === null) {
     return { ok: true, novel: false, agentName, message: `${agentName} came back empty-handed: no confident novel venue this run. No bounty, nothing spent.` };
