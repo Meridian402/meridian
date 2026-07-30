@@ -1,0 +1,135 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { routeCli, describeSettings } from "../src/cli/commands.js";
+import type { AgentSettings } from "../src/deploy/agentSettings.js";
+
+// The CLI is user text choosing which capability runs, so the routing is the
+// security boundary and it is tested as one. The property that matters most is
+// that a mutation NEVER happens here: every setting change leaves as an intent
+// for sanitizeSettings to validate, so the CLI cannot become a second, laxer
+// door onto values that get interpolated into the agent's persona prompt.
+
+const empty: AgentSettings = {};
+const configured: AgentSettings = {
+  name: "Scout",
+  riskAppetite: "aggressive",
+  style: "deep",
+  focus: ["yield"],
+  goal: "find carry",
+  joinSwarm: true,
+};
+
+test("plain text is a message to the agent, not a command", () => {
+  const r = routeCli("what is the basis on NVDA?", empty);
+  assert.equal(r.effect.kind, "chat");
+  assert.equal((r.effect as any).text, "what is the basis on NVDA?");
+  assert.ok(!r.error);
+});
+
+test("a message that merely contains a slash is still a message", () => {
+  // "1/2 of the pool" and "src/index.ts" must not be read as commands.
+  for (const text of ["1/2 of the pool moved", "check src/index.ts"]) {
+    assert.equal(routeCli(text, empty).effect.kind, "chat", text);
+  }
+});
+
+test("empty input does nothing at all", () => {
+  const r = routeCli("   ", empty);
+  assert.deepEqual(r.lines, []);
+  assert.equal(r.effect.kind, "none");
+});
+
+test("/help lists commands without touching state", () => {
+  const r = routeCli("/help", empty);
+  assert.ok(r.lines.length > 5);
+  assert.equal(r.effect.kind, "none");
+});
+
+test("settings commands emit an INTENT, never a write", () => {
+  // The whole point: routeCli is pure. If any of these ever returned something
+  // other than a patch for the validator, the CLI would be bypassing the one
+  // place these values are sanitised.
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["/name Scout", { name: "Scout" }],
+    ["/risk aggressive", { riskAppetite: "aggressive" }],
+    ["/style deep", { style: "deep" }],
+    ["/goal find carry", { goal: "find carry" }],
+    ["/swarm on", { joinSwarm: true }],
+    ["/swarm off", { joinSwarm: false }],
+  ];
+  for (const [input, patch] of cases) {
+    const r = routeCli(input, empty);
+    assert.equal(r.effect.kind, "settings", input);
+    assert.deepEqual((r.effect as any).patch, patch, input);
+  }
+});
+
+test("focus accepts commas or spaces, dedupes, and rejects unknown areas", () => {
+  assert.deepEqual((routeCli("/focus yield, research", empty).effect as any).patch, { focus: ["yield", "research"] });
+  assert.deepEqual((routeCli("/focus yield research", empty).effect as any).patch, { focus: ["yield", "research"] });
+  assert.deepEqual((routeCli("/focus yield,yield", empty).effect as any).patch, { focus: ["yield"] });
+
+  const bad = routeCli("/focus tarot", empty);
+  assert.ok(bad.error);
+  assert.equal(bad.effect.kind, "none", "a rejected value must not produce a patch");
+});
+
+test("an invalid enum value is refused rather than silently coerced", () => {
+  for (const input of ["/risk spicy", "/style poetic"]) {
+    const r = routeCli(input, empty);
+    assert.ok(r.error, input);
+    assert.equal(r.effect.kind, "none", input);
+  }
+});
+
+test("a bare setting command reports the current value instead of erroring blindly", () => {
+  const r = routeCli("/risk", configured);
+  assert.ok(r.lines.some((l) => l.includes("aggressive")), "should surface what it is set to now");
+});
+
+test("desk commands pass through instead of being reimplemented", () => {
+  for (const c of ["status", "pnl", "proof", "trades", "basis", "lp"]) {
+    const r = routeCli("/" + c, empty);
+    assert.equal(r.effect.kind, "desk", c);
+    assert.equal((r.effect as any).command, c);
+  }
+});
+
+test("commands are case-insensitive", () => {
+  assert.equal(routeCli("/HELP", empty).effect.kind, "none");
+  assert.deepEqual((routeCli("/RISK Balanced", empty).effect as any).patch, { riskAppetite: "balanced" });
+});
+
+test("an unknown command suggests a near miss but never guesses wildly", () => {
+  const near = routeCli("/statuss", empty);
+  assert.ok(near.error);
+  assert.ok(near.lines.some((l) => l.includes("/status")), "close typo should be suggested");
+
+  const far = routeCli("/xylophone", empty);
+  assert.ok(far.error);
+  assert.ok(!far.lines.some((l) => l.startsWith("did you mean")), "a wrong suggestion is worse than none");
+});
+
+test("/reset returns a default for each settable field", () => {
+  for (const f of ["name", "goal", "risk", "style", "focus", "swarm"]) {
+    const r = routeCli("/reset " + f, configured);
+    assert.equal(r.effect.kind, "settings", f);
+  }
+  assert.ok(routeCli("/reset nonsense", configured).error);
+});
+
+test("reads are delegated, since the router cannot see balances or history", () => {
+  assert.equal((routeCli("/credits", empty).effect as any).what, "credits");
+  assert.equal((routeCli("/whoami", empty).effect as any).what, "settings");
+  assert.equal(routeCli("/clear", empty).effect.kind, "clear");
+});
+
+test("describeSettings is honest about defaults versus chosen values", () => {
+  const d = describeSettings(empty).join("\n");
+  assert.ok(d.includes("default"), "an unset field must say so rather than look chosen");
+
+  const c = describeSettings(configured).join("\n");
+  assert.ok(c.includes("Scout") && c.includes("aggressive"));
+  assert.ok(!c.includes("default"), "every field is set here");
+  assert.ok(c.includes("publicly"), "swarm being on has a public consequence and should say it");
+});

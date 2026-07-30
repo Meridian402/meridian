@@ -16,6 +16,7 @@ import { market, decisionLog, universe } from "./state.js";
 import { executeIndexTrade } from "./actions/executeIndexTrade.js";
 import { validateProfile, recordReservation, provisionUserAgent } from "./deploy/userAgents.js";
 import { runConsoleCommand } from "./console.js";
+import { routeCli, describeSettings } from "./cli/commands.js";
 import { GatewayClient } from "@openhermit/sdk";
 import { issueChallenge, linkAccount, accountData, mintSession, verifySession } from "./accounts.js";
 import { ensureUserAgent, messageUserAgent, userAgentHistory, streamUserAgent, sanitizeChunk, setUserAgentSettings, agentDisplayName, userAgentSettings } from "./deploy/myAgent.js";
@@ -28,6 +29,7 @@ import {
   trySpend,
   refundCredit,
   addPurchase,
+  creditsEnforced,
   FREE_CREDITS,
   packs,
   packsForApi,
@@ -751,6 +753,90 @@ app.get("/api/my-agent/settings", (req: Request, res: Response) => {
   if (!address) return;
   const settings = userAgentSettings(address);
   res.json({ ok: true, settings, joinSwarm: settings.joinSwarm === true });
+});
+
+// The Meridian CLI. One typed line in, lines of text out.
+//
+// Customising an agent used to mean finding a button in the chat panel, opening
+// a modal, filling a form and saving it. This puts the same capabilities next to
+// the conversation as commands, where /help discovers them and the agent can
+// tell you what to type.
+//
+// The routing is PURE (src/cli/commands.ts) and this route is the only thing
+// that can act. Every settings change goes through setUserAgentSettings, the
+// same path the form used, so the CLI cannot become a second laxer door onto
+// values that end up interpolated into the agent's persona prompt. Desk
+// commands are handed to runConsoleCommand rather than reimplemented, so the
+// CLI and the public desk can never disagree about what "status" means.
+//
+// Chat is deliberately NOT handled here: it returns an intent and the client
+// posts to /stream, so a conversational turn keeps its streaming, its credit
+// debit, and its guards instead of acquiring a second, quieter path.
+app.options("/api/cli", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post("/api/cli", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  const line = typeof (req.body ?? {}).line === "string" ? (req.body.line as string) : "";
+  if (line.length > 2000) { res.status(400).json({ ok: false, lines: ["that is too long for one line."] }); return; }
+
+  try {
+    const before = userAgentSettings(address);
+    const routed = routeCli(line, before);
+
+    switch (routed.effect.kind) {
+      case "none":
+      case "clear":
+        res.json({ ok: !routed.error, lines: routed.lines, effect: routed.effect.kind });
+        return;
+
+      case "chat":
+        // The client streams this. Handing back the text rather than proxying it
+        // keeps one implementation of a chat turn instead of two.
+        res.json({ ok: true, lines: [], effect: "chat", text: routed.effect.text });
+        return;
+
+      case "settings": {
+        const result = await setUserAgentSettings(address, routed.effect.patch);
+        if ("error" in result) { res.json({ ok: false, lines: [result.error], effect: "settings" }); return; }
+        // Echo the new state rather than "saved": the point of a CLI is that you
+        // can see what you just did without opening anything.
+        res.json({ ok: true, lines: describeSettings(result.settings), effect: "settings", settings: result.settings });
+        return;
+      }
+
+      case "read": {
+        if (routed.effect.what === "settings") {
+          res.json({ ok: true, lines: describeSettings(before), effect: "read" });
+          return;
+        }
+        if (routed.effect.what === "credits") {
+          const balance = balanceOf(address);
+          const enforced = creditsEnforced();
+          res.json({
+            ok: true,
+            effect: "read",
+            lines: enforced
+              ? [`${balance} credits. one credit per message.`]
+              : [`${balance} credits, and charging is currently off so messages are free.`],
+          });
+          return;
+        }
+        const status = swarmEnabled();
+        res.json({ ok: true, effect: "read", lines: [`the public agent feed is ${status ? "running" : "paused"}.`, `your agent is ${before.joinSwarm === true ? "in it" : "not in it"} (/swarm on|off).`] });
+        return;
+      }
+
+      case "desk": {
+        const lines = await runConsoleCommand(routed.effect.command);
+        res.json({ ok: true, lines, effect: "desk" });
+        return;
+      }
+    }
+  } catch (err) {
+    console.error("[cli] failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, lines: ["something broke running that. try again shortly."] });
+  }
 });
 
 app.post("/api/my-agent/settings", async (req: Request, res: Response) => {
