@@ -12,6 +12,8 @@
 // on-chain. See meridian-index-yield-mechanics memory for the full derivation.
 const LIVE_URL = "https://theindex.finance/live";
 const INDEXER_URL = "https://theindex.finance/indexer";
+const DIST_FAILURES_BEFORE_MUTE = Number(process.env.MERIDIAN_INDEX_DIST_FAILURES ?? 3);
+const DIST_MUTE_MS = Number(process.env.MERIDIAN_INDEX_DIST_MUTE_MS ?? 15 * 60_000);
 
 export const ELIGIBILITY_THRESHOLD_TOKENS = 10_000;
 export const ENTRY_FEE_PCT = 3;
@@ -154,17 +156,52 @@ export class IndexYieldData {
 
   constructor(private ttlMs = Number(process.env.MERIDIAN_INDEX_YIELD_TTL_MS ?? 120_000)) {}
 
+  // A dead upstream should cost us one slow call, not one every couple of
+  // minutes forever. After a few consecutive failures the distributions query is
+  // skipped outright for a cooldown, so a third party being down stops costing
+  // us 8 seconds of every refresh and a stack trace in the log each time.
+  private distFailures = 0;
+  private distMutedUntil = 0;
+
+  private async fetchDistributions(): Promise<{ data: { distributions: { items: DistributionItem[] } } } | null> {
+    if (Date.now() < this.distMutedUntil) return null;
+    try {
+      const r = await fetchJson<{ data: { distributions: { items: DistributionItem[] } } }>(INDEXER_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: DISTRIBUTIONS_QUERY }),
+      });
+      this.distFailures = 0;
+      return r;
+    } catch (err) {
+      this.distFailures += 1;
+      if (this.distFailures >= DIST_FAILURES_BEFORE_MUTE) {
+        this.distMutedUntil = Date.now() + DIST_MUTE_MS;
+        console.error(
+          `[indexYield] distributions upstream failed ${this.distFailures} times, skipping it for ${Math.round(DIST_MUTE_MS / 60000)}min. ` +
+            "Price and pot stay live; only the payout trend is unavailable.",
+        );
+      }
+      return null;
+    }
+  }
+
   async snapshot(): Promise<IndexYieldSnapshot> {
     if (Date.now() - this.lastFetchedAt < this.ttlMs) return this.cached;
     try {
-      const [live, dist] = await Promise.all([
+      // allSettled, NOT all. These are two independent upstreams and only one of
+      // them carries the price. Failing the pair together means a broken
+      // distributions resolver throws away a perfectly good price quote and the
+      // whole snapshot goes stale, which is what was happening: /live answers in
+      // under half a second while /indexer hangs on this query until our own
+      // timeout fires. The trend is the only thing that should degrade.
+      const [liveRes, distRes] = await Promise.allSettled([
         fetchJson<LiveResponse>(LIVE_URL),
-        fetchJson<{ data: { distributions: { items: DistributionItem[] } } }>(INDEXER_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ query: DISTRIBUTIONS_QUERY }),
-        }),
+        this.fetchDistributions(),
       ]);
+      if (liveRes.status === "rejected") throw liveRes.reason;
+      const live = liveRes.value;
+      const dist = distRes.status === "fulfilled" ? distRes.value : null;
 
       if (!Number.isFinite(live.indexPriceEth) || !Number.isFinite(live.ethUsd)) {
         throw new Error(
@@ -176,7 +213,10 @@ export class IndexYieldData {
         const price = live.stockUsd[sym];
         return price != null ? sum + (Number(wei) / 1e18) * price : sum;
       }, 0);
-      const trend = trendFromDistributions(dist.data.distributions.items, live.stockUsd);
+      // No distributions means no trend, and saying so beats inventing one.
+      const trend = dist
+        ? trendFromDistributions(dist.data.distributions.items, live.stockUsd)
+        : { distributedUsdPerDayRecent: null, distributedUsdPerDayPrior: null, trend: "unknown" as const };
 
       this.cached = {
         live: true,
