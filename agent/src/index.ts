@@ -4,7 +4,7 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { buildServer } from "./mcp/server.js";
+import { buildServer, type McpAudience } from "./mcp/server.js";
 import { config, assertTreasuryIsLive } from "./config.js";
 import { launchpadDeployment } from "./launch/portal.js";
 import { PaymentGate, type PaymentAmount, type SettlementAsset } from "./payments/PaymentGate.js";
@@ -21,7 +21,8 @@ import { issueChallenge, linkAccount, accountData, mintSession, verifySession } 
 import { ensureUserAgent, messageUserAgent, userAgentHistory, streamUserAgent, sanitizeChunk, setUserAgentSettings, agentDisplayName, userAgentSettings } from "./deploy/myAgent.js";
 import { vaultStatus, buildVaultSetup, buildVaultRevoke } from "./custody/vault.js";
 import { provisionResearchFleet, triggerResearchRun } from "./research/orchestration.js";
-import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad } from "./chatLimits.js";
+import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad, streamIdleTimeoutMs } from "./chatLimits.js";
+import { chatSpendBlocked, chatSpendStatus } from "./spendGuards.js";
 import {
   balanceOf,
   trySpend,
@@ -38,7 +39,7 @@ import { pendingLaunchFor, clearPendingLaunch } from "./launch/pendingLaunches.j
 import { ResearchStrategy } from "./strategy/ResearchStrategy.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { walletOps24h } from "./risk.js";
-import { securityHeaders, globalRateLimit, authRateLimit } from "./httpGuards.js";
+import { securityHeaders, globalRateLimit, authRateLimit, routeKey } from "./httpGuards.js";
 import { startBackups, backupStatus } from "./backup.js";
 import { initLedger, ledgerStatus } from "./ledger.js";
 import { scheduleOpenDeploy, runOpenDeploy, openDeployPreview } from "./openDeploy.js";
@@ -105,10 +106,15 @@ app.use(express.json({ limit: "128kb" }));
 
 // Lightweight in-memory request accounting so /api/ops can report live load
 // without an external APM. Resets on restart, like the other counters.
+//
+// Keyed by routeKey(), an allowlist of the prefixes this server actually
+// serves, with everything else bucketed as "other". The key used to be the
+// caller's own path, which made this map unbounded: a few thousand requests for
+// random URLs would have grown it forever, and the rows they added were noise.
 const reqStats = { total: 0, since: Date.now(), byRoute: new Map<string, number>() };
 app.use((req: Request, _res: Response, next: NextFunction) => {
   reqStats.total += 1;
-  const route = "/" + req.path.split("/").filter(Boolean).slice(0, 2).join("/");
+  const route = routeKey(req.path);
   reqStats.byRoute.set(route, (reqStats.byRoute.get(route) ?? 0) + 1);
   next();
 });
@@ -141,6 +147,8 @@ app.get("/api/ops", (req: Request, res: Response) => {
     uptimeSec: Math.round(process.uptime()),
     memory: { rssMB: mb(mem.rss), heapUsedMB: mb(mem.heapUsed) },
     chat: { ...chat, utilizationPct: Math.round((chat.active / chat.max) * 100) },
+    chatSpend: chatSpendStatus(), // charged turns in the trailing 24h vs both daily ceilings
+    mcpSessions: transports.size,
     wallet: walletOps24h(), // house-wallet circuit-breaker state: 24h op count + notional vs caps
     yields: yieldSummary(), // measured syrupUSDG APY (pool-price drift) + $INDEX distribution APR
     backups: backupStatus(), // Postgres mirror of the durable files: alive, last run, restores
@@ -158,7 +166,48 @@ app.get("/api/ops", (req: Request, res: Response) => {
 // Live sessions keyed by the id the transport hands out on initialize. The
 // OpenHermit client keeps one session across initialize -> tools/list -> calls,
 // so the transport must persist between requests.
-const transports = new Map<string, StreamableHTTPServerTransport>();
+//
+// Sessions are created anonymously (initialize needs no auth, x402 is the
+// paywall on the tools themselves), so this map is reachable by anyone. Two
+// bounds keep it finite: a hard cap on concurrent sessions, and an idle sweep,
+// because a client that walks away without sending DELETE never fires onclose
+// and its transport would otherwise sit here for the life of the process.
+const MCP_SESSION_TTL_MS = Number(process.env.MCP_SESSION_TTL_MS ?? 30 * 60 * 1000);
+const MCP_MAX_SESSIONS = Number(process.env.MCP_MAX_SESSIONS ?? 500);
+const MCP_SWEEP_MS = 60_000;
+
+interface McpSession {
+  transport: StreamableHTTPServerTransport;
+  lastSeenAt: number;
+}
+const transports = new Map<string, McpSession>();
+
+/** Look a session up and stamp it as alive. Anything not looked up decays. */
+function touchSession(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
+  if (!sessionId) return undefined;
+  const entry = transports.get(sessionId);
+  if (!entry) return undefined;
+  entry.lastSeenAt = Date.now();
+  return entry.transport;
+}
+
+function sweepMcpSessions(): void {
+  const cutoff = Date.now() - MCP_SESSION_TTL_MS;
+  let closed = 0;
+  for (const [id, entry] of transports) {
+    if (entry.lastSeenAt > cutoff) continue;
+    transports.delete(id);
+    closed++;
+    // Best effort: closing frees the underlying stream, and a throw here must
+    // not stop the sweep from reaching the rest of the map.
+    try {
+      void entry.transport.close();
+    } catch {}
+  }
+  if (closed) console.error(`[meridian-mcp] swept ${closed} idle session(s); ${transports.size} live`);
+}
+const mcpSweepTimer = setInterval(sweepMcpSessions, MCP_SWEEP_MS);
+mcpSweepTimer.unref?.();
 
 // Constant-time bearer check. Token comparison with `===` leaks length and
 // prefix through timing; this matches the timingSafeEqual pattern already used
@@ -223,6 +272,26 @@ function mcpRequestAllowed(req: Request): boolean {
   if (EXECUTE_TOOLS.has(tool)) return executeAuthorized(req);
   if (OPERATOR_ONLY_TOOLS.has(tool)) return authorized(req);
   return true; // data/signal tools; priced ones hit the x402 gate downstream
+}
+
+/**
+ * Which tool list a session is served. Both gateway registrations point at this
+ * one /mcp endpoint (the operator "meridian" server carries the shared bearer
+ * in its headers, the credential-free "meridian-public" one carries nothing),
+ * so the audience has to be a property of the REQUEST, not of the route.
+ *
+ * A caller that could pass a write gate gets the full historical surface; a
+ * credential-free caller gets the tools it can actually use, which is the whole
+ * saving: definitions are re-sent on every model turn.
+ *
+ * This is NOT a gate and must never be mistaken for one. mcpRequestAllowed
+ * still runs on every tools/call, so a caller that names a tool missing from
+ * its own list is refused by exactly the same token check as before. Sessions
+ * hold whichever server they were built with, and session ids are random
+ * UUIDs, so an audience cannot be swapped mid-session by guessing one.
+ */
+function mcpAudience(req: Request): McpAudience {
+  return authorized(req) || executeAuthorized(req) ? "operator" : "public";
 }
 
 // The trade route signs with the agent's real wallet, so it gets a stricter
@@ -596,10 +665,17 @@ function requireWallet(req: Request, res: Response): string | null {
   return address;
 }
 
-// Synchronous chat guards: #4 per-wallet rate limit, then #2 per-wallet
-// single-flight. Returns an error to send, or null to proceed. When it returns
-// null the caller holds the wallet's single-flight lock and MUST endTurn().
-function chatGuardSync(address: string): { status: number; error: string } | null {
+// Synchronous chat guards: #1 the daily spend ceilings, then #4 per-wallet rate
+// limit, then #2 per-wallet single-flight. Returns an error to send, or null to
+// proceed. When it returns null the caller holds the wallet's single-flight lock
+// and MUST endTurn().
+function chatGuardSync(address: string): { status: number; error: string; code?: string } | null {
+  // The daily ceilings first: they are the only guard that BOUNDS spend rather
+  // than shaping it, and they are the cheapest to evaluate (one cached fold).
+  // Rejecting here also costs no token from the bucket and takes no lock, so a
+  // capped wallet cannot be told it is capped and rate limited on the same try.
+  const ceiling = chatSpendBlocked(address);
+  if (ceiling) return { status: ceiling.status, error: ceiling.error, code: ceiling.code };
   if (!rateLimitOk(address)) {
     return { status: 429, error: "you're sending messages faster than your agent can think — give it a moment" };
   }
@@ -703,7 +779,7 @@ app.post("/api/my-agent/message", async (req: Request, res: Response) => {
   if (!text) { res.status(400).json({ ok: false, error: "empty message" }); return; }
   if (text.length > 2000) { res.status(400).json({ ok: false, error: "message too long (2000 char max)" }); return; }
   const guard = chatGuardSync(address);
-  if (guard) { res.status(guard.status).json({ ok: false, error: guard.error }); return; }
+  if (guard) { res.status(guard.status).json({ ok: false, code: guard.code, error: guard.error }); return; }
   if (await gateBlocked(address, res)) { endTurn(address); return; }
   // One credit per user-initiated turn. Debit lives ONLY on this route and
   // /stream: system-driven turns (scout runs, sessionKind sessions) call the
@@ -764,7 +840,7 @@ app.post("/api/my-agent/stream", async (req: Request, res: Response) => {
   // Guards BEFORE the SSE headers, so an overflow gets a clean JSON error
   // rather than a half-open stream.
   const guard = chatGuardSync(address);
-  if (guard) { res.status(guard.status).json({ ok: false, error: guard.error }); return; }
+  if (guard) { res.status(guard.status).json({ ok: false, code: guard.code, error: guard.error }); return; }
   if (await gateBlocked(address, res)) { endTurn(address); return; }
   // Same debit placement as /message: after the guards, before the SSE headers
   // and the slot wait, so an out-of-credits wallet gets a clean JSON 402.
@@ -799,11 +875,38 @@ app.post("/api/my-agent/stream", async (req: Request, res: Response) => {
   const ac = new AbortController();
   res.on("close", () => ac.abort());
 
+  // Server-side idle watchdog. A gateway that stops emitting mid-stream leaves
+  // the for-await below waiting forever, and with it a global chat slot and this
+  // wallet's single-flight lock, which is how one hung upstream turn wedges a
+  // wallet out of chat until the process restarts. The clock runs on the GAP
+  // between events, not on the whole turn, so a long answer that keeps producing
+  // is never cut off. Armed before the first await so a gateway that never
+  // answers at all is covered too, re-armed on every event, cleared in finally.
+  let watchdogFired = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armWatchdog = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      // The client got there first, so this is their hangup, not our timeout.
+      // Claiming it would turn a cancelled stream into a refund.
+      if (ac.signal.aborted) return;
+      watchdogFired = true;
+      console.error(`[my-agent] stream idle for ${streamIdleTimeoutMs()}ms with ${deltas} deltas, aborting a wedged turn`);
+      ac.abort();
+    }, streamIdleTimeoutMs());
+  };
+  // The watchdog aborts the SAME controller the client hangup uses, so
+  // `ac.signal.aborted` alone can no longer mean "the user left". Refund and
+  // error-frame decisions below ask this instead.
+  const clientHungUp = () => ac.signal.aborted && !watchdogFired;
+
   let deltas = 0;
   let sawError = false;
   try {
+    armWatchdog();
     const stream = await streamUserAgent(address, text, ac.signal);
     for await (const ev of stream) {
+      armWatchdog();
       if (ev.type === "text_delta") { deltas++; send({ type: "delta", text: sanitizeChunk(ev.text) }); }
       else if (ev.type === "text_final") send({ type: "final", text: sanitizeChunk(ev.text) });
       else if (ev.type === "tool_call") send({ type: "tool", tool: ev.tool });
@@ -817,13 +920,18 @@ app.post("/api/my-agent/stream", async (req: Request, res: Response) => {
     console.error(`[my-agent] stream ok: ${deltas} deltas`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[my-agent] stream failed (aborted=${ac.signal.aborted}, deltas=${deltas}):`, msg);
+    console.error(`[my-agent] stream failed (aborted=${ac.signal.aborted}, watchdog=${watchdogFired}, deltas=${deltas}):`, msg);
     // A hard failure before any output means the user paid for nothing: refund.
     // A client abort is the user's own hangup, and a stream that already
-    // delivered text was a real (if truncated) answer, so neither refunds.
-    if (!ac.signal.aborted && deltas === 0) refundCredit(address, 1, "refund:error");
-    if (!ac.signal.aborted) send({ type: "error", message: "your agent could not respond just now — try again shortly" });
+    // delivered text was a real (if truncated) answer, so neither refunds. A
+    // watchdog abort is NOT the user leaving: they are still on the other end,
+    // still owed an answer, and if nothing arrived they are owed the credit.
+    if (!clientHungUp() && deltas === 0) refundCredit(address, 1, "refund:error");
+    if (!clientHungUp()) {
+      send({ type: "error", message: watchdogFired ? "your agent stopped responding partway through, try again shortly" : "your agent could not respond just now, try again shortly" });
+    }
   } finally {
+    clearTimeout(idleTimer);
     res.end();
     releaseSlot();
     endTurn(address);
@@ -1160,16 +1268,41 @@ app.post("/api/earn/scout", async (req: Request, res: Response) => {
   const allowed = scoutAllowed(address);
   if (!allowed.ok) { res.status(429).json({ ok: false, error: allowed.reason }); return; }
   const guard = chatGuardSync(address);
-  if (guard) { res.status(guard.status).json({ ok: false, error: guard.error }); return; }
+  if (guard) { res.status(guard.status).json({ ok: false, code: guard.code, error: guard.error }); return; }
+  // A scout run is a full LLM turn, so it is charged like one. Same position and
+  // shape as /api/my-agent/message: after the guards so a rate-limited retry
+  // costs nothing, before the slot wait so a wallet at zero never occupies
+  // capacity it cannot pay for. This route ran the model for free until now.
+  const spend = trySpend(address);
+  if (!spend.ok) {
+    endTurn(address);
+    res.status(402).json({ ok: false, code: "out_of_credits", error: "you're out of credits. grab a pack to keep talking to your agent.", balance: spend.balance });
+    return;
+  }
   const slot = await acquireSlot();
-  if (!slot) { endTurn(address); res.status(503).json({ ok: false, error: "high demand right now — try again in a few seconds" }); return; }
+  if (!slot) {
+    refundCredit(address, 1, "refund:busy"); // never reached the agent, never charged
+    endTurn(address);
+    res.status(503).json({ ok: false, error: "high demand right now, try again in a few seconds" });
+    return;
+  }
   try {
-    res.json(await runScout(address));
+    const { refundable, ...result } = await runScout(address);
+    // The gateway reports some failures as a resolved reply carrying an error
+    // instead of throwing. A run that produced nothing is refunded, same as on
+    // /message, rather than silently charged.
+    const credits = refundable ? refundCredit(address, 1, "refund:agent-error") : spend.balance;
+    res.json({ ...result, credits });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[earn/scout] failed:", msg);
+    // A failed turn is never charged, with the same timeout exception /message
+    // documents: a timed-out run very likely completed on the gateway's side and
+    // really did spend the tokens, so refunding it would hand out free turns to
+    // anyone who can make a run go long.
+    if (!/timed?\s*out|timeout/i.test(msg)) refundCredit(address, 1, "refund:error");
     const status = msg === "gateway_unconfigured" ? 503 : 502;
-    res.status(status).json({ ok: false, error: "your agent could not scout just now — try again shortly" });
+    res.status(status).json({ ok: false, error: "your agent could not scout just now, try again shortly" });
   } finally {
     releaseSlot();
     endTurn(address);
@@ -1393,7 +1526,7 @@ app.post("/mcp", async (req: Request, res: Response) => {
   if (!(await checkPayment(req, res))) return;
 
   const sessionId = req.header("mcp-session-id");
-  let transport = sessionId ? transports.get(sessionId) : undefined;
+  let transport = touchSession(sessionId);
 
   if (!transport) {
     if (sessionId || !isInitializeRequest(req.body)) {
@@ -1404,17 +1537,29 @@ app.post("/mcp", async (req: Request, res: Response) => {
       });
       return;
     }
+    // Sweep before refusing: the cap exists to bound the map, not to lock the
+    // server out of new sessions because old ones were never closed cleanly.
+    if (transports.size >= MCP_MAX_SESSIONS) sweepMcpSessions();
+    if (transports.size >= MCP_MAX_SESSIONS) {
+      console.error(`[meridian-mcp] session cap reached (${transports.size}/${MCP_MAX_SESSIONS}), refusing new sessions`);
+      res.status(503).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "too many open MCP sessions right now, try again shortly" },
+        id: null,
+      });
+      return;
+    }
     // New session: fresh transport + server, registered once the handshake completes.
     transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
-        transports.set(id, transport!);
+        transports.set(id, { transport: transport!, lastSeenAt: Date.now() });
       },
     });
     transport.onclose = () => {
       if (transport!.sessionId) transports.delete(transport!.sessionId);
     };
-    await buildServer().connect(transport);
+    await buildServer({ audience: mcpAudience(req) }).connect(transport);
   }
 
   try {
@@ -1433,9 +1578,7 @@ async function replaySessionRequest(req: Request, res: Response) {
     res.status(401).json({ error: "unauthorized" });
     return;
   }
-  const transport = req.header("mcp-session-id")
-    ? transports.get(req.header("mcp-session-id")!)
-    : undefined;
+  const transport = touchSession(req.header("mcp-session-id"));
   if (!transport) {
     res.status(400).json({ error: "unknown or missing session id" });
     return;

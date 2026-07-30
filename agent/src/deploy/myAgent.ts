@@ -73,9 +73,40 @@ const ENSURE_TTL_MS = 5 * 60 * 1000;
 // auto-create). Track which we've opened this process so we open once.
 const openedSessions = new Set<string>();
 
+const DEFAULT_GATEWAY_TIMEOUT_MS = 120_000;
+
+/** Wall-clock deadline for one gateway HTTP call. Floored in code: a mistyped
+ *  zero would abort every call before it left the box. */
+function gatewayTimeoutMs(): number {
+  const raw = Number(process.env.GATEWAY_TIMEOUT_MS ?? DEFAULT_GATEWAY_TIMEOUT_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_GATEWAY_TIMEOUT_MS;
+  return Math.max(1000, Math.floor(raw));
+}
+
+/**
+ * Every gateway call, with a deadline.
+ *
+ * The SDK's own `timeout` option is a QUERY PARAMETER: it tells the far side how
+ * long to keep working and never arms an AbortSignal here, so a gateway that
+ * accepts a connection and then goes quiet leaves the fetch pending forever, and
+ * with it whatever the caller was holding (a chat slot, a wallet's single-flight
+ * lock). Verified against node_modules/@openhermit/sdk: GatewayClientOptions
+ * takes a `fetch` and hands the same implementation to every agent(...) client,
+ * so this one wrapper covers the whole surface.
+ *
+ * A caller-supplied signal is left strictly alone. That is the streaming path,
+ * where the lifetime is owned by the route (client hangup plus its own idle
+ * watchdog) and a flat wall-clock deadline would truncate a long answer that was
+ * still arriving.
+ */
+const timedFetch: typeof fetch = (input, init) => {
+  if (init?.signal) return fetch(input, init);
+  return fetch(input, { ...init, signal: AbortSignal.timeout(gatewayTimeoutMs()) });
+};
+
 function gateway(): GatewayClient | null {
   if (!config.gatewayAdminToken || !config.gatewayUrl) return null;
-  return new GatewayClient({ baseUrl: config.gatewayUrl, token: config.gatewayAdminToken });
+  return new GatewayClient({ baseUrl: config.gatewayUrl, token: config.gatewayAdminToken, fetch: timedFetch });
 }
 
 // User chat agents connect to Meridian through THIS registration, which carries
@@ -239,6 +270,28 @@ function personaFor(address: string): string {
     .join("\n");
 }
 
+/**
+ * Introspection for USER chat agents only, and off by default.
+ *
+ * This is a cost decision, not a quality one. Introspection spends extra model
+ * calls per agent on top of the turn the person actually asked for, and a chat
+ * turn is already mostly input tokens. What is lost is the agent's own
+ * between-turn reflection: the "introspection" entries in the thread, and
+ * whatever self-summarising the gateway does with them. What is kept is
+ * everything the user sees: persona, settings, session history and tools.
+ *
+ * MERIDIAN_USER_INTROSPECTION=on restores it without a deploy of new code.
+ * Scoped to ensureUserAgent, so the research fleet and the house agents keep
+ * whatever their own provisioning gives them.
+ */
+function userMemoryConfig(currentMemory: unknown): Record<string, unknown> {
+  const base = currentMemory && typeof currentMemory === "object" ? { ...(currentMemory as Record<string, unknown>) } : {};
+  const currentIntrospection =
+    base.introspection && typeof base.introspection === "object" ? (base.introspection as Record<string, unknown>) : {};
+  const on = (process.env.MERIDIAN_USER_INTROSPECTION ?? "").toLowerCase() === "on";
+  return { ...base, introspection: { ...currentIntrospection, enabled: on } };
+}
+
 export interface EnsureResult {
   agentId: string;
   ready: boolean;
@@ -292,7 +345,7 @@ export async function ensureUserAgent(address: string): Promise<EnsureResult> {
     // Backfill required fields defensively in case an agent from an earlier
     // build has a partial config; new agents already carry the gateway default.
     workspace_root: typeof current.workspace_root === "string" ? current.workspace_root : `/agents/${agentId}`,
-    memory: current.memory && typeof current.memory === "object" ? current.memory : { introspection: {} },
+    memory: userMemoryConfig(current.memory),
     model: {
       ...curModel,
       provider: process.env.MERIDIAN_USER_MODEL_PROVIDER ?? "openrouter",

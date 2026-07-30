@@ -65,8 +65,31 @@ const VenueSchema = z.object({
   signalAsOf: z.string().optional(),
 });
 
-export function buildServer(): McpServer {
+/**
+ * Who the tool list is being rendered for.
+ *
+ * "operator" is the historical, complete surface and stays the default, so any
+ * caller that does not opt in sees exactly what it saw before.
+ *
+ * "public" omits the tools a credential-free caller can never successfully
+ * call. This is a PAYLOAD reduction, NOT a security boundary. The gate is still
+ * index.ts's mcpRequestAllowed (EXECUTE_TOOLS -> executeAuthorized,
+ * OPERATOR_ONLY_TOOLS -> authorized) plus the tokens themselves, and those
+ * checks are unchanged and unmoved. Never reason "it is safe because the public
+ * build hides it": assume a caller knows every tool name, because tool names
+ * are public knowledge the moment one operator session lists them.
+ */
+export type McpAudience = "public" | "operator";
+
+export interface BuildServerOptions {
+  audience?: McpAudience;
+}
+
+export function buildServer(opts: BuildServerOptions = {}): McpServer {
   const server = new McpServer({ name: "meridian", version: "0.1.0" });
+  // Tool definitions are re-sent in full on every model turn, so a tool the
+  // audience is structurally forbidden to call is pure recurring cost.
+  const privileged = (opts.audience ?? "operator") === "operator";
 
   server.registerTool(
     "meridian_list_chains",
@@ -150,7 +173,7 @@ export function buildServer(): McpServer {
     {
       title: "Perp venue feed (Lighter on Robinhood Chain)",
       description:
-        "Live snapshot of the zero-fee zk-orderbook perp venue on Robinhood Chain: all markets with price, 24h volume, trade count, Lighter-native funding (flagged when it moves off baseline), Binance reference funding, and spot-vs-perp basis against Meridian's depth-verified v4 pools. The venue carries ~1000x the AMM's flow; this feed is the only machine-readable view of it. Priced per call via x402.",
+        "Live snapshot of the zero-fee zk-orderbook perp venue on Robinhood Chain: every market with price, 24h volume, trade count, Lighter-native funding (flagged when it moves off baseline), Binance reference funding, and spot-vs-perp basis against Meridian's depth-verified v4 pools. Priced per call via x402.",
       inputSchema: {},
     },
     async () => json(await perpSnapshot()),
@@ -183,7 +206,7 @@ export function buildServer(): McpServer {
     {
       title: "Recent agent decisions and reasoning",
       description:
-        "The trading strategy's recent evaluations — action taken (or held), the reasoning trace behind it, and when. Populated by a background loop that re-evaluates on a timer (AGENT_THINK_INTERVAL_MS) even with no caller, plus every meridian_suggest_route call. Read-only, free — this is the same feed the frontend's live monitor polls.",
+        "The trading strategy's recent evaluations: action taken (or held), the reasoning behind it, and when. Same feed the live desk shows. Read-only, free.",
       inputSchema: { limit: z.number().int().positive().max(50).optional() },
     },
     async ({ limit }) => json({ decisions: decisionLog.recent(limit ?? 20) }),
@@ -219,97 +242,104 @@ export function buildServer(): McpServer {
     },
   );
 
-  server.registerTool(
-    "meridian_bridge_execute",
-    {
-      title: "Execute a cross-chain bridge",
-      description:
-        "Execute a cross-chain move of an RWA position via Wormhole. Mutating: subject to Meridian's per-trade and daily spend caps. Settles the routing fee via x402 before moving anything; the trade itself is never x402-gated, only the routing fee is. Refuses (fee-free) while the bridge leg is not live. Gate this behind an OpenHermit approval policy in production.",
-      inputSchema: {
-        symbol: z.string(),
-        amountUsd: z.number().positive(),
-        destChain: z.enum(CHAIN_IDS),
-        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
-      },
-    },
-    async ({ symbol, amountUsd, destChain, payer }) => {
-      const asset = market.getAsset(symbol);
-      if (!asset) return json({ error: `unknown symbol: ${symbol}` });
-      const sized = risk.size(amountUsd);
-      const gate = risk.check(sized);
-      if (!gate.ok) return json({ success: false, error: gate.reason });
-
-      // The Wormhole leg is still a stub: refuse BEFORE settling the fee, so a
-      // caller can never pay real USDG for a move that does not happen.
-      if (bridge.isStub) {
-        return json({
-          success: false,
-          error: "cross-chain bridging is not live on this deployment; no fee charged, no funds moved",
-        });
-      }
-
-      const feeUsd = routingFeeUsd(sized);
-      const feeReceipt = await x402.pay({
-        amountUsd: feeUsd,
-        payer,
-        memo: `bridge routing fee: ${symbol} -> ${destChain}`,
-      });
-      if (!feeReceipt.success) {
-        return json({ success: false, error: feeReceipt.error ?? "x402 fee settlement failed" });
-      }
-
-      const result = await bridge.moveValue({ asset, amountUsd: sized, destChain: destChain as ChainId });
-      if (result.success) risk.record(sized);
-      return json({ ...result, amountUsd: sized, feeUsd, feeReceipt, spentTodayUsd: risk.spentTodayUsd });
-    },
-  );
-
-  server.registerTool(
-    "meridian_index_execute",
-    {
-      title: "Execute a trade on The Index",
-      description:
-        "Swap between tokenized equities on The Index (theindex.finance, Uniswap v4 pools on Robinhood Chain). Same-chain execution, distinct from meridian_bridge_execute's cross-chain moves: an Index rotation never leaves Robinhood Chain. Settles a routing fee via x402 before swapping (signed by Meridian's executing wallet; payer is attribution only); subject to per-trade and daily spend caps.",
-      inputSchema: {
-        fromSymbol: z.string().describe("Index ticker to sell, e.g. TSLA"),
-        toSymbol: z.string().describe("Index ticker to buy, e.g. NVDA"),
-        amountUsd: z.number().positive(),
-        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
-      },
-    },
-    async ({ fromSymbol, toSymbol, amountUsd, payer }) =>
-      json(await executeIndexTrade({ fromSymbol, toSymbol, amountUsd, payer })),
-  );
-
-  server.registerTool(
-    "meridian_index_yield_execute",
-    {
-      title: "Enter or exit the $INDEX yield position",
-      description:
-        "Execute the ETH<->$INDEX leg IndexYieldStrategy's enter_index/exit_index decisions describe — distinct from meridian_index_execute, which swaps between stock tickers. Settles a routing fee via x402 before swapping; subject to per-trade and daily spend caps. On success, confirms the strategy's tracked position (evaluate() itself only proposes, never mutates state).",
-      inputSchema: {
-        side: z.enum(["enter", "exit"]).describe("enter: ETH -> $INDEX. exit: $INDEX -> ETH."),
-        amountUsd: z.number().positive(),
-        payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
-      },
-    },
-    async ({ side, amountUsd, payer }) => {
-      const outcome = await executeIndexYieldTrade({ side, amountUsd, payer });
-      decisionLog.record("index-yield-manual", {
-        timestamp: Date.now(),
-        action: side === "enter" ? "enter_index" : "exit_index",
-        reason: `manual $INDEX ${side}`,
-        thoughts: [`Executed directly (not the background loop): ${side === "enter" ? "bought" : "sold"} $${amountUsd} of $INDEX.`],
-        execution: {
-          success: outcome.success,
-          txHash: "txHash" in outcome ? outcome.txHash : undefined,
-          amountReceived: "amountReceived" in outcome ? outcome.amountReceived : undefined,
-          error: outcome.error,
+  // The fund-moving tools. index.ts gates these on the SEPARATE execute token
+  // (EXECUTE_TOOLS -> executeAuthorized), which lives in no gateway
+  // registration at all, and that gate is unchanged and unmoved. Leaving them
+  // out of a public tool list is not what makes them safe; it just stops us
+  // paying to describe them to callers who can never pass the gate.
+  if (privileged) {
+    server.registerTool(
+      "meridian_bridge_execute",
+      {
+        title: "Execute a cross-chain bridge",
+        description:
+          "Execute a cross-chain move of an RWA position via Wormhole. Mutating: subject to Meridian's per-trade and daily spend caps. Settles the routing fee via x402 before moving anything; the trade itself is never x402-gated, only the routing fee is. Refuses (fee-free) while the bridge leg is not live. Gate this behind an OpenHermit approval policy in production.",
+        inputSchema: {
+          symbol: z.string(),
+          amountUsd: z.number().positive(),
+          destChain: z.enum(CHAIN_IDS),
+          payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
         },
-      });
-      return json(outcome);
-    },
-  );
+      },
+      async ({ symbol, amountUsd, destChain, payer }) => {
+        const asset = market.getAsset(symbol);
+        if (!asset) return json({ error: `unknown symbol: ${symbol}` });
+        const sized = risk.size(amountUsd);
+        const gate = risk.check(sized);
+        if (!gate.ok) return json({ success: false, error: gate.reason });
+
+        // The Wormhole leg is still a stub: refuse BEFORE settling the fee, so a
+        // caller can never pay real USDG for a move that does not happen.
+        if (bridge.isStub) {
+          return json({
+            success: false,
+            error: "cross-chain bridging is not live on this deployment; no fee charged, no funds moved",
+          });
+        }
+
+        const feeUsd = routingFeeUsd(sized);
+        const feeReceipt = await x402.pay({
+          amountUsd: feeUsd,
+          payer,
+          memo: `bridge routing fee: ${symbol} -> ${destChain}`,
+        });
+        if (!feeReceipt.success) {
+          return json({ success: false, error: feeReceipt.error ?? "x402 fee settlement failed" });
+        }
+
+        const result = await bridge.moveValue({ asset, amountUsd: sized, destChain: destChain as ChainId });
+        if (result.success) risk.record(sized);
+        return json({ ...result, amountUsd: sized, feeUsd, feeReceipt, spentTodayUsd: risk.spentTodayUsd });
+      },
+    );
+
+    server.registerTool(
+      "meridian_index_execute",
+      {
+        title: "Execute a trade on The Index",
+        description:
+          "Swap between tokenized equities on The Index (theindex.finance, Uniswap v4 pools on Robinhood Chain). Same-chain execution, distinct from meridian_bridge_execute's cross-chain moves: an Index rotation never leaves Robinhood Chain. Settles a routing fee via x402 before swapping (signed by Meridian's executing wallet; payer is attribution only); subject to per-trade and daily spend caps.",
+        inputSchema: {
+          fromSymbol: z.string().describe("Index ticker to sell, e.g. TSLA"),
+          toSymbol: z.string().describe("Index ticker to buy, e.g. NVDA"),
+          amountUsd: z.number().positive(),
+          payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
+        },
+      },
+      async ({ fromSymbol, toSymbol, amountUsd, payer }) =>
+        json(await executeIndexTrade({ fromSymbol, toSymbol, amountUsd, payer })),
+    );
+
+    server.registerTool(
+      "meridian_index_yield_execute",
+      {
+        title: "Enter or exit the $INDEX yield position",
+        description:
+          "Execute the ETH<->$INDEX leg IndexYieldStrategy's enter_index/exit_index decisions describe, distinct from meridian_index_execute, which swaps between stock tickers. Settles a routing fee via x402 before swapping; subject to per-trade and daily spend caps. On success, confirms the strategy's tracked position (evaluate() itself only proposes, never mutates state).",
+        inputSchema: {
+          side: z.enum(["enter", "exit"]).describe("enter: ETH -> $INDEX. exit: $INDEX -> ETH."),
+          amountUsd: z.number().positive(),
+          payer: z.string().describe("Wallet the trade is attributed to in receipts. Fee settlement is signed by Meridian's executing wallet; this field does not choose the signer."),
+        },
+      },
+      async ({ side, amountUsd, payer }) => {
+        const outcome = await executeIndexYieldTrade({ side, amountUsd, payer });
+        decisionLog.record("index-yield-manual", {
+          timestamp: Date.now(),
+          action: side === "enter" ? "enter_index" : "exit_index",
+          reason: `manual $INDEX ${side}`,
+          thoughts: [`Executed directly (not the background loop): ${side === "enter" ? "bought" : "sold"} $${amountUsd} of $INDEX.`],
+          execution: {
+            success: outcome.success,
+            txHash: "txHash" in outcome ? outcome.txHash : undefined,
+            amountReceived: "amountReceived" in outcome ? outcome.amountReceived : undefined,
+            error: outcome.error,
+          },
+        });
+        return json(outcome);
+      },
+    );
+  }
 
   server.registerTool(
     "meridian_settle_x402",
@@ -334,7 +364,7 @@ export function buildServer(): McpServer {
     {
       title: "Query the RWA market universe",
       description:
-        "Search the venues discovered by Meridian's RWA research fleet — every tokenized-RWA venue/issuer/protocol collected so far, across every segment (treasuries, private credit, real estate, equities, commodities, MMFs, bonds, trade finance, carbon, funds, aggregators, cross-chain infra). Filter by segment, chain, or free-text query; omit all three to get everything (capped at 200).",
+        "Search every tokenized-RWA venue Meridian's research fleet has collected, across all segments (treasuries, private credit, real estate, equities, commodities, MMFs, bonds, trade finance, carbon, funds, aggregators, cross-chain infra). Filter by segment, chain, or free text; omit all three for everything (capped at 200).",
       inputSchema: {
         segment: z.string().optional().describe("substring match against a venue's segment, e.g. 'treasur'"),
         chain: z.string().optional().describe("substring match against a venue's chains, e.g. 'ethereum'"),
@@ -374,22 +404,29 @@ export function buildServer(): McpServer {
     },
   );
 
-  server.registerTool(
-    "meridian_submit_research",
-    {
-      title: "Submit RWA research findings",
-      description:
-        "Called by a segment research agent to upsert venues it has discovered/enriched into Meridian's shared RWA universe. Matches on venue name (case/punctuation-insensitive) — resubmitting an existing venue updates its fields rather than duplicating it.",
-      inputSchema: {
-        submittedBy: z.string().optional().describe("the research agent's id, e.g. rwa-research-treasuries"),
-        venues: z.array(VenueSchema).min(1),
+  // Research-pipeline write, gated on the shared operator bearer by index.ts
+  // (OPERATOR_ONLY_TOOLS -> authorized). That gate is unchanged and is still the
+  // only thing that decides a call. Omitting the definition for a public
+  // audience is a cost decision: nobody without the bearer can use it, so
+  // nobody without the bearer should pay to read it every turn.
+  if (privileged) {
+    server.registerTool(
+      "meridian_submit_research",
+      {
+        title: "Submit RWA research findings",
+        description:
+          "Called by a segment research agent to upsert venues it has discovered/enriched into Meridian's shared RWA universe. Matches on venue name (case/punctuation-insensitive): resubmitting an existing venue updates its fields rather than duplicating it.",
+        inputSchema: {
+          submittedBy: z.string().optional().describe("the research agent's id, e.g. rwa-research-treasuries"),
+          venues: z.array(VenueSchema).min(1),
+        },
       },
-    },
-    async ({ submittedBy, venues }) => {
-      const result = universe.upsertMany(venues, submittedBy);
-      return json({ ok: true, ...result });
-    },
-  );
+      async ({ submittedBy, venues }) => {
+        const result = universe.upsertMany(venues, submittedBy);
+        return json({ ok: true, ...result });
+      },
+    );
+  }
 
   /**
    * Token launching, agent-native.
@@ -410,8 +447,14 @@ export function buildServer(): McpServer {
     "meridian_launch_token",
     {
       title: "Prepare a token launch on Robinhood Chain",
+      // Short on purpose: this is re-sent on every turn of every chat, most of
+      // which are about something else. What the USER must be told (bonding
+      // curve, graduation odds, the commission on tax styles) is in the agent
+      // persona and on the LaunchCard at signing time, which is where they can
+      // actually read it. Nothing was dropped from the product, only from the
+      // per-turn bill.
       description:
-        "Prepare a token launch on Robinhood Chain via the on-chain launchpad, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet — this tool never signs, never holds funds, and never spends. The token address is deterministic (CREATE2) and is reported before signing. Choose a style: 'standard' is a plain ERC-20 with no tax; the tax styles ('marketing', 'dividend', 'deflationary', 'liquidity') take a percentage of every trade and route it differently. Tokens trade on a bonding curve and graduate to a Uniswap V2 pair at ~80% of supply sold; before graduation, transfers to or from any pool are blocked by the protocol.",
+        "Prepare a token launch on Robinhood Chain via the Flap launchpad, simulated against the live chain. Returns an UNSIGNED transaction for the user to sign in their own wallet: never signs, never holds funds, never spends. Styles: 'standard' is a plain ERC-20 with no tax; 'marketing', 'dividend', 'deflationary' and 'liquidity' take a cut of every trade and route it differently. Flap tokens trade on a bonding curve and only reach a Uniswap V2 pair if ~80% of supply sells.",
       inputSchema: {
         name: z.string().min(1).max(64).describe("Token name, e.g. 'Meridian Test'"),
         symbol: z.string().min(1).max(16).describe("Ticker, e.g. MTEST"),
@@ -564,8 +607,14 @@ export function buildServer(): McpServer {
     "meridian_launch_token_pons",
     {
       title: "Prepare a token launch on PONS (Robinhood Chain)",
+      // Short on purpose, same reasoning as meridian_launch_token above. The
+      // full terms (locked liquidity, the fee split and that fees must be
+      // claimed, the anti-sniper window, where the initial buy lands) are read
+      // off the chain per launch and returned in this tool's OWN result, which
+      // the LaunchCard renders above the sign button. The persona carries them
+      // too. Sending them here as well only taxed unrelated turns.
       description:
-        "Prepare a token launch on Robinhood Chain via the PONS launch factory, and simulate it against the live chain before returning. Returns an UNSIGNED transaction for the user to sign in their own wallet: this tool never signs, never holds funds, and never spends. How a PONS launch works: a fixed supply of 1,000,000,000 tokens is minted straight into a single Uniswap v3 position paired against WETH at a 1% pool fee, and that position is transferred to the PONS locker and locked permanently, so nobody can remove the liquidity, not the creator and not Meridian. There is no bonding curve of the Flap kind and no graduation step to wait for: the token is tradeable immediately. For a short anti-sniper window of a couple of blocks after launch, buys from the pool are capped per wallet and buying in the launch block itself is blocked; after that window the token trades with no maximum wallet and no maximum transaction. Trading fees collect into the locked position, PONS keeps a percentage of every claim and the creator gets the rest, and someone has to call collectFees on the locker to claim them: they are not streamed automatically. The creator pays a launch fee read live from the contract, plus whatever they choose to spend on their own first buy.",
+        "Prepare a token launch on Robinhood Chain via the PONS launch factory, simulated against the live chain. Returns an UNSIGNED transaction for the user to sign in their own wallet: never signs, never holds funds, never spends. A fixed supply of 1,000,000,000 goes into one Uniswap v3 position paired against WETH, locked permanently in the PONS locker, so there is no bonding curve and no graduation: the token is tradable immediately. The creator pays a launch fee read live from the contract plus any first buy they choose. The exact economics come back in the result; state them from there, do not guess.",
       inputSchema: {
         creator: z
           .string()
@@ -573,19 +622,23 @@ export function buildServer(): McpServer {
           .describe("The wallet that will sign, fund and own the launch. Must be the user's own wallet."),
         name: z.string().min(1).max(64).describe("Token name, e.g. 'Meridian Test'"),
         symbol: z.string().min(1).max(16).describe("Ticker, e.g. MTEST"),
-        logo: z.string().optional().describe("URL or IPFS URI for the token image, stored on-chain in the token's params. Optional."),
-        description: z.string().optional().describe("Short description stored on-chain with the token. Optional."),
-        twitter: z.string().optional().describe("Twitter/X URL or handle for the token. Optional."),
-        telegram: z.string().optional().describe("Telegram URL for the token. Optional."),
-        discord: z.string().optional().describe("Discord invite URL for the token. Optional."),
-        website: z.string().optional().describe("Website URL for the token. Optional."),
-        farcaster: z.string().optional().describe("Farcaster profile or channel URL for the token. Optional."),
+        logo: z.string().optional().describe("Token image URL or IPFS URI, stored on-chain. Optional."),
+        description: z.string().optional().describe("Short description, stored on-chain. Optional."),
+        twitter: z.string().optional().describe("Twitter/X URL or handle. Optional."),
+        telegram: z.string().optional().describe("Telegram URL. Optional."),
+        discord: z.string().optional().describe("Discord invite URL. Optional."),
+        website: z.string().optional().describe("Website URL. Optional."),
+        farcaster: z.string().optional().describe("Farcaster profile or channel URL. Optional."),
         feeWallet: z
           .string()
           .regex(/^0x[0-9a-fA-F]{40}$/)
           .optional()
+          // The trap (this one address takes BOTH the fees and the initial buy)
+          // is spelled out to the user by the persona before they choose it and
+          // by initialBuyNote on the LaunchCard before they sign. Here it only
+          // needs to be enough for the model to fill the field correctly.
           .describe(
-            "Optional. This one address does TWO jobs: it receives the token's trading fees, and it also receives the tokens bought by the creator's initial buy. Setting it to any address other than the creator's own wallet sends BOTH the fees and the initial buy there instead of to the creator. Leave it unset and the creator's own wallet receives both.",
+            "Optional. Receives BOTH the trading fees and the tokens from the initial buy. Unset means the creator's wallet gets both. Confirm with the user before setting it to anything else.",
           ),
         initialBuyEth: z
           .number()
@@ -593,7 +646,7 @@ export function buildServer(): McpServer {
           .max(5)
           .optional()
           .describe(
-            "Creator's own first buy in ETH, paid on top of the launch fee in the same transaction and swapped for tokens at launch. Optional; omit or 0 to launch without buying.",
+            "Creator's own first buy in ETH, paid on top of the launch fee and swapped for tokens at launch. Optional; omit or 0 to launch without buying.",
           ),
       },
     },
