@@ -1194,6 +1194,28 @@ app.post("/api/my-agent/pending-launch/clear", (req: Request, res: Response) => 
 // also settles the lazy signup grant, so a first-time visitor sees their free
 // messages instead of a zero.
 app.options("/api/my-agent/credits", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+// Where this wallet's agent stands with the swarm, as data rather than as the
+// prose /swarm prints. The swarm page needs to render the decision (in or out,
+// and what being in has actually produced) without parsing CLI output, and the
+// two must not drift, so both read the same standingFor over the same rows.
+//
+// Wallet-scoped: it is about YOUR agent, and the takeaways are shown next to
+// "these are in its instructions", which is only true for the owner.
+app.get("/api/my-agent/swarm", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  const standing = standingFor(publicIdForWallet(address));
+  res.json({
+    ok: true,
+    optedIn: userAgentSettings(address).joinSwarm === true,
+    enabled: swarmEnabled(),
+    exchanges: standing.exchanges,
+    partners: standing.partners,
+    takeaways: standing.takeaways,
+  });
+});
+
 app.get("/api/my-agent/credits", (req: Request, res: Response) => {
   setWalletCors(res);
   const address = requireWallet(req, res);
