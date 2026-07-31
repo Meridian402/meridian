@@ -20,7 +20,8 @@ import { routeCli, describeSettings } from "./cli/commands.js";
 import { GatewayClient } from "@openhermit/sdk";
 import { issueChallenge, linkAccount, accountData, mintSession, verifySession } from "./accounts.js";
 import { ensureUserAgent, messageUserAgent, userAgentHistory, streamUserAgent, sanitizeChunk, setUserAgentSettings, agentDisplayName, userAgentSettings } from "./deploy/myAgent.js";
-import { vaultStatus, buildVaultSetup, buildVaultRevoke } from "./custody/vault.js";
+import { vaultStatus, buildVaultSetup, buildVaultRevoke, vaultAdapterAddress } from "./custody/vault.js";
+import { custodyEnabled } from "./custody/session.js";
 import { provisionResearchFleet, triggerResearchRun, houseMaxTokens } from "./research/orchestration.js";
 import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad, streamIdleTimeoutMs } from "./chatLimits.js";
 import { chatSpendBlocked, chatSpendStatus, recordTurn } from "./spendGuards.js";
@@ -1478,12 +1479,21 @@ app.get("/api/earn/bounties", (req: Request, res: Response) => {
 // vault (the session address IS the wallet — no body address to spoof).
 app.get("/api/custody/status", async (req: Request, res: Response) => {
   setTradeCors(res);
-  const address = typeof req.query.address === "string" ? req.query.address : "";
+  const address = typeof req.query.address === "string" ? req.query.address.trim() : "";
+  // Answer the dormant case first. Custody is off, so there is nothing to look
+  // up on-chain and no reason to reach for an RPC: this used to fall through to
+  // vaultStatus with an empty string and hand an unauthenticated caller a raw
+  // viem message ("Address \"\" is invalid"). Internal errors are not an API.
+  if (!custodyEnabled()) { res.json({ enabled: false, active: false }); return; }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    res.status(400).json({ enabled: true, error: "pass ?address=0x… to read a vault's status" });
+    return;
+  }
   try {
     res.json(await vaultStatus(address));
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    res.status(/invalid|address/.test(msg) ? 400 : 502).json({ enabled: false, error: msg });
+    console.error("[custody] status failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ enabled: true, error: "could not read that vault just now" });
   }
 });
 
@@ -1995,4 +2005,22 @@ app.listen(config.mcpPort, config.mcpHost, () => {
   console.log(
     `Agent loop thinking every ${config.agentThinkIntervalMs}ms — GET /api/agent-thoughts to watch`,
   );
+
+  // Custody moves USER funds, so its state is said out loud at boot rather than
+  // inferred from two env vars nobody looks at. Arming it takes BOTH a master
+  // secret and a deployed adapter, and the half-configured case is called out
+  // because that is the one somebody reaches while thinking they finished.
+  const master = custodyEnabled();
+  const adapter = vaultAdapterAddress();
+  if (master && adapter) {
+    console.log(`[custody] LIVE. Session keys armed, trades scoped to adapter ${adapter}.`);
+    console.log(`[custody] This moves user funds. It should not be on unless that adapter is deployed AND audited.`);
+  } else if (master || adapter) {
+    console.log(
+      `[custody] half-configured and therefore OFF: ${master ? "master secret set, adapter missing" : "adapter set, master secret missing"}. ` +
+        `Both are required, so nothing is armed.`,
+    );
+  } else {
+    console.log(`[custody] off (no session master, no adapter). User funds are untouched by design.`);
+  }
 });
