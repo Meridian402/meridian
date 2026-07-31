@@ -8,7 +8,7 @@
 // is affected.
 import { GatewayClient } from "@openhermit/sdk";
 import { config } from "../config.js";
-import { messageUserAgent, sanitizeChunk } from "../deploy/myAgent.js";
+import { messageUserAgent, sanitizeChunk, isMissingSession } from "../deploy/myAgent.js";
 import { listLiveParticipants, type Participant } from "./roster.js";
 import { buildTopic } from "./topics.js";
 import { learningSection } from "./learning.js";
@@ -68,15 +68,52 @@ function gateway(): GatewayClient | null {
 
 const openedSessions = new Set<string>();
 
+/**
+ * Open a house agent's swarm session, caching ONLY on success.
+ *
+ * This was a second copy of the bug that killed a user's chat: the session id
+ * was cached whether the open succeeded or threw, so one failed open marked it
+ * done for the life of the process and every turn afterwards died on
+ * "Session not found". Fixing the user path and leaving this one is how the
+ * swarm spent hours failing every scheduled exchange, sidelining a different
+ * agent each time, while chat looked healthy.
+ */
 async function ensureHouseSession(gw: GatewayClient, agentId: string, sessionId: string): Promise<void> {
   if (openedSessions.has(sessionId)) return;
   try {
     await gw.agent(agentId).openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } });
+    openedSessions.add(sessionId);
   } catch (err) {
-    // Already open, or a race: the postMessageSync that follows is the real test.
+    // Probably already open, which the send confirms in a moment. Never cached
+    // on failure: if it genuinely did not open, the next call must try again.
     console.error(`[swarm] openSession ${sessionId}:`, err instanceof Error ? err.message : err);
   }
-  openedSessions.add(sessionId);
+}
+
+/**
+ * Send, and if the gateway says the session is gone, reopen and try once more.
+ * Sessions live on the gateway; this process only remembers what it opened, so
+ * anything clearing them there (a redeploy, a prune, an expiry) leaves us
+ * confidently wrong and every exchange dead until a restart.
+ */
+async function sendWithSession(gw: GatewayClient, agentId: string, sessionId: string, prompt: string): Promise<string> {
+  const send = async (): Promise<string> => {
+    const resp = await gw.agent(agentId).postMessageSync(sessionId, { text: prompt }, { timeout: TURN_TIMEOUT_MS });
+    const text = sanitizeChunk(resp.text ?? "").trim();
+    if (!text) throw new Error(`${agentId} returned no text${resp.error ? `: ${resp.error}` : ""}`);
+    return text;
+  };
+
+  await ensureHouseSession(gw, agentId, sessionId);
+  try {
+    return await send();
+  } catch (err) {
+    if (!isMissingSession(err)) throw err;
+    console.error(`[swarm] ${sessionId} vanished on the gateway, reopening and retrying once`);
+    openedSessions.delete(sessionId);
+    await ensureHouseSession(gw, agentId, sessionId);
+    return await send();
+  }
 }
 
 /**
@@ -103,11 +140,7 @@ async function speak(participant: Participant, exchangeId: string, prompt: strin
   // swarm-<wallet> session), so both kinds of participant accumulate history
   // the same way.
   const sessionId = `swarm-${participant.id}`;
-  await ensureHouseSession(gw, participant.id, sessionId);
-  const resp = await gw.agent(participant.id).postMessageSync(sessionId, { text: prompt }, { timeout: TURN_TIMEOUT_MS });
-  const text = sanitizeChunk(resp.text ?? "").trim();
-  if (!text) throw new Error(`${participant.id} returned no text${resp.error ? `: ${resp.error}` : ""}`);
-  return capReply(text);
+  return capReply(await sendWithSession(gw, participant.id, sessionId, prompt));
 }
 
 /**
