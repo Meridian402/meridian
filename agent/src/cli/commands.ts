@@ -228,9 +228,8 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
           `(${step}/${TOUR.length}) ${t.title}`,
           ``,
           ...t.lines,
-          ``,
-          last ? `that is the tour. /help has the full list whenever you want it.` : ``,
-        ].filter((l, i, a) => !(l === "" && a[i - 1] === "")),
+          ...(last ? [``, `that is the tour. /help has the full list whenever you want it.`] : []),
+        ],
         { kind: "none" },
         last ? [t.tryIt] : [t.tryIt, `/explore ${step + 1}`],
       );
