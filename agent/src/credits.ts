@@ -103,7 +103,28 @@ export function merdCreditsEnabled(): boolean {
   return merdTokenAddress() !== null && packs().some((p) => p.merdWei !== undefined);
 }
 
-export const FREE_CREDITS = Number(process.env.CREDITS_FREE_MESSAGES ?? 20);
+/**
+ * What a new wallet gets, free, before the credit system is ever mentioned.
+ *
+ * 50 rather than 20, because 20 is enough to try the product and not enough to
+ * form a habit with it, and a habit is the thing this is buying. Everything
+ * else on the platform (every /command, the whole live desk, and all three earn
+ * features) is already free and unlimited, so this number only ever has to
+ * cover CONVERSATION.
+ *
+ * It is not free to us. Measured against the provider, a message costs about
+ * $0.0104 inside a warm conversation and about $0.024 on a cold start, and a
+ * free allowance is spent across a few sittings, so 50 credits is roughly
+ * $0.56 a signup, or $561 per thousand. That is a customer acquisition cost and
+ * should be read as one.
+ *
+ * Two things bound it, and only one of them is real. CREDITS_FREE_MESSAGES
+ * moves it without a deploy. And nothing whatsoever stops one person taking
+ * this grant repeatedly from fresh wallets: wallets are free to make, we ask
+ * for no proof of anything, and the only backstop is the global daily turn
+ * ceiling. Raising this number raises that exposure proportionally.
+ */
+export const FREE_CREDITS = Number(process.env.CREDITS_FREE_MESSAGES ?? 50);
 
 /** Escape hatch: MERIDIAN_CREDITS=off makes spending a no-op while balances
  *  still report, so the feature can ship dark or be yanked without a deploy
