@@ -101,7 +101,7 @@ export async function earnOpportunities(address?: string): Promise<Record<string
       // with a little margin — what the UI's "eligibility" preset offers.
       suggestedEntryUsd: indexSnap.eligibilityThresholdUsd > 0 ? Math.ceil(indexSnap.eligibilityThresholdUsd * 1.08) : null,
       risks: [
-        "$INDEX price risk — it trades like a token, not a stable",
+        "$INDEX price risk: it trades like a token, not a stable",
         "distribution rate is volume-driven and volatile",
         "3% hook fee on entry AND exit",
         "smart-contract / hook risk",
@@ -240,7 +240,7 @@ export async function prepareCarry(params: { address: string; amountUsd: number;
     steps,
     note:
       direction === "enter"
-        ? "syrupUSDG accrues Maple lending yield into its price. Round trip costs ~0.1% plus impact — hold for days, not hours. Risks: borrower credit, USDG peg, contracts."
+        ? "syrupUSDG accrues Maple lending yield into its price. Round trip costs ~0.1% plus impact, so hold for days, not hours. Risks: borrower credit, USDG peg, contracts."
         : "Exiting swaps your syrupUSDG back to USDG at the current pool price, realizing whatever the position accrued.",
   };
 }
