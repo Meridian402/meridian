@@ -181,6 +181,26 @@ export class PaymentGate {
   // the payer signs the same tx for several different resources at once.
   private reserving = new Set<string>();
 
+  /**
+   * ROTATING THE TREASURY STRANDS IN-FLIGHT PAYMENTS. Worth knowing before
+   * anyone changes MERIDIAN_TREASURY_ADDRESS.
+   *
+   * This address is bound into the message a payer signs, and both verify()
+   * and settleStranded() look for a transfer to whatever it is set to NOW. So
+   * the moment it changes:
+   *   - a 402 challenge already handed out becomes unpayable, because the payer
+   *     signs the old treasury and verification rebuilds the message with the
+   *     new one;
+   *   - USDG already sent to the old address cannot be verified, and cannot be
+   *     rescued by settleStranded either, since that checks the same field.
+   * The money is not lost, it is sitting in an address we control, but there is
+   * no path in this code that turns it into credits.
+   *
+   * A safe cutover therefore needs a grace window where the previous address is
+   * still accepted for verification, or purchases stopped for the duration.
+   * Neither exists yet because nothing has needed it. Build the window BEFORE
+   * the rotation, not after somebody pays into the old address.
+   */
   constructor(private treasuryAddress: string, private facilitatorUrl: string) {}
 
   /**
