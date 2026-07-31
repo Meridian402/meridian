@@ -8,7 +8,7 @@ import { appendLedger } from "./ledger.js";
 import { dataPath } from "./dataDir.js";
 import { recordTurn } from "./spendGuards.js";
 import { merdTokenAddress } from "./deploy/tokenGate.js";
-import type { SettlementAsset } from "./payments/PaymentGate.js";
+import { BURN_ADDRESS, type SettlementAsset } from "./payments/PaymentGate.js";
 
 const FILE = "credits.jsonl";
 const PATH = dataPath(FILE);
@@ -110,7 +110,17 @@ export function packsForApi(): Array<Omit<CreditPack, "merdWei"> & { merdWei?: s
  */
 export function merdAsset(): SettlementAsset | null {
   const address = merdTokenAddress();
-  return address ? { symbol: "MERD", address, decimals: 18 } : null;
+  // payTo is the burn address, so MERD spent on credits goes straight out of
+  // circulation instead of into the treasury. Routing it at PAYMENT time rather
+  // than sweeping it later is the whole point: there is no window in which the
+  // tokens sit somewhere that has to be trusted to destroy them, no second
+  // transaction to forget, and no gas to find. The payer's own transfer is the
+  // burn, and it is verifiable on-chain by anyone.
+  //
+  // MeridianToken has no burn function and reverts on a transfer to address(0),
+  // so this is removal from circulation, not a reduction in totalSupply. Say it
+  // that way everywhere it is described.
+  return address ? { symbol: "MERD", address, decimals: 18, payTo: BURN_ADDRESS } : null;
 }
 
 /**

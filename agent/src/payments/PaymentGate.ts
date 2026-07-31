@@ -32,7 +32,30 @@ export interface SettlementAsset {
   symbol: string;
   address: Address;
   decimals: number;
+  /**
+   * Where payment in this asset must land, when that is NOT the treasury.
+   *
+   * MERD uses it to route straight to a burn address, so paying in MERD destroys
+   * the tokens at the moment of payment rather than parking them somewhere that
+   * later has to be trusted to destroy them. There is no custody step to get
+   * wrong and no second transaction to forget.
+   *
+   * Absent means the treasury, which is what USDG has always meant.
+   */
+  payTo?: Address;
 }
+
+/**
+ * Where MERD paid for credits goes: an address with no known private key, so
+ * the tokens can never move again.
+ *
+ * Be exact about what this is. MeridianToken has no burn function and its
+ * transfer reverts on address(0), so supply cannot actually be reduced. This
+ * removes the tokens from circulation permanently, which is what "burned"
+ * means in practice, but totalSupply does not change and nothing here should
+ * ever claim it does.
+ */
+export const BURN_ADDRESS = (process.env.MERD_BURN_ADDRESS ?? "0x000000000000000000000000000000000000dEaD") as Address;
 
 /** USDG on Robinhood Chain. The default settlement asset: every call site that
  *  omits an asset means exactly this, which is what it has always meant. */
@@ -71,6 +94,11 @@ function rawUnits(amount: PaymentAmount, asset: SettlementAsset): bigint {
 function displayAmount(amount: PaymentAmount, asset: SettlementAsset): string {
   if (typeof amount === "number" && isDefaultAsset(asset)) return `$${amount.toFixed(4)}`;
   return `${formatUnits(rawUnits(amount, asset), asset.decimals)} ${asset.symbol}`;
+}
+
+/** Where a payment in this asset must land: its own payTo, else the treasury. */
+export function destinationFor(asset: SettlementAsset, treasury: string): string {
+  return (asset.payTo ?? treasury).toLowerCase();
 }
 
 /**
@@ -115,7 +143,13 @@ export function paymentMessage(params: { txHash: string; resource: string; treas
     `Resource: ${params.resource}`,
     `Tx: ${params.txHash.toLowerCase()}`,
   ];
-  if (!isDefaultAsset(asset)) lines.push(`Asset: ${asset.symbol} ${asset.address.toLowerCase()}`);
+  if (!isDefaultAsset(asset)) {
+    lines.push(`Asset: ${asset.symbol} ${asset.address.toLowerCase()}`);
+    // Bind the destination too when it is not the treasury, so a signature
+    // authorising a BURN cannot be replayed as one authorising a payment to the
+    // treasury. The USDG branch is untouched and stays byte-identical.
+    if (asset.payTo) lines.push(`PayTo: ${asset.payTo.toLowerCase()}`);
+  }
   return lines.join("\n");
 }
 
@@ -168,7 +202,7 @@ export class PaymentGate {
           network: "robinhood-chain",
           maxAmountRequired: String(rawUnits(amount, asset)), // the asset's own raw units
           resource,
-          payTo: this.treasuryAddress || "unconfigured",
+          payTo: this.treasuryAddress ? destinationFor(asset, this.treasuryAddress) : "unconfigured",
           description: `Meridian ${resource} - ${displayAmount(amount, asset)}`,
           ...(isDefaultAsset(asset) ? {} : { asset: { symbol: asset.symbol, address: asset.address, decimals: asset.decimals } }),
         },
@@ -331,7 +365,7 @@ export class PaymentGate {
       .reduce((sum, l) => {
         try {
           const to = `0x${l.topics[2]!.slice(26)}`.toLowerCase();
-          if (l.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" && to === this.treasuryAddress.toLowerCase()) {
+          if (l.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" && to === destinationFor(asset, this.treasuryAddress)) {
             senders.add(`0x${l.topics[1]!.slice(26)}`.toLowerCase());
             return sum + BigInt(l.data);
           }
@@ -342,7 +376,7 @@ export class PaymentGate {
     if (paid < required) {
       return { ok: false, error: `insufficient payment: ${paid} ${asset.symbol}-units < ${required} required` };
     }
-    if (senders.size === 0) return { ok: false, error: `no ${asset.symbol} transfer to the treasury in that tx` };
+    if (senders.size === 0) return { ok: false, error: `no ${asset.symbol} transfer to ${destinationFor(asset, this.treasuryAddress)} in that tx` };
 
     // The signature must recover to one of the wallets that actually paid.
     // verifyMessage covers both EOAs and ERC-1271 smart accounts, so an agent
@@ -420,7 +454,7 @@ export class PaymentGate {
       .reduce((sum, l) => {
         try {
           const to = `0x${l.topics[2]!.slice(26)}`.toLowerCase();
-          if (l.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" && to === this.treasuryAddress.toLowerCase()) {
+          if (l.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" && to === destinationFor(asset, this.treasuryAddress)) {
             senders.add(`0x${l.topics[1]!.slice(26)}`.toLowerCase());
             return sum + BigInt(l.data);
           }
@@ -428,7 +462,7 @@ export class PaymentGate {
         return sum;
       }, 0n);
 
-    if (senders.size === 0) return { ok: false, error: `no ${asset.symbol} transfer to the treasury in that tx` };
+    if (senders.size === 0) return { ok: false, error: `no ${asset.symbol} transfer to ${destinationFor(asset, this.treasuryAddress)} in that tx` };
     if (paid < required) return { ok: false, error: `insufficient payment: ${paid} ${asset.symbol}-units < ${required} required` };
     // One payer, or we cannot say whose credits these are.
     if (senders.size > 1) return { ok: false, error: `ambiguous payer: ${[...senders].join(", ")}` };

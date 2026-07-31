@@ -29,7 +29,7 @@ delete process.env.CREDITS_PACK_PRO_MERD;
 const { PACKS, packs, packsForApi, packMerdWei, merdAsset, merdCreditsEnabled, addPurchase, balanceOf, FREE_CREDITS } = await import(
   "../src/credits.js"
 );
-const { paymentMessage, USDG_ASSET, PaymentGate } = await import("../src/payments/PaymentGate.js");
+const { paymentMessage, BURN_ADDRESS, USDG_ASSET, PaymentGate } = await import("../src/payments/PaymentGate.js");
 const { merdTokenAddress } = await import("../src/deploy/tokenGate.js");
 
 // The mined MERD address. Valid in form, no code behind it yet, which is the
@@ -72,7 +72,9 @@ test("configured: packs pick up their flat MERD price from env", () => {
   withMerd(
     () => {
       assert.equal(merdCreditsEnabled(), true);
-      assert.deepEqual(merdAsset(), { symbol: "MERD", address: MERD_ADDRESS, decimals: 18 });
+      // payTo is the burn address: MERD paid for credits leaves circulation at
+      // the moment of payment rather than landing in the treasury.
+      assert.deepEqual(merdAsset(), { symbol: "MERD", address: MERD_ADDRESS, decimals: 18, payTo: BURN_ADDRESS });
       const by = Object.fromEntries(packs().map((p) => [p.id, p.merdWei]));
       assert.equal(by.starter, 1_000n * 10n ** 18n);
       assert.equal(by.plus, undefined, "a pack with no configured price stays USDG only");

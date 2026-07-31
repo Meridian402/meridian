@@ -1329,10 +1329,9 @@ app.post("/api/credits/buy", async (req: Request, res: Response) => {
     return;
   }
   try {
-    // MERD lands in the treasury, the same address USDG already pays into.
-    // The staking vault is the intended destination later, so credit spending
-    // becomes staker yield, but that contract is not deployed: routing there
-    // today would send real tokens to an address with no code.
+    // MERD does NOT land in the treasury: merdAsset routes it to the burn
+    // address, so paying in MERD takes those tokens out of circulation at the
+    // moment of payment. USDG still pays into the treasury as it always has.
     const result = await paymentGate.verify(header, price, resource, asset);
     if (!result.ok) {
       res.status(402).json({ ok: false, error: result.error ?? "payment verification failed", ...paymentGate.requirements(price, resource, asset) });
@@ -1351,7 +1350,7 @@ app.post("/api/credits/buy", async (req: Request, res: Response) => {
       // that never arrived. It records 0 USD under a separate key, with the raw
       // amount in the reference, so the sale is auditable and the revenue total
       // stays true.
-      if (asset) revenue.record(`${resource}:merd`, 0, `${result.txHash ?? "unknown-tx"} ${pack.merdWei} MERD-wei`);
+      if (asset) revenue.record(`${resource}:merd-burned`, 0, `${result.txHash ?? "unknown-tx"} ${pack.merdWei} MERD-wei burned`);
       else revenue.record(resource, pack.usd, result.txHash);
     } catch (err) {
       console.error("[credits] revenue record failed (purchase stands):", err instanceof Error ? err.message : err);
