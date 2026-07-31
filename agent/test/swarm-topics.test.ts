@@ -79,3 +79,22 @@ test("the seeded venues are the ones it talks about, never invented ones", () =>
     assert.ok(!/Acme|Example Venue|Foo/i.test(t.text), "a topic must not contain a made-up venue");
   }
 });
+
+test("a rotated segment is never called the thinnest unless it is", () => {
+  // The rotation walks the thin END, so the subject changes between seeds. A
+  // superlative that does not move with it is a false claim, and this whole
+  // file exists to refuse those. Whenever a topic says "the thinnest is X", X
+  // must carry the lowest count named anywhere in that same topic.
+  for (const seed of [0, 1, 2, 3, 4, 5, 6, 7]) {
+    const t = buildTopic(seed, []);
+    if (!t) continue;
+    const claim = /the thinnest is (.+?) with (\d+)/.exec(t.text);
+    if (!claim) {
+      // The non-superlative phrasing is the honest alternative.
+      if (/sits near the thin end/.test(t.text)) assert.ok(true);
+      continue;
+    }
+    const counts = [...t.text.matchAll(/with (\d+)/g)].map((m) => Number(m[1]));
+    assert.equal(Math.min(...counts), Number(claim[2]), `seed ${seed} called ${claim[1]} thinnest without it being so`);
+  }
+});

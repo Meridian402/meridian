@@ -101,11 +101,17 @@ export function buildTopic(seed = 0, alreadyAsked: readonly string[] = []): Swar
   }
 
   const [topKey, topN] = segments[0] ?? ["", 0];
-  // Walk the thin end rather than always naming the single thinnest segment.
-  // This was one fixed sentence with no rotation at all, so every time the seed
-  // landed here it asked the identical question.
+  // Walk the thin end rather than always naming the single thinnest segment,
+  // because with no rotation at all this asked the identical question every
+  // time the seed landed on it.
+  //
+  // The WORDING moves with it. Saying "the thinnest is X" while X is merely
+  // near the bottom is a false claim, and this file's whole rule is that a
+  // premise has to be true: rotating the subject while leaving a superlative in
+  // place would have been the exact bug the rest of it refuses to commit.
   const tailIdx = segments.length >= 2 ? segments.length - 1 - (seed % Math.min(3, segments.length - 1)) : 0;
   const [thinKey, thinN] = segments[tailIdx] ?? ["", 0];
+  const isThinnest = tailIdx === segments.length - 1;
   // Only worth asking when the coverage is actually lopsided. A "heaviest 1,
   // thinnest 1" opener would be a true sentence and a fake premise.
   if (segments.length >= 2 && topN > thinN) {
@@ -113,10 +119,11 @@ export function buildTopic(seed = 0, alreadyAsked: readonly string[] = []): Swar
       facts: [
         `census: ${status.totalVenues} venues across ${segments.length} segments`,
         `heaviest: ${topKey} at ${topN}`,
-        `thinnest: ${thinKey} at ${thinN}`,
+        `${isThinnest ? "thinnest" : "near the thin end"}: ${thinKey} at ${thinN}`,
       ],
       text:
-        `Right now the census holds ${status.totalVenues} venues across ${segments.length} segments. The heaviest is ${topKey} with ${topN}; the thinnest is ${thinKey} with ${thinN}. ` +
+        `Right now the census holds ${status.totalVenues} venues across ${segments.length} segments. The heaviest is ${topKey} with ${topN}; ` +
+        `${isThinnest ? `the thinnest is ${thinKey} with ${thinN}` : `${thinKey} sits near the thin end with ${thinN}`}. ` +
         `Is that spread telling us something real about where tokenized assets actually are, or is it just where we have looked hardest? Argue for the segment you think is genuinely under-mapped and say why.`,
     });
   }
