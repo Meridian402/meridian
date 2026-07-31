@@ -1,8 +1,25 @@
 // Non-custodial trading vaults. Each user gets a Safe they solely own, plus a
 // Zodiac Roles module scoping THIS backend's per-user session key to the swap
-// router only — proven on-chain in the Phase 0 spike. The backend never holds
-// the user's owner key; it only holds the scoped session key and uses it to
-// execute trades that provably cannot withdraw.
+// router only, proven on-chain in the Phase 0 spike. The backend never holds
+// the user's owner key.
+//
+// NOT YET SAFE TO ENABLE, and this paragraph used to claim otherwise. It said
+// the session key "executes trades that provably cannot withdraw". That is not
+// true today. The Roles scoping constrains the TARGET and the SELECTOR, so the
+// key can only call UniversalRouter.execute, but nothing constrains its
+// PARAMETERS. A swap command carries its own output recipient, so a key that
+// can call execute freely can swap the vault's balance and send the proceeds
+// anywhere. executeForUser passes `trade.data` through as an opaque blob and
+// checks only the target, and its amountUsd cap is a number the CALLER supplies
+// rather than one read from the calldata, so it bounds an honest caller and
+// nothing else.
+//
+// The gap was always known and noted below as an "audit-phase refinement". The
+// problem was that the summary up here stated the strong claim unhedged, which
+// is how someone (me, a week from now) turns custody on believing it is done.
+// What it needs before CUSTODY_SESSION_MASTER is ever set: parameter scoping on
+// the Roles module that pins the swap recipient to the Safe itself, and an
+// amount derived from the calldata rather than asserted alongside it.
 //
 // Two kinds of action:
 //   - OWNER actions (deploy, enable, scope, approve, revoke): built here as
