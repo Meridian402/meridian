@@ -343,10 +343,12 @@ export interface EnsureResult {
  */
 export async function ensureUserAgent(address: string): Promise<EnsureResult> {
   // Access gate: qualify by staking 0.1% of MERD, or holding 0.25% of PONS or
-  // INDEX (any one). No-op while MERD_TOKEN_ADDRESS is unset, so it ships dormant
-  // and stays embargo-safe until the operator flips it at launch. This one
-  // chokepoint covers create, chat, stream, and settings, since every agent path
-  // funnels through here, so a client cannot route around it.
+  // INDEX (any one). A no-op unless MERIDIAN_HOLDER_GATE=on, which is its own
+  // switch and not a side effect of MERD existing: admission control and the
+  // credit system answer different questions, and running both would mean
+  // buying your way in AND paying per message. This one chokepoint covers
+  // create, chat, stream and settings, since every agent path funnels through
+  // here, so a client cannot route around it if it is ever turned on.
   await assertMerdGate(address);
   const agentId = agentIdForWallet(address);
   const gw = gateway();

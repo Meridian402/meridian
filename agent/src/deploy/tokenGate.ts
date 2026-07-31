@@ -1,10 +1,24 @@
 // Access gate for personal agents. Multi-token OR: a wallet clears the gate if
 // it satisfies ANY of the ways in. Built to ship BEFORE MERD exists.
 //
-// SHIPS DORMANT. With MERD_TOKEN_ADDRESS unset the whole gate is a no-op, so it
-// changes nothing pre-launch and stays embargo-safe. Setting MERD_TOKEN_ADDRESS
-// (at or after seed) is the single trigger that turns the whole gate on, since
-// MERD launching is the moment gating is meant to go live.
+// SHIPS DORMANT, behind its OWN switch: MERIDIAN_HOLDER_GATE=on. Anything else,
+// including unset, and the whole gate is a no-op.
+//
+// It used to key off MERD_TOKEN_ADDRESS, on the reasoning that MERD launching is
+// the moment gating goes live. That became a trap once credits could be PAID in
+// MERD, because enabling that also requires MERD_TOKEN_ADDRESS. Setting one
+// variable to let people spend MERD would have silently locked every wallet
+// that does not hold 0.25% of PONS or INDEX out of the product, and the first
+// symptom would have been new users being told to go buy a token.
+//
+// The two also answer different questions and they contradict. Credits are
+// metering: start free, then pay for what you use, which is what the site
+// promises and what the onboarding is built around. This gate is admission:
+// hold a quarter of a percent of a token's entire supply or you cannot use the
+// product at all. Running both means a person must buy their way in and then
+// pay per message, and the free tier becomes a thing nobody can reach. So the
+// gate now has to be asked for by name, and turning MERD payments on no longer
+// turns admission control on with it.
 //
 // The ways to qualify, each measured against that token's OWN live total supply:
 //   MERD   hold + stake >= 0.1%   (10 bps)  read from the staking contract
@@ -133,9 +147,10 @@ export interface GateResult {
 }
 
 export function merdGateEnabled(): boolean {
-  // Live only once MERD launches (its token address is set). Single embargo
-  // trigger: dark until seed, on afterward.
-  return merdTokenAddress() !== null;
+  // Explicit opt-in, and deliberately NOT inferred from any other setting. A
+  // gate that switches itself on as a side effect of an unrelated change is a
+  // gate that locks people out on a day nobody was thinking about access.
+  return (process.env.MERIDIAN_HOLDER_GATE ?? "").trim().toLowerCase() === "on";
 }
 
 export function fmtPct(p: number): string {
