@@ -468,7 +468,21 @@ export interface AgentReply {
   error?: string;
 }
 
-/** Open the wallet's chat session if we haven't this process (idempotent). */
+/**
+ * Open the wallet's chat session if we haven't this process (idempotent).
+ *
+ * The cache is only written on SUCCESS. It used to be written unconditionally,
+ * on the reasoning that a throw here means the session was already open and the
+ * next call would confirm it. That is true for a race and false for everything
+ * else, and the everything else is what bit us: one failed open (a gateway
+ * blip, a restart mid-call, the agent not yet live) marked the session as done
+ * forever, and every message afterwards died on
+ *
+ *     Stream request failed (404): Session not found: chat-0x…
+ *
+ * with no way back short of redeploying the API. A real user sat in exactly
+ * that state. Caching a failure as if it were a success is the whole bug.
+ */
 async function ensureSession(gw: GatewayClient, agentId: string, sessionId: string): Promise<void> {
   if (openedSessions.has(sessionId)) return;
   try {
@@ -476,11 +490,47 @@ async function ensureSession(gw: GatewayClient, agentId: string, sessionId: stri
       sessionId,
       source: { kind: "api", interactive: true, type: "direct" },
     });
+    openedSessions.add(sessionId);
   } catch (err) {
-    // Already open (or a race): postMessageSync will confirm. Log for visibility.
+    // Most likely already open, which the send will confirm in a moment. Not
+    // cached either way: if it really did fail, the next call must try again.
     console.error(`[my-agent] openSession ${sessionId}:`, err instanceof Error ? err.message : err);
   }
-  openedSessions.add(sessionId);
+}
+
+/** True when the gateway is telling us this session does not exist. Exported
+ *  for the test: getting this wrong either loses the retry or retries things
+ *  that will never succeed. */
+export function isMissingSession(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /session not found/i.test(msg) || (/\b404\b/.test(msg) && /session/i.test(msg));
+}
+
+/**
+ * Run a send, and if the gateway says the session is gone, open it and try once
+ * more.
+ *
+ * Sessions live on the gateway and this process only remembers which ones it
+ * opened. Anything that clears them on that side (a redeploy, a prune, an
+ * expiry) leaves our cache confidently wrong, and the user just sees their
+ * agent stop answering. One retry turns a permanent dead thread into a hiccup.
+ */
+async function withSession<T>(
+  gw: GatewayClient,
+  agentId: string,
+  sessionId: string,
+  send: () => Promise<T>,
+): Promise<T> {
+  await ensureSession(gw, agentId, sessionId);
+  try {
+    return await send();
+  } catch (err) {
+    if (!isMissingSession(err)) throw err;
+    console.error(`[my-agent] ${sessionId} vanished on the gateway, reopening and retrying once`);
+    openedSessions.delete(sessionId);
+    await ensureSession(gw, agentId, sessionId);
+    return await send();
+  }
 }
 
 /**
@@ -495,8 +545,9 @@ export async function messageUserAgent(address: string, text: string, opts?: { s
   await ensureUserAgent(address); // cheap after first call; guarantees the agent exists
   const agentId = agentIdForWallet(address);
   const sessionId = opts?.sessionKind ? `${opts.sessionKind}-${address.toLowerCase()}` : sessionIdForWallet(address);
-  await ensureSession(gw, agentId, sessionId);
-  const resp = await gw.agent(agentId).postMessageSync(sessionId, { text }, { timeout: 90_000 });
+  const resp = await withSession(gw, agentId, sessionId, () =>
+    gw.agent(agentId).postMessageSync(sessionId, { text }, { timeout: 90_000 }),
+  );
   return {
     text: deEmDash(resp.text ?? ""),
     toolCalls: (resp.toolCalls ?? []).map((t) => ({ tool: t.tool, isError: t.isError })),
@@ -512,13 +563,40 @@ export async function messageUserAgent(address: string, text: string, opts?: { s
  * reply — the single biggest smoothness win under load.
  */
 export async function streamUserAgent(address: string, text: string, signal?: AbortSignal) {
-  const gw = gateway();
-  if (!gw) throw new Error("gateway_unconfigured");
+  const client = gateway();
+  if (!client) throw new Error("gateway_unconfigured");
+  // Narrowed to a const the generator closes over, so TypeScript keeps the
+  // non-null through the async boundary inside reopenOnce.
+  const gw: GatewayClient = client;
   await ensureUserAgent(address);
   const agentId = agentIdForWallet(address);
   const sessionId = sessionIdForWallet(address);
   await ensureSession(gw, agentId, sessionId);
-  return gw.agent(agentId).postMessageStream(sessionId, { text }, { signal });
+
+  const open = () => gw.agent(agentId).postMessageStream(sessionId, { text }, { signal });
+
+  // A stream fails while it is being READ, not when it is created, so the retry
+  // cannot wrap the call the way the sync path does. It lives in the iterator,
+  // and only fires when nothing has been yielded yet: retrying after a partial
+  // reply would replay its opening to the user.
+  async function* reopenOnce(): AsyncGenerator<Awaited<ReturnType<typeof open>> extends AsyncIterable<infer E> ? E : never> {
+    let delivered = 0;
+    try {
+      for await (const ev of open()) {
+        delivered++;
+        yield ev as never;
+      }
+      return;
+    } catch (err) {
+      if (delivered > 0 || !isMissingSession(err)) throw err;
+      console.error(`[my-agent] ${sessionId} vanished on the gateway, reopening and retrying once`);
+      openedSessions.delete(sessionId);
+      await ensureSession(gw, agentId, sessionId);
+    }
+    for await (const ev of open()) yield ev as never;
+  }
+
+  return reopenOnce();
 }
 
 /** Strip em dashes from a streamed chunk (exported for the SSE forwarder). */
