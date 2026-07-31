@@ -653,7 +653,14 @@ app.get("/api/account/:address", (req: Request, res: Response) => {
 function setWalletCors(res: Response): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // X-Payment is not optional here. The x402 flow settles in two calls: the
+  // first gets a 402 challenge and carries no proof, the second carries the
+  // payment in an X-PAYMENT header. Leaving it out of the allow-list let the
+  // challenge through and blocked the settlement, so a browser sent real USDG
+  // on-chain and then failed the verification call with "Failed to fetch". The
+  // money moved, the credits did not, and nothing server-side ever saw it. Any
+  // header the client actually sends has to be listed here.
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Payment");
 }
 
 /** Resolve the wallet a request proves, or write a 401 and return null. */
@@ -1254,6 +1261,28 @@ app.get("/api/my-agent/credits", (req: Request, res: Response) => {
 // Two ways to pay: USDG (the default, unchanged) or MERD, which stays refused
 // until MERD is deployed AND the operator has set a flat MERD price per pack.
 // Either way the pack is the same pack for the same credits.
+// Credit a payment that landed on-chain but never settled, because the browser
+// died between the transfer and the verification call. Operator-only, and it
+// reads the payer from the transfer log rather than taking one on trust, so it
+// can only ever credit the wallet whose tokens actually moved.
+app.post("/api/admin/credits/settle", async (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  const { txHash, pack: packId } = (req.body ?? {}) as { txHash?: string; pack?: string };
+  const pack = packs().find((p) => p.id === packId);
+  if (!pack) { res.status(400).json({ ok: false, error: `unknown pack. choose one of: ${packs().map((p) => p.id).join(", ")}` }); return; }
+  if (typeof txHash !== "string") { res.status(400).json({ ok: false, error: "txHash required" }); return; }
+  try {
+    const settled = await paymentGate.settleStranded(txHash, pack.usd, "credits:" + pack.id);
+    if (!settled.ok) { res.status(400).json({ ok: false, error: settled.error }); return; }
+    const balance = addPurchase(settled.payer, pack.id, pack.credits, settled.txHash);
+    try { revenue.record("credits:" + pack.id, pack.usd, settled.txHash); } catch { /* bookkeeping only */ }
+    res.json({ ok: true, payer: settled.payer, added: pack.credits, balance });
+  } catch (err) {
+    console.error("[credits] stranded settle failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 app.options("/api/credits/buy", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
 app.post("/api/credits/buy", async (req: Request, res: Response) => {
   setWalletCors(res);

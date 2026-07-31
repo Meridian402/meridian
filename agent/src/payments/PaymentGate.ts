@@ -372,4 +372,70 @@ export class PaymentGate {
     );
     return { ok: true, txHash };
   }
+
+  /**
+   * Settle a payment that landed on-chain but never reached us.
+   *
+   * The x402 flow is two calls with a real transfer between them, so any break
+   * after the transfer leaves the money moved and the credits unissued. It
+   * happened on the very first real purchase: X-PAYMENT was missing from the
+   * CORS allow-list, so the browser blocked the settlement call after $5 of USDG
+   * had already left the wallet. A dropped connection, a closed tab or a phone
+   * losing signal does exactly the same thing, so this needs a recovery path
+   * rather than a one-off apology.
+   *
+   * Runs every on-chain check verifyOnChain does EXCEPT the signature, and it
+   * does not need one: the caller is an authenticated operator, and the payer is
+   * read from the transfer log rather than supplied, so the credits can only go
+   * to the wallet whose tokens actually moved. It cannot invent a payment, and
+   * the burn makes it single-use like any other settlement.
+   *
+   * Deliberately ignores MAX_AGE_SECONDS. Age exists to stop someone dredging up
+   * an ancient transfer as fresh proof; a stuck payment is old precisely BECAUSE
+   * it got stuck, and refusing to honour it would punish the person it failed.
+   */
+  async settleStranded(
+    txHash: string,
+    amount: PaymentAmount,
+    resource: string,
+    asset: SettlementAsset = USDG_ASSET,
+  ): Promise<{ ok: true; payer: string; txHash: string } | { ok: false; error: string }> {
+    if (!this.treasuryAddress) return { ok: false, error: "treasury not configured" };
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return { ok: false, error: "invalid txHash" };
+    if (this.loadUsed().has(txHash.toLowerCase())) return { ok: false, error: "payment tx already used" };
+
+    const client = getPublicClient();
+    let receipt;
+    try {
+      receipt = await client.getTransactionReceipt({ hash: txHash as `0x${string}` });
+    } catch {
+      return { ok: false, error: "payment tx not found on Robinhood Chain" };
+    }
+    if (receipt.status !== "success") return { ok: false, error: "payment tx reverted" };
+
+    const senders = new Set<string>();
+    const required = rawUnits(amount, asset);
+    const paid = receipt.logs
+      .filter((l) => l.address.toLowerCase() === asset.address.toLowerCase())
+      .reduce((sum, l) => {
+        try {
+          const to = `0x${l.topics[2]!.slice(26)}`.toLowerCase();
+          if (l.topics[0] === "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" && to === this.treasuryAddress.toLowerCase()) {
+            senders.add(`0x${l.topics[1]!.slice(26)}`.toLowerCase());
+            return sum + BigInt(l.data);
+          }
+        } catch {}
+        return sum;
+      }, 0n);
+
+    if (senders.size === 0) return { ok: false, error: `no ${asset.symbol} transfer to the treasury in that tx` };
+    if (paid < required) return { ok: false, error: `insufficient payment: ${paid} ${asset.symbol}-units < ${required} required` };
+    // One payer, or we cannot say whose credits these are.
+    if (senders.size > 1) return { ok: false, error: `ambiguous payer: ${[...senders].join(", ")}` };
+
+    const payer = [...senders][0];
+    this.burnTx(txHash, resource, amount, asset);
+    console.log(`[PaymentGate] settled STRANDED ${displayAmount(amount, asset)} for ${resource} from ${payer} via ${txHash}`);
+    return { ok: true, payer, txHash };
+  }
 }
