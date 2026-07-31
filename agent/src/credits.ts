@@ -22,12 +22,34 @@ export interface CreditEvent {
   at: number;
 }
 
-/** Credit packs a wallet can buy. Priced in USDG through the same x402 gate as
- *  priced tools; larger packs carry a bonus over the $0.01/credit base rate. */
+/**
+ * Credit packs a wallet can buy, priced in USDG through the same x402 gate as
+ * priced tools.
+ *
+ * PRICED FROM MEASURED COST, not from a round number. A message was sold at
+ * $0.010 while costing us $0.0104 inside a warm conversation and $0.0242 on the
+ * first message of a sitting, measured against the provider's own billing. Every
+ * message was sold at a loss, and hardest on the lightest users.
+ *
+ * $0.025 on the base rate is the lowest round price where even the worst case
+ * clears: somebody who opens the tab, asks one thing and leaves costs $0.0242,
+ * so they are now a fraction above water instead of a subsidy. Anyone who
+ * actually holds a conversation costs $0.011 to $0.013 and carries a real
+ * margin. "A tiny bit above cost" is meant literally here.
+ *
+ * The volume bonus is not a giveaway, it tracks the cost curve. Bigger packs are
+ * bought by people who talk in longer sittings, and a longer sitting is CHEAPER
+ * per message because the cached prefix is already warm. Discounting the buyers
+ * who are cheaper to serve is the one discount that pays for itself.
+ *
+ * If the caching gap closes, a message drops toward $0.004 and this should come
+ * down with it. Pricing above cost is the rule; this particular number is only
+ * today's answer to it.
+ */
 export const PACKS = [
-  { id: "starter", usd: 5, credits: 500 },
-  { id: "plus", usd: 15, credits: 1700, bonusPct: 13 },
-  { id: "pro", usd: 50, credits: 6000, bonusPct: 20 },
+  { id: "starter", usd: 5, credits: 200 },
+  { id: "plus", usd: 15, credits: 650, bonusPct: 8 },
+  { id: "pro", usd: 50, credits: 2300, bonusPct: 15 },
 ] as const;
 
 export interface CreditPack {
