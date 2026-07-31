@@ -50,12 +50,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // else, which is precisely the shape of a launch day. 50,000 needs 250, while
 // still stopping a runaway inside a day.
 //
-// What a turn costs, measured rather than assumed (Haiku 4.5 via OpenRouter,
-// $1/M in, $5/M out, $0.10/M cached read): the fixed prefix is ~4,100 tokens of
-// persona plus tool definitions, so a cached turn with a short reply lands near
-// $0.002 and an uncached one near $0.006. 50,000 turns is therefore roughly
-// $100 on a day that actually hit the ceiling, against 4 turns on a normal one
-// today. Raise it further by env, but price it first.
+// What a turn costs, MEASURED against the provider's billing rather than
+// modelled: about $0.0104 inside a warm conversation and about $0.0242 on the
+// first message of a sitting, when the cached prefix has to be written again.
+//
+// Do not re-derive that from a model's list price. This comment used to quote
+// Haiku 4.5 rates, but MERIDIAN_USER_MODEL_ID is set to anthropic/claude-sonnet-5
+// on Railway, so the arithmetic was against a model user chat does not run. The
+// figures above survived the mistake only because they came from billing deltas,
+// which do not care what the model is. If you need this number again, measure it
+// again; the model can change under you without a code change.
+//
+// So 50,000 turns is roughly $500 to $1,200 on a day that actually hit the
+// ceiling, against 40 turns on a normal one today. Raise it further by env, but
+// price it first.
 const DEFAULT_MAX_PER_DAY = 50_000;
 // Deliberately unchanged. Lowering it would buy a better ratio at the cost of
 // the people who use this most, and the global ceiling is the right place to
