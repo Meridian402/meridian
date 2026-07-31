@@ -167,6 +167,25 @@ export async function provisionFleet(): Promise<void> {
 // SUBSET of segments so we can pilot a few and watch cost, (b) re-registers BOTH
 // MCP servers at the current publicMcpUrl so a stale 127.0.0.1 registration gets
 // corrected, (c) uses get-merge-put for agent config (a partial config fails the
+/**
+ * Output ceiling for a house agent.
+ *
+ * Set, not preserved. This read `typeof curModel.max_tokens === "number" ?
+ * curModel.max_tokens : 8192`, which keeps whatever the agent already has, and
+ * every agent is created carrying the gateway default, so the condition was
+ * always true and the fallback never ran. The number was unreachable from here.
+ *
+ * 4096 rather than the user agents' 1536: these write research findings and
+ * segment refreshes, not two-sentence chat replies. Still half of 8192, which
+ * bounds the tail on a runaway generation, and comfortably above anything these
+ * have ever legitimately produced.
+ */
+export function houseMaxTokens(): number {
+  const raw = Number(process.env.MERIDIAN_HOUSE_MAX_TOKENS ?? 4096);
+  if (!Number.isFinite(raw) || raw < 512) return 4096;
+  return Math.floor(raw);
+}
+
 // gateway's validation on workspace_root/memory/max_tokens), and (d) pins the
 // OpenRouter model tier that the gateway actually has a key for.
 
@@ -267,7 +286,7 @@ export async function provisionResearchFleet(
       await gw.putAgentConfig(agentId, {
         ...cur,
         web: { ...curWeb, provider: process.env.RWA_FLEET_WEB_PROVIDER ?? "exa" },
-        model: { ...curModel, ...model, max_tokens: typeof curModel.max_tokens === "number" ? curModel.max_tokens : 8192 },
+        model: { ...curModel, ...model, max_tokens: houseMaxTokens() },
       });
       // Schedules are created once; on re-provision they already exist, so a
       // duplicate insert is expected and non-fatal.

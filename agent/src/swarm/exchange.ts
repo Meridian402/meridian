@@ -12,7 +12,7 @@ import { messageUserAgent, sanitizeChunk, isMissingSession } from "../deploy/myA
 import { listLiveParticipants, type Participant } from "./roster.js";
 import { buildTopic } from "./topics.js";
 import { learningSection } from "./learning.js";
-import { appendSwarmRow, readSwarmRows, type FeedExchange, type SwarmRow } from "./feed.js";
+import { appendSwarmRow, readSwarmRows, recentTopics, type FeedExchange, type SwarmRow } from "./feed.js";
 
 const DEFAULT_TURNS = 4;
 const MAX_TURNS = 8;
@@ -342,7 +342,8 @@ export async function runExchange(): Promise<ExchangeResult> {
     const pair = pickPair(pool, counter);
     if (!pair) return empty(pool.length ? "not_enough_participants" : "no_live_participants");
 
-    const topic = buildTopic(counter);
+    // What we have already asked, so a stale source cannot ask it again.
+    const topic = buildTopic(counter, recentTopics());
     // No live state means no honest premise, so there is no exchange today.
     if (!topic) return empty("no_live_state");
 

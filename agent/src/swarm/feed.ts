@@ -169,6 +169,24 @@ export function swarmFeed(limit = 20): FeedExchange[] {
     .slice(0, Math.max(1, limit));
 }
 
+/**
+ * The opening questions of the most recent exchanges, newest first.
+ *
+ * Read from the ledger rather than kept in memory, so it survives a restart the
+ * way the rotation counter does. Without this the topic builder cannot tell
+ * that it has already asked something: it rotates over SOURCES, and a source
+ * that has not changed hands back the same question forever.
+ */
+export function recentTopics(limit = 12): string[] {
+  const rows = readSwarmRows();
+  const out: string[] = [];
+  for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
+    const r = rows[i];
+    if (r.kind === "topic" && r.text.trim()) out.push(r.text.trim());
+  }
+  return out;
+}
+
 /** How many exchanges started inside the trailing window. Read from the ledger
  *  rather than a counter so a restart cannot reset the day's budget. */
 export function exchangesSince(sinceMs: number): number {

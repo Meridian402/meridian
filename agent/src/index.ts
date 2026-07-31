@@ -21,7 +21,7 @@ import { GatewayClient } from "@openhermit/sdk";
 import { issueChallenge, linkAccount, accountData, mintSession, verifySession } from "./accounts.js";
 import { ensureUserAgent, messageUserAgent, userAgentHistory, streamUserAgent, sanitizeChunk, setUserAgentSettings, agentDisplayName, userAgentSettings } from "./deploy/myAgent.js";
 import { vaultStatus, buildVaultSetup, buildVaultRevoke } from "./custody/vault.js";
-import { provisionResearchFleet, triggerResearchRun } from "./research/orchestration.js";
+import { provisionResearchFleet, triggerResearchRun, houseMaxTokens } from "./research/orchestration.js";
 import { rateLimitOk, tryBeginTurn, endTurn, acquireSlot, releaseSlot, chatLoad, streamIdleTimeoutMs } from "./chatLimits.js";
 import { chatSpendBlocked, chatSpendStatus, recordTurn } from "./spendGuards.js";
 import {
@@ -1694,8 +1694,9 @@ app.post("/api/admin/agents/repair-config", async (req: Request, res: Response) 
     }
     const model = { ...((before.model ?? {}) as Record<string, unknown>) };
     if (typeof model.max_tokens !== "number") {
-      const refModel = (ref.model ?? {}) as Record<string, unknown>;
-      model.max_tokens = typeof refModel.max_tokens === "number" ? refModel.max_tokens : 8192;
+      // Our value, not the reference agent's: copying a sibling would spread
+      // whatever wrong number that one happens to be carrying.
+      model.max_tokens = houseMaxTokens();
       filled.push("model.max_tokens");
     }
     if (typeof model.provider !== "string") { model.provider = (ref.model as any)?.provider ?? "openrouter"; filled.push("model.provider"); }

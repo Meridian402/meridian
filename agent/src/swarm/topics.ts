@@ -34,10 +34,48 @@ function recentDiscoveries() {
  * a random draw, so the same state and the same seed always produce the same
  * question.
  */
-export function buildTopic(seed = 0): SwarmTopic | null {
+/**
+ * Decisions worth putting to another agent.
+ *
+ * A decision log is only a conversation premise when it contains NEWS. The
+ * house desk holds no capital right now, so it logs the same row forever: all
+ * twenty recent entries read `hold` / "scanning the market for opportunities",
+ * byte for byte. Feeding that to buildTopic asked the same question eleven
+ * times, and the agents did what anyone would, which is argue about the
+ * epistemics of a label rather than about a market.
+ *
+ * The test is measurable rather than a judgement about wording: if every recent
+ * decision is identical there is nothing in the log to discuss, so there is no
+ * decision topic this round. Distinct rows come back the moment the desk
+ * actually does something different.
+ */
+function informativeDecisions(): ReturnType<typeof decisionLog.recent> {
+  const recent = decisionLog.recent(8);
+  const distinct = new Map<string, (typeof recent)[number]>();
+  for (const d of recent) {
+    const key = `${d.action}|${(d.reason ?? "").trim().toLowerCase()}`;
+    if (!distinct.has(key)) distinct.set(key, d);
+  }
+  return distinct.size >= 2 ? [...distinct.values()] : [];
+}
+
+/**
+ * One grounded opening question, avoiding anything asked recently.
+ *
+ * `alreadyAsked` is the whole point of the second parameter. Every source here
+ * goes stale at its own pace: the census only moves when the research fleet
+ * discovers something, the segment spread is one fixed sentence, and the
+ * decision log repeats whenever the desk is idle. Rotating a seed across stale
+ * sources produces the same handful of questions forever, which is what
+ * happened: twenty nine exchanges, eight distinct topics, twenty one exact
+ * repeats. Agents share ONE durable session, so they see the duplicates pile up
+ * and one of them eventually replies "you have sent me this prompt twice,
+ * identically", which is a paid turn spent on our bookkeeping.
+ */
+export function buildTopic(seed = 0, alreadyAsked: readonly string[] = []): SwarmTopic | null {
   const status = universe.status();
   const discoveries = recentDiscoveries();
-  const decisions = decisionLog.recent(5);
+  const decisions = informativeDecisions();
   const segments = Object.entries(status.segmentCounts).sort((a, b) => b[1] - a[1]);
 
   const candidates: SwarmTopic[] = [];
@@ -63,7 +101,11 @@ export function buildTopic(seed = 0): SwarmTopic | null {
   }
 
   const [topKey, topN] = segments[0] ?? ["", 0];
-  const [thinKey, thinN] = segments[segments.length - 1] ?? ["", 0];
+  // Walk the thin end rather than always naming the single thinnest segment.
+  // This was one fixed sentence with no rotation at all, so every time the seed
+  // landed here it asked the identical question.
+  const tailIdx = segments.length >= 2 ? segments.length - 1 - (seed % Math.min(3, segments.length - 1)) : 0;
+  const [thinKey, thinN] = segments[tailIdx] ?? ["", 0];
   // Only worth asking when the coverage is actually lopsided. A "heaviest 1,
   // thinnest 1" opener would be a true sentence and a fake premise.
   if (segments.length >= 2 && topN > thinN) {
@@ -121,5 +163,24 @@ export function buildTopic(seed = 0): SwarmTopic | null {
   }
 
   if (!candidates.length) return null;
-  return candidates[seed % candidates.length];
+
+  // Prefer something that has not been asked lately. Rotation alone cannot do
+  // this: it walks the SOURCES, and a source that has not changed returns the
+  // same question however far the seed advances.
+  const asked = new Set(alreadyAsked);
+  const fresh = candidates.filter((c) => !asked.has(c.text));
+  if (fresh.length) return fresh[seed % fresh.length];
+
+  // Everything on hand has been asked recently. Rotating anyway is better than
+  // refusing to talk, but say nothing false: the premise is still live state,
+  // it is just not new, so the agents are asked to move it on rather than
+  // repeat themselves.
+  const repeat = candidates[seed % candidates.length];
+  return {
+    facts: repeat.facts,
+    text:
+      `${repeat.text}\n\n` +
+      `You have been asked about this before. Do not restate your earlier position: ` +
+      `say what would have to change your mind, or what you still cannot check.`,
+  };
 }
