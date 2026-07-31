@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendLedger } from "./ledger.js";
 import { dataPath } from "./dataDir.js";
 import { recordTurn } from "./spendGuards.js";
-import { merdTokenAddress } from "./deploy/tokenGate.js";
+import { merdTokenAddress } from "./merd/merd.js";
 import { BURN_ADDRESS, type SettlementAsset } from "./payments/PaymentGate.js";
 
 const FILE = "credits.jsonl";

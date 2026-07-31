@@ -36,7 +36,6 @@ import {
   merdAsset,
   merdCreditsEnabled,
 } from "./credits.js";
-import { checkMerdGate, gateMessage } from "./deploy/tokenGate.js";
 import { pendingLaunchFor, clearPendingLaunch } from "./launch/pendingLaunches.js";
 import { ResearchStrategy } from "./strategy/ResearchStrategy.js";
 import { withHouseWalletLock } from "./houseWallet.js";
@@ -695,26 +694,12 @@ function chatGuardSync(address: string): { status: number; error: string; code?:
   return null;
 }
 
-/**
- * An access-gated wallet gets a 403 that says what it needs, not a generic 502.
- * Returns true when it answered the request. Checked BEFORE the credit debit on
- * the chat routes: a wallet that cannot use its agent must not be charged and
- * refunded on every attempt.
- */
-async function gateBlocked(address: string, res: Response): Promise<boolean> {
-  const gate = await checkMerdGate(address);
-  if (!gate.enabled || gate.ok) return false;
-  res.status(gate.retryable ? 503 : 403).json({ ok: false, code: "gate", error: gateMessage(gate), gate });
-  return true;
-}
-
 app.options("/api/my-agent/ensure", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
 app.post("/api/my-agent/ensure", async (req: Request, res: Response) => {
   setWalletCors(res);
   const address = requireWallet(req, res);
   if (!address) return;
   try {
-    if (await gateBlocked(address, res)) return;
     const result = await ensureUserAgent(address);
     res.json({ ok: true, ...result, name: agentDisplayName(address), settings: userAgentSettings(address), credits: balanceOf(address) });
   } catch (err) {
@@ -723,30 +708,6 @@ app.post("/api/my-agent/ensure", async (req: Request, res: Response) => {
   }
 });
 
-// What this wallet needs to use its agent, and whether it qualifies today. Open
-// to any signed-in wallet so the UI can explain the requirement before the user
-// hits it. Reports nothing while the gate is dormant.
-app.options("/api/my-agent/gate", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
-app.get("/api/my-agent/gate", async (req: Request, res: Response) => {
-  setWalletCors(res);
-  const address = requireWallet(req, res);
-  if (!address) return;
-  try {
-    const gate = await checkMerdGate(address);
-    // `ok` here is the request, `allowed` is the answer. Spreading the gate
-    // result directly would overwrite one with the other.
-    res.json({
-      ok: true,
-      enabled: gate.enabled,
-      allowed: gate.ok,
-      conditions: gate.conditions,
-      message: gate.enabled && !gate.ok ? gateMessage(gate) : null,
-    });
-  } catch (err) {
-    console.error("[my-agent] gate check failed:", err instanceof Error ? err.message : err);
-    res.status(502).json({ ok: false, error: "could not check your access just now, try again shortly" });
-  }
-});
 
 // Customize this wallet's agent (session-gated). Today: rename. The settings
 // store is an extensible object, so future knobs land here without a new route.
@@ -1019,7 +980,6 @@ app.post("/api/my-agent/message", async (req: Request, res: Response) => {
   if (text.length > 2000) { res.status(400).json({ ok: false, error: "message too long (2000 char max)" }); return; }
   const guard = chatGuardSync(address);
   if (guard) { res.status(guard.status).json({ ok: false, code: guard.code, error: guard.error }); return; }
-  if (await gateBlocked(address, res)) { endTurn(address); return; }
   // One credit per user-initiated turn. Debit lives ONLY on this route and
   // /stream: system-driven turns (scout runs, sessionKind sessions) call the
   // agent directly and never charge. After the guards so a rate-limited retry
@@ -1080,7 +1040,6 @@ app.post("/api/my-agent/stream", async (req: Request, res: Response) => {
   // rather than a half-open stream.
   const guard = chatGuardSync(address);
   if (guard) { res.status(guard.status).json({ ok: false, code: guard.code, error: guard.error }); return; }
-  if (await gateBlocked(address, res)) { endTurn(address); return; }
   // Same debit placement as /message: after the guards, before the SSE headers
   // and the slot wait, so an out-of-credits wallet gets a clean JSON 402.
   const spend = trySpend(address);

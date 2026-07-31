@@ -30,7 +30,7 @@ const { PACKS, packs, packsForApi, packMerdWei, merdAsset, merdCreditsEnabled, a
   "../src/credits.js"
 );
 const { paymentMessage, BURN_ADDRESS, USDG_ASSET, PaymentGate } = await import("../src/payments/PaymentGate.js");
-const { merdTokenAddress } = await import("../src/deploy/tokenGate.js");
+const { merdTokenAddress } = await import("../src/merd/merd.js");
 
 // The mined MERD address. Valid in form, no code behind it yet, which is the
 // whole reason this feature has to stay off until an operator says otherwise.

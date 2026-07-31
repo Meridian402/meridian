@@ -31,6 +31,8 @@ import {
 export const MERD_SALT: Hex = "0x0000000000000000000000000000000000000000000000000000000000012e8a"; // 77450
 
 /** Where MERD lands. Deterministic, and verified before any broadcast. */
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
 export const MERD_ADDRESS: Address = "0x4663196C0Ad93594907555b2018457695Db8Ccef";
 
 /**
@@ -251,4 +253,37 @@ export function merdPoolKey(hooks: Address = MERD_HOOK_ADDRESS): PoolKey {
     tickSpacing: MERD_POOL_TICK_SPACING,
     hooks,
   };
+}
+
+/**
+ * The configured MERD token address, or null when MERD is not live here.
+ *
+ * This lived in the access gate until that gate was removed. It is token
+ * IDENTITY rather than access control, and the only caller left is credit
+ * pricing, so it belongs next to MERD_ADDRESS.
+ */
+export function merdTokenAddress(): Address | null {
+  const raw = (process.env.MERD_TOKEN_ADDRESS ?? "").trim();
+  if (!ADDRESS_RE.test(raw)) return null;
+  // Hex-shaped is not the same as "is MERD". Two misconfigurations would
+  // otherwise arm a live payment path silently: the zero address, and any other
+  // real token (USDG pasted into the wrong line). Either would have people
+  // paying for credits in something that is not MERD, and the price is a flat
+  // number of wei that only makes sense for MERD, so the loss would be real.
+  //
+  // MERD's address is deterministic and this repo already knows it, so a
+  // mismatch is a mistake rather than a deployment we did not anticipate. Fail
+  // closed and say why. MERD_ADDRESS above is the one place to change.
+  if (raw.toLowerCase() === "0x0000000000000000000000000000000000000000") {
+    console.error("[merd] MERD_TOKEN_ADDRESS is the zero address, ignoring it and staying dormant");
+    return null;
+  }
+  if (raw.toLowerCase() !== MERD_ADDRESS.toLowerCase()) {
+    console.error(
+      `[merd] MERD_TOKEN_ADDRESS is ${raw}, which is not MERD (${MERD_ADDRESS}). Staying dormant rather than ` +
+        "pricing credits in an unknown token. Update MERD_ADDRESS above if MERD really moved.",
+    );
+    return null;
+  }
+  return raw as Address;
 }

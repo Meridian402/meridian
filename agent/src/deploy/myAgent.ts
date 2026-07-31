@@ -8,7 +8,6 @@
 // talk to that agent through gw.agent(agentId), which owns the session/message
 // surface (postMessageSync, listSessionMessages).
 import { GatewayClient } from "@openhermit/sdk";
-import { assertMerdGate } from "./tokenGate.js";
 import { appendLedger } from "../ledger.js";
 import { config } from "../config.js";
 import { dataPath } from "../dataDir.js";
@@ -342,14 +341,12 @@ export interface EnsureResult {
  * reason when the gateway is not configured, so callers can degrade cleanly.
  */
 export async function ensureUserAgent(address: string): Promise<EnsureResult> {
-  // Access gate: qualify by staking 0.1% of MERD, or holding 0.25% of PONS or
-  // INDEX (any one). A no-op unless MERIDIAN_HOLDER_GATE=on, which is its own
-  // switch and not a side effect of MERD existing: admission control and the
-  // credit system answer different questions, and running both would mean
-  // buying your way in AND paying per message. This one chokepoint covers
-  // create, chat, stream and settings, since every agent path funnels through
-  // here, so a client cannot route around it if it is ever turned on.
-  await assertMerdGate(address);
+  // No access gate. There is ONE ramp onto the product and it is credits: every
+  // wallet gets an agent, a free allowance, and pays per message after that. A
+  // holder gate used to sit here as a second ramp, and two ramps meant buying
+  // your way in AND paying per message, which put the free tier out of reach of
+  // the people it was written for. Removed rather than left dormant, because a
+  // dormant gate is still a thing that can be switched on by accident.
   const agentId = agentIdForWallet(address);
   const gw = gateway();
   if (!gw) return { agentId, ready: false, created: false, reason: "gateway_unconfigured" };
