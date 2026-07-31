@@ -46,7 +46,7 @@ import { startBackups, backupStatus } from "./backup.js";
 import { initLedger, ledgerStatus } from "./ledger.js";
 import { scheduleOpenDeploy, runOpenDeploy, openDeployPreview } from "./openDeploy.js";
 import { lpProfit } from "./lpProfit.js";
-import { performanceSummary, startEquitySnapshotter } from "./performance.js";
+import { startEquitySnapshotter } from "./performance.js";
 import { marketMakingProof } from "./marketMakingPnl.js";
 import { scanOpportunities, startLpAllocator } from "./lpAllocator.js";
 import { startBasisLogger } from "./research/basisLogger.js";
@@ -558,17 +558,6 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
   }
   writeFileSync(dataPath(file), content);
   res.json({ ok: true, file, bytes: content.length });
-});
-
-// The track record: annotated, on-chain-audited performance history. Open,
-// read-only — the public proof surface behind the "nothing to hide" thesis.
-app.get("/api/performance", async (_req: Request, res: Response) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  try {
-    res.json(await performanceSummary());
-  } catch (err) {
-    res.status(502).json({ error: err instanceof Error ? err.message : "performance unavailable" });
-  }
 });
 
 // The proof instrument: isolated market-making P&L (fees - impermanent loss -

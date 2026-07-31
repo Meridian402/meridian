@@ -82,7 +82,6 @@ const KNOWN_ROUTES = new Set([
   "/api/open-deploy",
   "/api/opportunities",
   "/api/ops",
-  "/api/performance",
   "/api/portfolio",
   "/api/proof",
   "/api/research-universe",

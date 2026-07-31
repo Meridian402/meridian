@@ -204,6 +204,17 @@ const GENESIS: TimelineEvent[] = [
   },
 ];
 
+/**
+ * DELIBERATELY UNREFERENCED. Do not delete this as dead code.
+ *
+ * The /api/performance route was removed when the track record page went, so
+ * nothing calls this today. The WRITER is still running: startEquitySnapshotter
+ * appends to equity-snapshots.jsonl every 30 minutes, and that file is
+ * ledgered, backed up and synced. Deleting the reader would leave us
+ * accumulating a history nobody can read without writing it again from scratch,
+ * and an equity series is the one thing that cannot be backfilled after the
+ * fact. It stays as the way back into data we are still collecting on purpose.
+ */
 export async function performanceSummary() {
   const live = await computeEquityNow();
   const execs = readAllExecutions();
