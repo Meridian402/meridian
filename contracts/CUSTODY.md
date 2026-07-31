@@ -1,7 +1,20 @@
 # Meridian custody — the recipient-pinning design
 
-**Status: design + unaudited draft. Not deployed. Must be built, tested, and
+**Status: built and unit-tested, NOT deployed, NOT audited. Must be deployed and
 externally audited before it holds any real user funds.**
+
+Changed 2026-07-31: `agent/src/custody/vault.ts` now scopes the session key to
+the ADAPTER, not the UniversalRouter, so the hole described below is closed in
+code. `MeridianVaultRouter.sol` has a test suite covering the property that
+matters (proceeds always return to the caller, no recipient parameter exists,
+unspent input is swept back, a reverted swap costs the vault nothing), and the
+suite is mutation-checked: diverting the sweep makes it fail.
+
+Still outstanding before this can be armed:
+  - deploy MeridianVaultRouter and set CUSTODY_VAULT_ADAPTER
+  - a fork test proving the v4 encoding against the live UniversalRouter
+  - an external audit
+  - CUSTODY_SESSION_MASTER, which is what actually turns custody on
 
 ## The one property that matters
 
@@ -32,13 +45,20 @@ guarantee.
 
 ## The fix: a thin, recipient-pinning adapter
 
-> **Status: design, not current behavior.** What ships today in
-> `agent/src/custody/vault.ts` scopes the session key to the UniversalRouter's
-> `execute` selector **directly**. The recipient-pinning adapter below is the
-> audit-phase refinement (see the inline note in `buildScopeSession`), and
-> `MeridianVaultRouter.sol` is a draft referenced by nothing else yet. Custody
-> is dormant behind `CUSTODY_SESSION_MASTER`; do not enable it expecting the
-> property this section describes until vault.ts targets the adapter.
+> **Status: this IS current behavior as of 2026-07-31.** `vault.ts` scopes the
+> role to `CUSTODY_VAULT_ADAPTER` and allows exactly one selector,
+> `swapExactInSingle(address,address,uint24,int24,uint128,uint128)` =
+> `0x17f784c2`, which has no recipient argument. There is deliberately no
+> fallback to scoping the UniversalRouter: with the adapter unset, custody
+> refuses to build a vault rather than quietly reinstating the hole.
+>
+> Server-side, `executeForUser` decodes that calldata and applies the per-trade
+> cap to the amount the chain will actually move. It previously trusted an
+> `amountUsd` passed in beside an opaque blob, which bounded an honest caller
+> and nobody else.
+>
+> Custody is still dormant behind `CUSTODY_SESSION_MASTER`, and the adapter is
+> still unaudited and undeployed.
 
 The session key is scoped to call **only** `MeridianVaultRouter` — never the
 UniversalRouter directly. The adapter takes trade *intent* (which tokens, how

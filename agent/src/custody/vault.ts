@@ -28,7 +28,7 @@
 //   - SESSION actions (execute a trade): signed here with the derived session
 //     key, gated by risk caps. This is the only thing the backend can trigger.
 import {
-  createWalletClient, http, encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbiItem,
+  createWalletClient, http, encodeFunctionData, decodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbiItem,
   getAddress, keccak256, encodePacked, stringToHex, type Address, type Hex,
 } from "viem";
 import { getPublicClient, robinhoodChain } from "../venues/signer.js";
@@ -41,21 +41,33 @@ const SAFE_FACTORY = getAddress("0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2");  
 const SAFE_FALLBACK = getAddress("0xf48f2B2d2a534e402487b3ee7C18c33Aec0Fe5e4");  // CompatibilityFallbackHandler 1.3.0
 const MODULE_FACTORY = getAddress("0x000000000000aDdB49795b0f9bA5BC298cDda236"); // Zodiac Module Proxy Factory
 const ROLES_MASTERCOPY = getAddress("0x9646fDAD06d3e24444381f44362a3B0eB343D337"); // Roles 2.1.0
-const UNIVERSAL_ROUTER = getAddress("0x8876789976dEcBfCbBbe364623C63652db8C0904"); // stock swaps
 const USDG = getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
-const PERMIT2 = getAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3");
 const ZERO: Address = "0x0000000000000000000000000000000000000000";
 const SENTINEL: Address = "0x0000000000000000000000000000000000000001";
-const MAX256 = (1n << 256n) - 1n, MAX160 = (1n << 160n) - 1n;
+const MAX256 = (1n << 256n) - 1n;
 
 // Scope: the session key may call ONLY UniversalRouter.execute — tighter than
 // the spike's allowTarget. (Parameter constraints that also pin the swap output
 // recipient to the Safe are the audit-phase refinement; noted in the plan.)
 const ROLE_KEY = stringToHex("mrd-trade", { size: 32 });
-const EXECUTE_SELECTOR: Hex = "0x3593564c"; // UniversalRouter.execute(bytes,bytes[],uint256)
+// MeridianVaultRouter.swapExactInSingle(address,address,uint24,int24,uint128,uint128).
+// Deliberately has NO recipient argument: that absence is the security property,
+// and the contract's test suite asserts the selector so nobody can quietly add one.
+const SWAP_SELECTOR: Hex = "0x17f784c2";
 const OPT_SEND = 1; // ExecutionOptions.Send
 
 const MAX_PER_TRADE_USD = Number(process.env.CUSTODY_MAX_PER_TRADE_USD ?? 100);
+
+/**
+ * MeridianVaultRouter, the recipient-pinning adapter the session key is scoped
+ * to. Unset until it is deployed, and custody stays dormant without it: scoping
+ * the session key straight at the UniversalRouter is what made "cannot
+ * withdraw" untrue, so there is no fallback to that behaviour on purpose.
+ */
+export function vaultAdapterAddress(): Address | null {
+  const raw = (process.env.CUSTODY_VAULT_ADAPTER ?? "").trim();
+  return /^0x[0-9a-fA-F]{40}$/.test(raw) ? (getAddress(raw) as Address) : null;
+}
 
 // ---- ABIs ----
 const factoryAbi = [parseAbiItem("function createProxyWithNonce(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)")];
@@ -76,7 +88,7 @@ const rolesAbi = [
   parseAbiItem("function owner() view returns (address)"),
 ];
 const erc20Abi = [parseAbiItem("function approve(address spender, uint256 amount) returns (bool)"), parseAbiItem("function balanceOf(address) view returns (uint256)")];
-const permit2Abi = [parseAbiItem("function approve(address token, address spender, uint160 amount, uint48 expiration)")];
+const adapterAbi = [parseAbiItem("function swapExactInSingle(address tokenIn, address tokenOut, uint24 fee, int24 tickSpacing, uint128 amountIn, uint128 minOut) returns (uint256)")];
 
 // ---- deterministic per-user salts, so addresses are known before deploy ----
 const salt = (user: Address, tag: string) => BigInt(keccak256(encodePacked(["address", "string"], [user, tag])));
@@ -169,7 +181,8 @@ export async function buildVaultSetup(userAddress: string): Promise<Record<strin
   const vault = await predictVault(owner);
   const roles = await predictRoles(owner, vault);
   const sessionKey = sessionAddressFor(owner);
-  const exp = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365;
+  const adapter = vaultAdapterAddress();
+  if (!adapter) throw new Error("custody_adapter_unset");
 
   const steps: PreparedStep[] = [
     { kind: "deploy-safe", description: "Create your vault (you are its only owner)", to: SAFE_FACTORY,
@@ -179,12 +192,18 @@ export async function buildVaultSetup(userAddress: string): Promise<Record<strin
     safeExecStep("enable-module", "Enable the module on your vault", vault, owner, vault, encodeFunctionData({ abi: safeAbi, functionName: "enableModule", args: [roles] })),
     { kind: "assign-role", description: "Grant your agent the trade-only role", to: roles,
       data: encodeFunctionData({ abi: rolesAbi, functionName: "assignRoles", args: [sessionKey, [ROLE_KEY], [true]] }), value: "0" },
-    { kind: "scope-target", description: "Restrict the role to the swap router", to: roles,
-      data: encodeFunctionData({ abi: rolesAbi, functionName: "scopeTarget", args: [ROLE_KEY, UNIVERSAL_ROUTER] }), value: "0" },
-    { kind: "scope-function", description: "Restrict it to the swap function only", to: roles,
-      data: encodeFunctionData({ abi: rolesAbi, functionName: "allowFunction", args: [ROLE_KEY, UNIVERSAL_ROUTER, EXECUTE_SELECTOR, OPT_SEND] }), value: "0" },
-    safeExecStep("approve-usdg", "Let the vault trade its USDG", vault, owner, USDG, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [PERMIT2, MAX256] })),
-    safeExecStep("approve-router", "Authorize the swap router (via Permit2)", vault, owner, PERMIT2, encodeFunctionData({ abi: permit2Abi, functionName: "approve", args: [USDG, UNIVERSAL_ROUTER, MAX160, exp] })),
+    // Scoped to the ADAPTER, never the UniversalRouter. The router's payout
+    // recipient is a parameter buried in nested dynamic bytes, which Roles
+    // conditions cannot pin without freezing the whole trade, so a key scoped
+    // to router.execute could swap the vault out to an attacker. The adapter
+    // takes no recipient at all and sweeps to msg.sender, which makes the
+    // property structural instead of dependent on a condition tree.
+    { kind: "scope-target", description: "Restrict the role to Meridian's vault adapter", to: roles,
+      data: encodeFunctionData({ abi: rolesAbi, functionName: "scopeTarget", args: [ROLE_KEY, adapter] }), value: "0" },
+    { kind: "scope-function", description: "Restrict it to one swap function that cannot name a recipient", to: roles,
+      data: encodeFunctionData({ abi: rolesAbi, functionName: "allowFunction", args: [ROLE_KEY, adapter, SWAP_SELECTOR, OPT_SEND] }), value: "0" },
+    // The vault approves the ADAPTER to pull its USDG. Nothing else can.
+    safeExecStep("approve-adapter", "Let the adapter trade this vault's USDG", vault, owner, USDG, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [adapter, MAX256] })),
   ];
 
   return { ok: true, chainId: 4663, owner, vault, rolesModule: roles, sessionKey, steps,
@@ -210,14 +229,40 @@ export async function buildVaultRevoke(userAddress: string): Promise<Record<stri
  */
 export async function executeForUser(userAddress: string, trade: { to: Address; value: bigint; data: Hex; amountUsd: number }): Promise<{ hash: Hex } | { error: string }> {
   if (!custodyEnabled()) return { error: "custody_disabled" };
+  const adapter = vaultAdapterAddress();
+  if (!adapter) return { error: "custody_adapter_unset" };
   const owner = getAddress(userAddress);
-  if (trade.amountUsd > MAX_PER_TRADE_USD) return { error: `trade $${trade.amountUsd} exceeds the $${MAX_PER_TRADE_USD} per-trade cap` };
-  if (getAddress(trade.to) !== UNIVERSAL_ROUTER) return { error: "trade target is not the scoped router" };
+  if (getAddress(trade.to) !== adapter) return { error: "trade target is not the scoped adapter" };
+
+  // Read the trade OUT of the calldata rather than believing what came
+  // alongside it. amountUsd used to be a number the caller passed in next to an
+  // opaque blob, so the per-trade cap bounded an honest caller and nothing
+  // else. Now the cap is applied to the amount the chain will actually move.
+  //
+  // The decode doubles as a shape check: anything that is not exactly this
+  // adapter's one swap function is refused here, before it reaches a signer.
+  // The on-chain Roles scope would refuse it too, and that is the guarantee
+  // that counts, but a request we can already tell is wrong should not cost a
+  // transaction to find out.
+  let decoded: { functionName: string; args: readonly unknown[] };
+  try {
+    decoded = decodeFunctionData({ abi: adapterAbi, data: trade.data }) as typeof decoded;
+  } catch {
+    return { error: "trade calldata is not a call to the vault adapter" };
+  }
+  if (decoded.functionName !== "swapExactInSingle") return { error: "only swapExactInSingle may be executed" };
+  const tokenIn = getAddress(decoded.args[0] as string);
+  const amountIn = decoded.args[4] as bigint;
+  // USDG is 6dp and is the only input we price. Anything else has no USD figure
+  // here, and inventing one would put the cap back on trust.
+  if (tokenIn !== USDG) return { error: "only USDG-in trades are priced, so only those are capped" };
+  const amountUsd = Number(amountIn) / 1e6;
+  if (amountUsd > MAX_PER_TRADE_USD) return { error: `trade $${amountUsd.toFixed(2)} exceeds the $${MAX_PER_TRADE_USD} per-trade cap` };
 
   const status = await vaultStatus(owner);
   if (!status.active) return { error: "vault not active (deploy + enable first)" };
 
-  guardWalletOp(`custody trade ${owner} $${trade.amountUsd.toFixed(2)}`);
+  guardWalletOp(`custody trade ${owner} $${amountUsd.toFixed(2)}`);
 
   const session = sessionAccountFor(owner);
   const wallet = createWalletClient({ account: session, chain: robinhoodChain, transport: http() }); // session-key signer
@@ -230,6 +275,6 @@ export async function executeForUser(userAddress: string, trade: { to: Address; 
   });
   const rcpt = await client.waitForTransactionReceipt({ hash });
   if (rcpt.status !== "success") return { error: `trade reverted: ${hash}` };
-  recordWalletOp(trade.amountUsd, "custody-trade");
+  recordWalletOp(amountUsd, "custody-trade");
   return { hash };
 }
