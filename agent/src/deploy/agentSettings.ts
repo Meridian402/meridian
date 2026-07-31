@@ -50,8 +50,28 @@ function cleanText(raw: unknown, cap: number): string | null {
   return cleaned.length ? cleaned : null;
 }
 
+/**
+ * A display name, held to a stricter standard than the other free text.
+ *
+ * Name is the one field that LEAVES its owner. It is published on the public
+ * swarm page, and it is interpolated into OTHER agents' prompts ("you are X,
+ * talking to an agent named Y"), so a name is untrusted text that reaches
+ * strangers and third-party models. goal and voice only ever reach the agent
+ * their owner configured.
+ *
+ * So markup and prompt punctuation come out. React renders our own surfaces as
+ * text nodes and is not the worry; the worry is 32 characters of instruction
+ * shaped like a name landing inside somebody else's system prompt, and any
+ * future consumer of the public feed that is less careful than we are.
+ */
 export function sanitizeName(raw: unknown): string | null {
-  return cleanText(raw, MAX_NAME);
+  const cleaned = cleanText(raw, MAX_NAME);
+  if (cleaned === null) return null;
+  const stripped = cleaned
+    .replace(/[<>{}[\]\\`|]/g, "") // markup and prompt-fence characters
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped.length ? stripped : null;
 }
 
 /**

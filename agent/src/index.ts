@@ -1980,8 +1980,22 @@ scheduleOpenDeploy(); // one-shot capital deployment at the next open, if a plan
 // return a generic message, so a route exception can never leak internals
 // (RPC/viem details, file paths, stack) to a caller.
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  console.error("[http] unhandled route error:", err instanceof Error ? err.stack : err);
   if (res.headersSent) return;
+  // A body express could not parse is the CALLER's mistake, not ours, and it
+  // was answering 500. That is wrong twice: it tells the client to retry
+  // something that will never work, and it buries real server faults in a log
+  // full of noise anyone can generate by sending a bare brace.
+  const status = (err as { status?: number; type?: string } | null)?.status;
+  const type = (err as { type?: string } | null)?.type;
+  if (type === "entity.parse.failed" || (status === 400 && type)) {
+    res.status(400).json({ error: "malformed request body" });
+    return;
+  }
+  if (type === "entity.too.large") {
+    res.status(413).json({ error: "request body too large" });
+    return;
+  }
+  console.error("[http] unhandled route error:", err instanceof Error ? err.stack : err);
   res.status(500).json({ error: "internal error" });
 });
 
