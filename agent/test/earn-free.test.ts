@@ -16,10 +16,14 @@ import type { AgentSettings } from "../src/deploy/agentSettings.js";
 const empty: AgentSettings = {};
 
 test("help states the split, including that earning is never paywalled", () => {
-  const help = routeCli("/help", empty).lines.join("\n");
-  assert.match(help, /one credit each/i, "the price of a message must be visible");
-  assert.match(help, /earn/i);
-  assert.match(help, /never behind the paywall/i, "the promise has to be written down to be a promise");
+  // Stated in both helps: the short one a newcomer reads, and the full index.
+  const short = routeCli("/help", empty).lines.join("\n");
+  assert.match(short, /cost/i, "the price of a message must be visible");
+  assert.match(short, /earn/i, "and that earning is not part of it");
+
+  const all = routeCli("/help all", empty).lines.join("\n");
+  assert.match(all, /one credit each/i);
+  assert.match(all, /never behind the paywall/i, "the promise has to be written down to be a promise");
 });
 
 test("commands stay free, so exploring never costs anything", () => {

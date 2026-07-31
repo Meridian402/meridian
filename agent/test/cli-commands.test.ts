@@ -153,19 +153,49 @@ test("/buy never completes a purchase in the router", () => {
 });
 
 test("help states the cost model, because a CLI is where it finally makes sense", () => {
-  const lines = routeCli("/help", empty).lines.join("\n");
-  // Asserted on the SPLIT, not on a sentence, so the copy can be improved
-  // without the test demanding the old wording back.
-  assert.match(lines, /what costs/i, "the paid thing must be named without being asked");
-  assert.match(lines, /what does not/i, "and so must the free things, which are most of them");
-  assert.ok(lines.includes("/buy"));
+  // The short help is what somebody types /help to get, so it has to answer
+  // "what do I do here" and stay small enough to read. The full index carries
+  // the reference detail.
+  const short = routeCli("/help", empty);
+  const shortText = short.lines.join("\n");
+  assert.ok(short.lines.length <= 14, `short help is ${short.lines.length} lines, which is a wall again`);
+  assert.match(shortText, /cost/i, "the price of a message must be visible without asking");
+  assert.match(shortText, /free/i, "and so must the fact that most of it is free");
+  assert.match(shortText, /\/help all/, "the way to the full list has to be in the short one");
+  assert.deepEqual(short.suggest, ["/explore", "/whoami", "/status"], "short help should end in things to press");
+
+  const all = routeCli("/help all", empty).lines.join("\n");
+  assert.match(all, /what costs/i);
+  assert.match(all, /what does not/i);
+  assert.ok(all.includes("/buy"));
+  assert.ok(all.length > shortText.length, "the full index should actually be fuller");
 });
 
 test("/explore is a tour you run, not a manual you read", () => {
   const r = routeCli("/explore", empty);
   assert.ok(r.lines.some((l) => l.includes("(1/")), "should say where you are in it");
-  assert.ok(r.lines.some((l) => l.trim().startsWith("try:")), "every step must offer something to actually run");
-  assert.ok(r.lines.some((l) => l.includes("/explore 2")), "and a way onward");
+  // The thing to try and the way onward are both SUGGESTIONS, so they are one
+  // tap rather than something to copy out by hand. Telling somebody to type
+  // "/explore 3" to turn to page three is the clunkiness being removed.
+  assert.ok(r.suggest && r.suggest.length >= 2, "a step must offer something to run and a way onward");
+  assert.equal(r.suggest?.[r.suggest.length - 1], "/explore 2", "the last suggestion is the next page");
+  assert.ok(!r.lines.some((l) => l.includes("/explore 2")), "and it is not also printed as text to retype");
+});
+
+test("the last step of the tour offers no next page", () => {
+  const last = routeCli("/explore 99", empty);
+  assert.ok(last.lines.some((l) => l.includes("that is the tour")));
+  assert.ok(!last.suggest?.some((sug) => sug.startsWith("/explore ")), "there is nowhere further to go");
+  assert.ok(last.suggest?.length, "but it should still leave something to try");
+});
+
+test("a typo offers the fix as something to press", () => {
+  const near = routeCli("/statuss", empty);
+  assert.ok(near.error);
+  assert.deepEqual(near.suggest, ["/status"], "one tap to the command they meant");
+  const far = routeCli("/xylophone", empty);
+  assert.ok(far.error);
+  assert.deepEqual(far.suggest, ["/help"], "no wild guess, but never a dead end either");
 });
 
 test("/explore clamps rather than erroring on a bad step", () => {
@@ -225,7 +255,7 @@ test("help sells the swarm by what it gives, not only by what it costs", () => {
   // One opted-in user out of twenty-two. The line described the price (your
   // agent speaks in public) and never the return (it learns from ours), which
   // is a strange way to ask someone to say yes.
-  const help = routeCli("/help", empty).lines.join("\n");
+  const help = routeCli("/help all", empty).lines.join("\n");
   assert.ok(/\/swarm\b/.test(help));
   assert.ok(/learn/i.test(help), "the help line should say what your agent gets out of it");
 });

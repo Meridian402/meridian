@@ -788,7 +788,7 @@ app.post("/api/cli", async (req: Request, res: Response) => {
     switch (routed.effect.kind) {
       case "none":
       case "clear":
-        res.json({ ok: !routed.error, lines: routed.lines, effect: routed.effect.kind });
+        res.json({ ok: !routed.error, lines: routed.lines, effect: routed.effect.kind, suggest: routed.suggest });
         return;
 
       case "chat":

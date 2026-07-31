@@ -43,10 +43,24 @@ export interface CliResult {
   effect: CliEffect;
   /** True when the line was not understood, so the UI can style it as an error. */
   error?: boolean;
+  /**
+   * What to offer as one-tap next steps.
+   *
+   * Structured rather than left inside the printed text, because the whole
+   * point is that the client can RUN these. Printing "try: /status" and making
+   * somebody retype it is the clunkiness: every step of the tour, every near
+   * miss on a typo, and every "here is what you can do next" ended in the
+   * person copying a string by hand. An entry is a literal line to submit, so
+   * it can be a command or an ordinary message, and the client does not have to
+   * know which.
+   */
+  suggest?: string[];
 }
 
-const ok = (lines: string[], effect: CliEffect = { kind: "none" }): CliResult => ({ lines, effect });
-const err = (lines: string[]): CliResult => ({ lines, effect: { kind: "none" }, error: true });
+const ok = (lines: string[], effect: CliEffect = { kind: "none" }, suggest?: string[]): CliResult =>
+  suggest?.length ? { lines, effect, suggest } : { lines, effect };
+const err = (lines: string[], suggest?: string[]): CliResult =>
+  suggest?.length ? { lines, effect: { kind: "none" }, error: true, suggest } : { lines, effect: { kind: "none" }, error: true };
 
 /** Read-only house-desk commands that already exist in console.ts. Passed
  *  through rather than reimplemented, so the CLI and the desk can never drift. */
@@ -55,10 +69,28 @@ const DESK = new Set([
   "trades", "basis", "lp", "universe", "tools", "wallet",
 ]);
 
+// Two helps, because one help serving both audiences serves neither. The
+// default answers "what do I do here", which is what somebody types /help to
+// find out. The full index is a reference, and a reference read by a newcomer
+// is a wall: 32 lines and 25 commands, most of which mean nothing until you
+// have used the thing for a while.
 const HELP = [
-  "meridian cli. type a message to talk to your agent, or use a command.",
+  "type a message to talk to your agent. commands start with a slash.",
   "",
-  "  your agent",
+  "  /explore           a short guided tour, one thing at a time",
+  "  /whoami            how your agent is set up right now",
+  "  /status            what the live desk is doing",
+  "  /credits           your balance and what spends it",
+  "",
+  "  /help all          every command",
+  "",
+  "messages cost one credit. commands, the desk and all of earn are free.",
+];
+
+const HELP_ALL = [
+  "every command. anything without a slash is a message to your agent.",
+  "",
+  "  shape your agent",
   "    /whoami            what your agent is set to right now",
   "    /name <name>       rename it",
   "    /risk <level>      conservative | balanced | aggressive",
@@ -81,9 +113,7 @@ const HELP = [
   "  session",
   "    /explore           a short tour, one thing at a time",
   "    /clear             clear this transcript",
-  "    /help              this",
-  "",
-  "anything that is not a command is a message to your agent.",
+  "    /help              the short version",
   "",
   "  what costs: a message to your agent. one credit each.",
   "  what does not: every command above, the whole desk, and all of earn.",
@@ -173,7 +203,9 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
 
     case "help":
     case "?":
-      return ok(HELP);
+      if (arg.toLowerCase() === "all") return ok(HELP_ALL);
+      // The short help ends in things to press rather than things to read.
+      return ok(HELP, { kind: "none" }, ["/explore", "/whoami", "/status"]);
 
     case "clear":
       return ok([], { kind: "clear" });
@@ -186,11 +218,22 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
       // so it survives a refresh, is linkable, and can be jumped into anywhere.
       const step = Math.max(1, Math.min(TOUR.length, parseInt(arg, 10) || 1));
       const t = TOUR[step - 1];
-      const next =
-        step < TOUR.length
-          ? `/explore ${step + 1} for the next one.`
-          : `that is the tour. /help has the full list whenever you want it.`;
-      return ok([`(${step}/${TOUR.length}) ${t.title}`, ``, ...t.lines, ``, `  try:  ${t.tryIt}`, ``, next]);
+      const last = step >= TOUR.length;
+      // Both the thing to try and the way onward are SUGGESTIONS, so the reader
+      // taps them instead of copying them out. Telling somebody to type
+      // "/explore 3" to see page three is the clunkiest possible way to turn a
+      // page, and it was doing that five times in a row.
+      return ok(
+        [
+          `(${step}/${TOUR.length}) ${t.title}`,
+          ``,
+          ...t.lines,
+          ``,
+          last ? `that is the tour. /help has the full list whenever you want it.` : ``,
+        ].filter((l, i, a) => !(l === "" && a[i - 1] === "")),
+        { kind: "none" },
+        last ? [t.tryIt] : [t.tryIt, `/explore ${step + 1}`],
+      );
     }
 
     case "credits":
@@ -291,7 +334,15 @@ export function routeCli(raw: string, settings: AgentSettings): CliResult {
 
     default:
       if (DESK.has(cmd)) return ok([], { kind: "desk", command: cmd });
-      return err([`"/${cmd}" is not a command. /help lists them.`, ...suggest(cmd)]);
+      // The near miss is a SUGGESTION now, so a typo is one tap from being
+      // fixed rather than a sentence telling you to type it again yourself.
+      const near = suggest(cmd);
+      return err(
+        near.length
+          ? [`"/${cmd}" is not a command. did you mean ${near[0]}?`]
+          : [`"/${cmd}" is not a command. /help lists them.`],
+        near.length ? near : ["/help"],
+      );
   }
 }
 
@@ -310,7 +361,7 @@ function suggest(cmd: string): string[] {
   }
   // Only offer it when it is actually close. A wrong suggestion is worse than
   // none: it sends someone off to try a command they never meant.
-  return best && bestD <= 2 ? [`did you mean /${best}?`] : [];
+  return best && bestD <= 2 ? [`/${best}`] : [];
 }
 
 function distance(a: string, b: string): number {
