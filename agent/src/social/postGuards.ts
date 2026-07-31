@@ -138,8 +138,64 @@ const FORBIDDEN: Array<[RegExp, string]> = [
   [/\b(days?|weeks?|hours?) away\b|\bnot long now\b|\bany day now\b|\bcoming (soon|shortly)\b|\bstay tuned\b|\bmark your calendar/i, "launch timing hint"],
 ];
 
+// Asking the timeline to hand you a method, while saying you cannot do it
+// yourself. Two signals, both required, because either alone is fine and only
+// together are they the failure.
+//
+// This one got through every rule above and went out: "how do you tell a stale
+// quote from a real move? i have spent three days getting that wrong in both
+// directions... if you have a rule that works out here i would like to hear
+// it." Nothing in FORBIDDEN matched, because nothing there is about competence.
+//
+// Telling real movement from a stale print is the entire job of a desk quoting
+// tokenized equities while the underlying is shut. Publishing that you cannot
+// do it, and asking strangers for the rule, is not the honest-operator posture
+// the prompt is going for. It reads as nobody being home, and on an account
+// attached to a project it reads as a reason to leave.
+//
+// Deliberately narrow. Merd SHOULD ask real questions and SHOULD be uncertain
+// about the market as often as that is true. What he may not do is both at
+// once about his own capability.
+const ASKS_FOR_METHOD = [
+  /\bhow (do|does|d')\s*(you|ya|anyone|any of you|people|folks)\b/i,
+  /\bwhat('s| is)\s+(your|the)\s+(rule|method|heuristic|approach|trick|tell)\b/i,
+  /\bif you (have|know|use|got)\s+(a|an|any)\s+(rule|method|heuristic|way|approach|trick)\b/i,
+  /\b(anyone|somebody|someone)\s+(know|got|have)\b.{0,40}\b(rule|method|way|trick|tell)\b/i,
+  /\bi would like to hear it\b|\bwould love to hear\b|\btell me how you\b/i,
+];
+
+const ADMITS_INCAPACITY = [
+  /\bi (can|could)\s?n[o']?t\s+(tell|work out|figure|separate|distinguish|read)\b/i,
+  /\bgetting (that|it|this) wrong\b|\bkeep getting (that|it|this) wrong\b/i,
+  /\b(three|two|four|five|\d+)\s+(days?|weeks?)\s+(of|getting|trying|and)\b/i,
+  /\bis not settling it\b|\bstill (cannot|can't|do ?n[o']?t) (tell|know|work)\b/i,
+  /\bno idea how to\b|\bcannot work (it|this|that) out\b/i,
+];
+
+const hits = (text: string, res: RegExp[]): string | null => {
+  for (const re of res) {
+    const m = text.match(re);
+    if (m) return m[0];
+  }
+  return null;
+};
+
+/**
+ * A post that both asks the reader for a method AND says the desk cannot do it.
+ * Returns a reason when it must not go out, else null.
+ */
+export function helplessReason(text: string): string | null {
+  const asking = hits(text, ASKS_FOR_METHOD);
+  if (!asking) return null;
+  const admitting = hits(text, ADMITS_INCAPACITY);
+  if (!admitting) return null;
+  return `asks the timeline to do the desk's job: matched "${asking}" with "${admitting}"`;
+}
+
 /** Returns a reason string if the text must not be posted, else null. */
 export function forbiddenReason(text: string): string | null {
+  const helpless = helplessReason(text);
+  if (helpless) return helpless;
   for (const [re, why] of FORBIDDEN) {
     const hit = text.match(re);
     if (hit) return `${why}: matched "${hit[0]}"`;

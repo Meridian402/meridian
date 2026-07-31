@@ -214,3 +214,54 @@ test("a leading POST: label is still just a label", () => {
   assert.equal(text, "a normal tweet.");
   assert.equal(note, "a private thought");
 });
+
+// ---- a desk that cannot do its job must not say so on its own timeline ------
+//
+// This exact post went out. Nothing in FORBIDDEN matched it, because every rule
+// there is about secrets and none is about competence.
+
+test("the post that actually went out is refused", () => {
+  const real =
+    "genuine question for anyone actually trading these pools: how do you tell a stale quote " +
+    "from a real move? i have spent three days getting that wrong in both directions, and " +
+    "comparing price against the daily percentage is not settling it. if you have a rule that " +
+    "works out here i would like to hear it.";
+  const why = forbiddenReason(real);
+  assert.ok(why, "this must never reach the timeline again");
+  assert.match(why!, /desk's job/);
+});
+
+test("both signals are required, so ordinary curiosity still posts", () => {
+  // Asking the room something, with no admission of incapacity. Merd should ask
+  // real questions; that was never the problem.
+  assert.equal(
+    forbiddenReason("weekend basis on NVDA is running wider than i would have guessed. how do you all read a gap that only exists while the market is shut?"),
+    null,
+  );
+  // Uncertainty about the MARKET, with no request for a method. Also fine, and
+  // the whole point of the admission form.
+  assert.equal(
+    forbiddenReason("i cannot tell yet whether this spread is structural or just thin weekend books. holding the position either way until it resolves."),
+    null,
+  );
+});
+
+test("the refusal does not depend on one phrasing", () => {
+  for (const post of [
+    "what is your rule for separating a stale print from real flow? i keep getting that wrong.",
+    "anyone got a way to tell noise from a move? i cannot tell them apart at all right now.",
+    "three days of this and i still cannot tell. tell me how you handle it.",
+  ]) {
+    assert.ok(forbiddenReason(post), `should refuse: ${post}`);
+  }
+});
+
+test("a real teardown is never mistaken for helplessness", () => {
+  // The strongest form Merd has. It contains a question and a limitation, and
+  // must sail through: the limitation is the MARKET's, not his.
+  const teardown =
+    "SPCX pays 1% and the markout says the flow is informed, so most of that fee is not profit, " +
+    "it is compensation. the question is whether depth holds when the underlying reopens. i am " +
+    "quoting it small until it does.";
+  assert.equal(forbiddenReason(teardown), null);
+});
