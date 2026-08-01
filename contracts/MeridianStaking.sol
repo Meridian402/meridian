@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+// SUPERSEDED by MeridianStakingRewards.sol. The operator chose the revenue-share
+// model (stake MERD, claim a 20% cut of platform revenue in USDG) over this
+// auto-compounding MERD vault. This file is kept as the tested alternative
+// design; the live staking contract is MeridianStakingRewards.
+
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
