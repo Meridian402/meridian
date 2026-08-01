@@ -59,13 +59,24 @@ test("prepare refuses while dormant, so no MERD tx is ever built early", async (
 });
 
 test("the state read carries no rate field, ever", async () => {
-  // The vault has no APR by design. The dormant shape must not carry one, and
-  // when live the only forward-looking-sounding field is growthSinceLaunchPct,
-  // which is history. Assert the dormant shape is exactly { enabled: false }.
+  // The reward model has no APR by design: stakers earn a claimed USDG cut of
+  // revenue, never a promised rate. The dormant shape is exactly { enabled:
+  // false } and no live field is a projection (yourClaimableUsdg is accrued,
+  // yourStakedMerd and totalStakedMerd are balances).
   delete process.env.MERD_TOKEN_ADDRESS;
   delete process.env.MERD_STAKING_ADDRESS;
   const { stakingState } = await load();
   const s = await stakingState();
   assert.deepEqual(Object.keys(s), ["enabled"]);
-  assert.ok(!("apr" in s) && !("aprPct" in s) && !("rate" in s));
+  assert.ok(!("apr" in s) && !("aprPct" in s) && !("rate" in s) && !("projected" in s));
+});
+
+test("claim is refused while dormant too, so no reward tx is built early", async () => {
+  delete process.env.MERD_TOKEN_ADDRESS;
+  delete process.env.MERD_STAKING_ADDRESS;
+  const { prepareStake } = await load();
+  await assert.rejects(
+    () => prepareStake({ address: "0x" + "aa".repeat(20), amountMerd: 0, direction: "claim" }),
+    /not live/,
+  );
 });
