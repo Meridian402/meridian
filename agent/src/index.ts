@@ -62,6 +62,7 @@ import { validateFleet, recordFleet, exportBundle } from "./deploy/fleets.js";
 import { getAgentSigner, getAgentAddress, getPublicClient, assertSignerIsHouseWallet } from "./venues/signer.js";
 import { earnOpportunities, prepareCarry } from "./earn/carry.js";
 import { prepareIndexYield } from "./earn/yieldPosition.js";
+import { stakingState, prepareStake } from "./earn/staking.js";
 import { runScout, scoutAllowed, bountyBoard, settleBounties } from "./earn/scout.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
@@ -1433,7 +1434,10 @@ app.get("/api/earn/opportunities", async (req: Request, res: Response) => {
   const address = typeof req.query.address === "string" ? req.query.address : undefined;
   if (!address) res.setHeader("Cache-Control", "public, max-age=15, stale-while-revalidate=60");
   try {
-    res.json(await earnOpportunities(address));
+    const [opps, staking] = await Promise.all([earnOpportunities(address), stakingState(address)]);
+    // staking is folded in rather than a separate call, and is present only when
+    // MERD is live: while dormant it is { enabled: false } and the card hides.
+    res.json({ ...opps, ...(staking.enabled ? { staking } : {}) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(msg === "invalid address" ? 400 : 502).json({ error: msg });
@@ -1443,13 +1447,17 @@ app.get("/api/earn/opportunities", async (req: Request, res: Response) => {
 app.options("/api/earn/prepare", (_req: Request, res: Response) => { setTradeCors(res); res.sendStatus(204); });
 app.post("/api/earn/prepare", async (req: Request, res: Response) => {
   setTradeCors(res);
-  const { address, amountUsd, direction, kind } = req.body ?? {};
+  const { address, amountUsd, amountMerd, direction, kind } = req.body ?? {};
   try {
+    if (kind === "staking") {
+      res.json(await prepareStake({ address, amountMerd: Number(amountMerd), direction }));
+      return;
+    }
     const prepare = kind === "index-yield" ? prepareIndexYield : prepareCarry;
     res.json(await prepare({ address, amountUsd: Number(amountUsd), direction }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const isValidation = /invalid|must be|no USDG|no syrupUSDG|no payout|not enough|above the/.test(msg);
+    const isValidation = /invalid|must be|no USDG|no syrupUSDG|no payout|not enough|above the|not live|minimum stake|no staked/.test(msg);
     res.status(isValidation ? 400 : 502).json({ ok: false, error: msg });
   }
 });
