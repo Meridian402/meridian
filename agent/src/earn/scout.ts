@@ -19,6 +19,7 @@ import { getPublicClient, getWalletClient } from "../venues/signer.js";
 import { guardWalletOp, recordWalletOp } from "../risk.js";
 import { withHouseWalletLock } from "../houseWallet.js";
 import { USDG } from "../venues/stockPools.js";
+import { TREASURY_WALLET } from "../merd/wallets.js";
 
 const LOG = "bounties.jsonl";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -292,6 +293,90 @@ const transferAbi = [parseAbiItem("function transfer(address to, uint256 amount)
  * balances, and pays nothing. Each transfer passes the same runaway circuit
  * breaker as every other house-wallet op.
  */
+/**
+ * The settle-worthy set, for a payer whose key lives OFF this box: Merd's own
+ * treasury wallet, signing from the machine his runtime lives on. Read-only
+ * and lock-free on purpose; the remote payer serializes itself and reports
+ * each landed transfer back through recordExternalPayout, which is where the
+ * atomicity lives. Includes the treasury and token so the payer can hard-check
+ * it is signing from the right wallet for the right asset.
+ */
+export function pendingPayouts(): Record<string, unknown> {
+  const rows = readRows();
+  const wallets = [...new Set(rows.filter((r) => r.kind === "scout" && r.status === "accrued").map((r) => r.wallet))];
+  const payouts = wallets
+    .map((w) => ({ wallet: w, balanceUsd: Math.round(walletBalanceUsd(rows, w) * 100) / 100 }))
+    .filter((p) => p.balanceUsd >= config.scoutMinPayoutUsd);
+  return { ok: true, minPayoutUsd: config.scoutMinPayoutUsd, treasury: TREASURY_WALLET, usdg: USDG, payouts };
+}
+
+/** What an on-chain check of a claimed payout tx must prove. */
+export interface TransferProof {
+  from: string;
+  to: string;
+  amountUsd: number;
+}
+
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/** Read the USDG Transfer to `to` out of a landed tx. Injectable for tests. */
+async function readUsdgTransfer(txHash: `0x${string}`, to: string): Promise<TransferProof | null> {
+  const client = getPublicClient();
+  const receipt = await client.getTransactionReceipt({ hash: txHash });
+  if (receipt.status !== "success") return null;
+  for (const l of receipt.logs) {
+    if (l.address.toLowerCase() !== USDG.toLowerCase()) continue;
+    if (l.topics[0] !== TRANSFER_TOPIC) continue;
+    const toAddr = `0x${(l.topics[2] ?? "").slice(-40)}`.toLowerCase();
+    if (toAddr !== to.toLowerCase()) continue;
+    const from = `0x${(l.topics[1] ?? "").slice(-40)}`.toLowerCase();
+    return { from, to: toAddr, amountUsd: Number(BigInt(l.data)) / 1e6 };
+  }
+  return null;
+}
+
+/**
+ * Record a payout that Merd's treasury signed elsewhere. The claim is not
+ * trusted: the tx must exist, have succeeded, and contain a USDG Transfer of
+ * at least the claimed amount from the treasury to that scout. Verified so a
+ * buggy payer script cannot zero a scout's balance with a fabricated hash,
+ * and deduped by txHash so a retried report cannot burn the balance twice.
+ * Runs under the house-wallet lock so the balance check and the append are
+ * atomic against a concurrent operator settleBounties run.
+ */
+export async function recordExternalPayout(
+  input: { wallet?: unknown; amountUsd?: unknown; txHash?: unknown },
+  verify: (txHash: `0x${string}`, to: string) => Promise<TransferProof | null> = readUsdgTransfer,
+): Promise<Record<string, unknown>> {
+  const wallet = typeof input.wallet === "string" ? input.wallet.toLowerCase() : "";
+  const amountUsd = typeof input.amountUsd === "number" && Number.isFinite(input.amountUsd) ? input.amountUsd : NaN;
+  const txHash = typeof input.txHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(input.txHash) ? (input.txHash as `0x${string}`) : null;
+  if (!/^0x[0-9a-f]{40}$/.test(wallet)) return { ok: false, error: "wallet must be a 0x address" };
+  if (!(amountUsd > 0)) return { ok: false, error: "amountUsd must be a positive number" };
+  if (!txHash) return { ok: false, error: "txHash must be a 66-character transaction hash" };
+
+  return withHouseWalletLock("record-external-payout", async () => {
+    const rows = readRows();
+    if (rows.some((r) => r.kind === "payout" && r.txHash === txHash)) {
+      return { ok: false, error: "txHash already recorded" };
+    }
+    const balanceUsd = walletBalanceUsd(rows, wallet);
+    if (amountUsd > balanceUsd + 0.01) {
+      return { ok: false, error: `claimed $${amountUsd.toFixed(2)} exceeds the accrued balance $${balanceUsd.toFixed(2)}` };
+    }
+    const proof = await verify(txHash, wallet);
+    if (!proof) return { ok: false, error: "no successful USDG transfer to that wallet in that tx" };
+    if (proof.from !== TREASURY_WALLET.toLowerCase()) {
+      return { ok: false, error: "the transfer is not from the treasury" };
+    }
+    if (proof.amountUsd + 1e-6 < amountUsd) {
+      return { ok: false, error: `on-chain amount $${proof.amountUsd.toFixed(2)} is below the claimed $${amountUsd.toFixed(2)}` };
+    }
+    appendLedger(LOG, { ts: Date.now(), kind: "payout", wallet, status: "paid", amountUsd, txHash } satisfies BountyRow);
+    return { ok: true, wallet: shortAddr(wallet), amountUsd, txHash };
+  });
+}
+
 export async function settleBounties(): Promise<Record<string, unknown>> {
   return withHouseWalletLock("settle-bounties", async () => {
     const rows = readRows(); // MUST be read inside the lock — see the double-settle note above

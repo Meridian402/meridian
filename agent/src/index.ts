@@ -63,7 +63,7 @@ import { getAgentSigner, getAgentAddress, getPublicClient, assertSignerIsHouseWa
 import { earnOpportunities, prepareCarry } from "./earn/carry.js";
 import { prepareIndexYield } from "./earn/yieldPosition.js";
 import { stakingState, prepareStake } from "./earn/staking.js";
-import { runScout, scoutAllowed, bountyBoard, settleBounties } from "./earn/scout.js";
+import { runScout, scoutAllowed, bountyBoard, settleBounties, pendingPayouts, recordExternalPayout } from "./earn/scout.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
@@ -1571,6 +1571,27 @@ app.post("/api/admin/settle-bounties", async (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
   try {
     res.json(await settleBounties());
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// The Merd-pays flow: his treasury wallet signs payouts from the machine his
+// runtime lives on, because no server here holds that key. This pair is the
+// backend's half: the settle-worthy set out, the landed tx hashes back in.
+// Do not run operator settle-bounties in the same window as the remote payer;
+// recordExternalPayout is atomic against it, but a transfer already in flight
+// on the other side cannot be un-sent.
+app.get("/api/admin/pending-payouts", (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  res.json(pendingPayouts());
+});
+
+app.post("/api/admin/record-payout", async (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  try {
+    const body = (req.body ?? {}) as { wallet?: unknown; amountUsd?: unknown; txHash?: unknown };
+    res.json(await recordExternalPayout(body));
   } catch (err) {
     res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }
