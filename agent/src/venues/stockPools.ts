@@ -467,6 +467,42 @@ async function tokenPriceUsd(entry: PoolEntry): Promise<number> {
  * these keep moving nights and weekends, which is what lets the agent trade
  * RWAs around the clock instead of staring at a frozen Friday close.
  */
+/**
+ * The ERC-8056 UI multiplier per symbol, as a float where 1.0 means "no
+ * corporate action applied yet."
+ *
+ * Robinhood's tokenized stocks handle dividends and splits by adjusting this
+ * multiplier while leaving balanceOf static, so a raw token now represents
+ * `uiMultiplier / 1e18` real shares. Swaps trade RAW tokens, so the pool price
+ * is per raw token — to compare it against a real per-share equity price you
+ * must first divide by this. Verified on-chain: AAPL/NVDA sit at exactly 1.0
+ * today, but MU is already 1.0000748, so this is live, not hypothetical.
+ *
+ * Defaults to 1.0 for any token that reverts or lacks the extension, so a token
+ * without ERC-8056 behaves exactly as before rather than breaking.
+ */
+export async function uiMultipliers(symbols: string[]): Promise<Record<string, number>> {
+  const client = getPublicClient();
+  const abi = [parseAbiItem("function uiMultiplier() view returns (uint256)")];
+  const pairs = await Promise.all(
+    symbols.map(async (sym) => {
+      const entry = poolEntryFor(sym);
+      if (!entry) return [sym, 1] as const;
+      try {
+        const m = (await client.readContract({ address: entry.token, abi, functionName: "uiMultiplier" })) as bigint;
+        // A zero or absurd multiplier is treated as 1.0 rather than trusted: a
+        // bad read must never silently rescale a price by a wrong factor, which
+        // would be worse than the drift this exists to correct.
+        const f = Number(m) / 1e18;
+        return [sym, Number.isFinite(f) && f > 0 ? f : 1] as const;
+      } catch {
+        return [sym, 1] as const;
+      }
+    }),
+  );
+  return Object.fromEntries(pairs);
+}
+
 export async function poolPricesUsd(): Promise<Record<string, number>> {
   // Seed plus qualified: the guard's rebalance math divides by these prices,
   // so any symbol the engine can hold MUST price here or a retile of a
