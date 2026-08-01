@@ -1,7 +1,7 @@
 import { createPublicClient, createWalletClient, http, fallback, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "../config.js";
-import { MERD_AGENT_WALLET } from "../merd/wallets.js";
+import { ENGINE_SIGNER_WALLET } from "../merd/wallets.js";
 
 /** Robinhood Chain — an Arbitrum L2 (chain id 4663), not in viem's built-in list. */
 export const robinhoodChain = {
@@ -77,19 +77,21 @@ export function getAgentSigner() {
 
 /**
  * Boot assert, mirror of assertTreasuryIsLive: if this process holds a signer
- * key, it must derive to the house wallet pinned in merd/wallets.ts. Role
+ * key, it must derive to the engine signer pinned in merd/wallets.ts. Role
  * separation, the docs and the published track record all follow that pinned
  * address, so a key rotated without updating wallets.ts would sign from one
- * wallet while everything that explains the money tracks another. Keyless
- * (read-only) deployments have nothing to assert.
+ * wallet while everything that explains the money tracks another. The signer
+ * is deliberately NOT the treasury since 2026-08-01: revenue custody and
+ * signing authority do not share a key. Keyless (read-only) deployments have
+ * nothing to assert.
  */
 export function assertSignerIsHouseWallet(): void {
   const signer = getAgentSigner();
   if (!signer) return;
-  if (signer.address.toLowerCase() !== MERD_AGENT_WALLET.toLowerCase()) {
+  if (signer.address.toLowerCase() !== ENGINE_SIGNER_WALLET.toLowerCase()) {
     throw new Error(
-      `AGENT_SIGNER_PRIVATE_KEY derives to ${signer.address}, but the house wallet pinned in ` +
-        `merd/wallets.ts is ${MERD_AGENT_WALLET}. A key rotation must update wallets.ts in the same ` +
+      `AGENT_SIGNER_PRIVATE_KEY derives to ${signer.address}, but the engine signer pinned in ` +
+        `merd/wallets.ts is ${ENGINE_SIGNER_WALLET}. A key rotation must update wallets.ts in the same ` +
         "change, or role separation, docs and the track record silently follow different wallets.",
     );
   }

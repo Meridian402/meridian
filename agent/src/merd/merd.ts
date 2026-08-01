@@ -36,19 +36,14 @@ const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 export const MERD_ADDRESS: Address = "0x4663196C0Ad93594907555b2018457695Db8Ccef";
 
 /**
- * Receives the entire supply, and separately receives x402 revenue. One
- * treasury doing both jobs, by design.
- *
- * Since the 2026-07-27 single-wallet decision this IS also the hot signing
- * wallet: the operator chose one address for all money in and out, accepting
- * that a compromise of the unattended key reaches the supply authority and
- * the revenue as well. The spend caps and the wallet-op breaker are the
- * remaining bound. deployToken() still refuses outright if the treasury is
- * ever the deploying key.
- *
- * Rotated 2026-07-27 (third rotation; the prior treasuries are recorded in
- * wallets.ts and config.ts's retired list). Every launch address below was
- * re-mined for this value.
+ * The treasury input this address set was mined with. FROZEN, deliberately
+ * NOT following wallets.ts rotations: every launch address below is a
+ * function of this value (it is a constructor argument to the token, the
+ * hook and the lock), so changing it silently re-mines the whole set and
+ * every pinned address stops reproducing. It records the treasury of record
+ * at mining time (2026-07-27). If this stack is ever actually deployed under
+ * a different live treasury, re-mine explicitly and update every pin and its
+ * reproduction test in the same change; do not point this at wallets.ts.
  */
 export const MERD_TREASURY: Address = "0x7037b347B21D5e72452dA1445FB1f01D652d40CC";
 

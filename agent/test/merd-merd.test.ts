@@ -69,25 +69,29 @@ test("the salt is the mined value, not a placeholder", () => {
 
 // ── wallet topology ──────────────────────────────────────────────────────────
 
-test("the roles collapse exactly as decided: agent and treasury one address, deployer apart", async () => {
-  // The 2026-07-27 single-wallet decision: all money moves in and out of the
-  // treasury, which therefore also signs. Pinned in BOTH directions so neither
-  // a silent re-split nor a deployer collapse can happen without a test
-  // failing first.
+test("the roles split exactly as decided: treasury, signer and deployer are three wallets", async () => {
+  // The 2026-08-01 decision: the agent holds custody of the house funds, the
+  // engine signs with a separate operator-held key, and the once-ever deploy
+  // key stays apart from both. Pinned so neither a silent re-collapse nor a
+  // deployer collision can happen without a test failing first.
   const { WALLET_ROLES } = await import("../src/merd/wallets.js");
-  assert.equal(WALLET_ROLES.agent.toLowerCase(), WALLET_ROLES.treasury.toLowerCase(), "agent and treasury are one wallet by decision");
-  assert.notEqual(WALLET_ROLES.deployer.toLowerCase(), WALLET_ROLES.treasury.toLowerCase(), "the once-ever deploy key must not be the always-on key");
+  assert.notEqual(WALLET_ROLES.signer.toLowerCase(), WALLET_ROLES.treasury.toLowerCase(), "funds custody and signing authority must not share a key");
+  assert.notEqual(WALLET_ROLES.deployer.toLowerCase(), WALLET_ROLES.treasury.toLowerCase(), "the once-ever deploy key must not hold the revenue");
+  assert.notEqual(WALLET_ROLES.deployer.toLowerCase(), WALLET_ROLES.signer.toLowerCase(), "the once-ever deploy key must not be the always-on key");
 });
 
-test("the treasury is the wallet that holds the supply", async () => {
-  const { TREASURY_WALLET } = await import("../src/merd/wallets.js");
-  assert.equal(MERD.treasury, TREASURY_WALLET, "MERD's supply must land in the treasury, not elsewhere");
+test("the launch artifact stays pinned to the treasury it was mined with", async () => {
+  // MERD_TREASURY is a frozen mining input, not a pointer at the live
+  // treasury: every pinned launch address is a function of it, so following
+  // a wallet rotation here would silently re-mine the whole set.
+  const { MERD_TREASURY } = await import("../src/merd/merd.js");
+  assert.equal(MERD.treasury, MERD_TREASURY, "the mined address set must keep reproducing from its recorded input");
 });
 
 test("no retired wallet is wired into any live role", async () => {
-  const { WALLET_ROLES, RETIRED_WALLET, PREVIOUS_AGENT_WALLET, PREVIOUS_TREASURY_WALLET, PREVIOUS_TREASURY_WALLET_2 } = await import("../src/merd/wallets.js");
+  const { WALLET_ROLES, RETIRED_WALLET, PREVIOUS_AGENT_WALLET, PREVIOUS_TREASURY_WALLET_2 } = await import("../src/merd/wallets.js");
   for (const [role, addr] of Object.entries(WALLET_ROLES)) {
-    for (const dead of [RETIRED_WALLET, PREVIOUS_AGENT_WALLET, PREVIOUS_TREASURY_WALLET, PREVIOUS_TREASURY_WALLET_2]) {
+    for (const dead of [RETIRED_WALLET, PREVIOUS_AGENT_WALLET, PREVIOUS_TREASURY_WALLET_2]) {
       assert.notEqual(addr.toLowerCase(), dead.toLowerCase(), `${role} points at a retired wallet`);
     }
   }

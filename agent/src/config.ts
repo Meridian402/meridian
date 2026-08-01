@@ -156,8 +156,8 @@ export const config = {
  */
 const RETIRED_TREASURY_ADDRESSES = [
   "0x76a4ff023faa6ea3e378d9e6d74eb6b2676fb38c", // rotated out 2026-07-23
-  "0x475c1fe4d1e7a703eaca6141978b04010e410bf4", // superseded 2026-07-26, custody moved to a key the operator holds
   "0x759dd0df4dcd3de442f544c35f3296f5eb5dff81", // superseded 2026-07-27, single-wallet rotation to a fresh operator key
+  "0x7037b347b21d5e72452da1445fb1f01d652d40cc", // treasury 2026-07-27 to 2026-08-01; lives on as the engine signer, but revenue must not collect into it
 ];
 
 export function assertTreasuryIsLive(address: string = config.treasuryAddress): void {
