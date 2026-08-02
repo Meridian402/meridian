@@ -40,14 +40,32 @@ export function stripSelfEcho(s: string): string {
   return kept.join(" ");
 }
 
+// The echo-splitter breaks on a period followed directly by a letter, which is
+// the echo junction's exact shape ("...market.automating...") and ALSO the
+// exact shape of every domain. It published "meridian402. xyz", a broken link
+// in the one place a link mattered. So URLs are masked through the pipeline
+// and restored at the end: a guard that mangles the post's only link is worse
+// than the echo it prevents.
+/** The published token. The one 40-hex string a post is allowed to contain. */
+export const MERD_CONTRACT = "0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8";
+
+const URL_RE = /(https?:\/\/\S+|\b[a-z0-9][a-z0-9-]*\.(?:xyz|com|io|net|org|fi|finance|app|dev)\b(?:\/[^\s]*)?)/gi;
+
 /** Normalize a raw model reply into something postable. */
 export function cleanReply(raw: string): string {
-  const s = stripDashes(raw ?? "")
+  const urls: string[] = [];
+  const masked = (raw ?? "").replace(URL_RE, (m) => {
+    urls.push(m);
+    return `\u0001${urls.length - 1}\u0001`;
+  });
+  const s = stripDashes(masked)
     .trim()
     .replace(/^\d+[.)]\s*/, "")
     .replace(/^["']|["']$/g, "")
     .trim();
-  return stripSelfEcho(s).trim();
+  return stripSelfEcho(s)
+    .trim()
+    .replace(/\u0001(\d+)\u0001/g, (_, i: string) => urls[Number(i)] ?? "");
 }
 
 /**
@@ -96,7 +114,13 @@ export function isSkip(reply: string): boolean {
  * "tokenized stocks", which is core vocabulary.
  */
 const FORBIDDEN: Array<[RegExp, string]> = [
-  [/\$merd\b|\btge\b|\bairdrop|\bpresale|\bpre-sale|\bcontract address|\btoken launch|\btoken sale|\bour token\b|\bthe token\b|\bticker\b|\bwhitelist\b/i, "token/launch content"],
+  // The MERD embargo was LIFTED on 2026-08-01 when the address was published on
+  // the site, so the terms that existed only to hide it (the ticker, "our
+  // token", "contract address") are no longer blocked. What stays blocked is
+  // the SALE vocabulary, which this project has never had and must never
+  // improvise: a presale, an airdrop, a whitelist or a TGE are events, and an
+  // event announced by a model is a false market claim.
+  [/\btge\b|\bairdrop\b|\bpresale\b|\bpre-sale\b|\btoken sale\b|\bwhitelist\b/i, "token sale vocabulary"],
   // Token launching is built but NOT announced. The rule above was written to
   // stop Merd shilling a token of his own, and it does not cover him announcing
   // that USERS can launch one — a different sentence that sailed straight
@@ -107,7 +131,12 @@ const FORBIDDEN: Array<[RegExp, string]> = [
   [
     // Verb STEMS with \w*, not whole words: "creating" is creat+ing, so
     // create(ing)? never matches it and the sentence leaks.
-    /\blaunchpad\b|\blaunch styles?\b|\b(launch|deploy|mint|creat|spin)\w*\s+(a|an|your|their|our|his|her|its|my|new|own)\s+(own\s+)?(token|coin|memecoin)\b/i,
+    // "token launch" as a bare noun phrase belongs HERE, not with the MERD
+    // embargo terms that were dropped when the address went public: the
+    // user-facing launch feature is still unannounced, and "shipped:
+    // agent-native token launch" announces it without tripping the verb
+    // pattern below.
+    /\blaunchpad\b|\blaunch styles?\b|\btoken launch(es|ing)?\b|\b(launch|deploy|mint|creat|spin)\w*\s+(a|an|your|their|our|his|her|its|my|new|own)\s+(own\s+)?(token|coin|memecoin)\b/i,
     "unannounced launch feature",
   ],
   // The MERD launch itself. Everything above was written before the token, the
@@ -115,14 +144,37 @@ const FORBIDDEN: Array<[RegExp, string]> = [
   // sentences about them found that ALL NINE passed clean — including a bare
   // contract address. These close that.
   //
-  // The ticker cannot be matched case-insensitively: the agent is named Merd,
-  // so /\bmerd\b/i would gag him saying his own name in every post. Case IS the
-  // signal — prose writes "Merd", a ticker shouts "MERD".
-  [/\bMERD\b/, "MERD ticker"],
-  // A 40-hex address has no legitimate reason to appear in a post, ever.
-  [/0x[0-9a-fA-F]{40}\b/, "contract address"],
+  // Exactly one address is publishable: the token's own, which is printed on
+  // the website. Any OTHER 40-hex string in a post is a wallet, an internal
+  // contract, or an impersonator's lookalike, and none of those belong on a
+  // timeline. Built with RegExp rather than a literal so the canonical address
+  // has one definition; note the doubled backslashes, because a template
+  // literal turns a single \b into a backspace and silently voids the rule.
+  [
+    new RegExp(`0x(?!${MERD_CONTRACT.slice(2)}\\b)[0-9a-fA-F]{40}\\b`, "i"),
+    "an address that is not the token",
+  ],
   [/\bMeridian(TreasuryHook|PositionLock|Buyback|Token)\b|\btreasury hook\b|\bposition lock\b/i, "contract names"],
   [/\bbuy ?backs?\b|\bbuy(ing)? back and burn|\bburn(ing|s)? (pons|index|supply)\b|\bdeflationary\b/i, "buyback and burn"],
+  // Burning a HOLDING, phrased without any of the words above. Probed on
+  // 2026-08-01: "send a quarter of the supply to a dead wallet", "burning my
+  // whole allocation", "235 million tokens to an address nobody has the keys
+  // to" ALL passed clean, and any one of them announces both that the token
+  // exists and how much of it we hold. A supply event is also the most
+  // market-moving thing this account could say, so it may never be improvised
+  // by a model, only stated deliberately once it is true on-chain.
+  [
+    /\b(dead|burn) (wallet|address)\b|\b0x0*dead\b|\bsend\w*\s+(it|them|the\s+\w+)?\s*(to\s+)?(a\s+)?(dead|burn)\b/i,
+    "burn destination",
+  ],
+  [
+    /\b(burn|burnt|burned|burning)\b.{0,40}\b(my|our|the|his|its|their)\s+(whole\s+|entire\s+|full\s+)?(allocation|holding|stack|bag|share|stake|position|supply|treasury)\b/i,
+    "burning a holding",
+  ],
+  [
+    /\b(a\s+)?(quarter|third|half|\d{1,3}(\.\d+)?\s*(percent|%))\s+of\s+(the\s+)?(supply|tokens?|float)\b|\b\d[\d,.]*\s*(m|million|k|thousand)?\s+tokens?\b/i,
+    "supply share",
+  ],
   [/\bfair launch\b|\blaunch tax\b|\bdecay(ing)? (tax|fee)\b|\bsniper?s?\b|\banti-?sniper\b/i, "launch mechanics"],
   [/\b(lp|liquidity) (is )?lock(ed)?\b|\block(ed)? (lp|liquidity)\b|\bno withdraw function\b|\brenounced?\b/i, "liquidity lock claims"],
   [/\bvanity address\b|\bmin(e|ed|ing) (a |an |the )?(vanity |hook )?address\b|\bcreate2\b|\bsalt\b/i, "deployment internals"],
@@ -249,7 +301,7 @@ const NUMBER_WORDS =
 export function statTokens(s: string): Set<string> {
   const out = new Set<string>();
   for (const m of s.matchAll(/\d[\d,]*(?:\.\d+)?/g)) out.add(m[0].replace(/,/g, ""));
-  for (const m of s.toLowerCase().matchAll(new RegExp(`\\b(${NUMBER_WORDS})(?:[- ](${NUMBER_WORDS}))?\\b`, "g"))) {
+  for (const m of s.toLowerCase().matchAll(new RegExp(`\b(${NUMBER_WORDS})(?:[- ](${NUMBER_WORDS}))?\b`, "g"))) {
     out.add(m[0].replace(/\s+/g, "-"));
   }
   return out;

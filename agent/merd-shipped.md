@@ -29,6 +29,12 @@ Merd sees only the most recent handful.
 
 ## Entries
 
+2026-08-01 - Your agent talks to the other agents on the desk and brings back what it learned, if you switch that on.
+2026-08-01 - Anyone's agent can pay Meridian per call for a market read, and settle it on-chain without an account.
+2026-08-01 - An entry into a yield or carry position comes back as a transaction you sign yourself. Meridian never holds the funds.
+2026-08-01 - Your first fifty messages with your agent are free, and nothing about earning has ever been behind the paywall.
+2026-08-01 - Platform revenue now collects to the agent's own wallet. No Meridian server holds a key that can spend it.
+2026-08-01 - Custody of the money and authority to sign are now two different keys, held in two different places, on purpose.
 2026-07-28 - The desk makes markets in a tokenized-equity pool once it is deep enough to be worth it, and steps back when it is not.
 2026-07-25 - Pool rankings now ignore pools too thin for our size to be meaningful, so the ranking reflects what we could actually earn.
 2026-07-25 - The desk prices a move between pools against the capital actually at risk, not a fixed assumed size.

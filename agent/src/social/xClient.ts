@@ -43,7 +43,7 @@ export interface PostResult {
  * Post a tweet — or, in draft mode, record what WOULD be posted. Every call is
  * logged to x-posts.jsonl either way, so there's a full audit trail.
  */
-export async function postTweet(text: string): Promise<PostResult> {
+export async function postTweet(text: string, mediaPath?: string): Promise<PostResult> {
   const trimmed = text.trim();
   // @Meridian402 is X Premium, so it can post long-form. Cap generously to allow
   // Merd's natural 2-3 sentence voice while still blocking runaway walls of text.
@@ -67,14 +67,50 @@ export async function postTweet(text: string): Promise<PostResult> {
       accessToken: cfg.accessToken,
       accessSecret: cfg.accessSecret,
     });
-    const res = await client.v2.tweet(trimmed);
-    appendLedger("x-posts.jsonl", { at: Date.now(), mode: "live", posted: true, id: res.data.id, text: trimmed });
+    // Media goes up through v1.1 (v2 has no upload endpoint) and is then
+    // referenced by id on the v2 post. Uploading is the step that fails on a
+    // bad path or an unsupported type, so it happens before the post and any
+    // failure means nothing is published rather than a bare text tweet going
+    // out where an image was the point.
+    let mediaIds: [string] | undefined;
+    if (mediaPath) {
+      const id = await client.v1.uploadMedia(mediaPath);
+      mediaIds = [id];
+    }
+    const res = await client.v2.tweet(trimmed, mediaIds ? { media: { media_ids: mediaIds } } : undefined);
+    appendLedger("x-posts.jsonl", { at: Date.now(), mode: "live", posted: true, id: res.data.id, text: trimmed, media: mediaPath ?? null });
     return { posted: true, id: res.data.id, text: trimmed };
   } catch (err) {
     const { message, status, detail } = describeXError(err);
     appendLedger("x-posts.jsonl", { at: Date.now(), mode: "live", posted: false, error: message.slice(0, 200), status, detail, text: trimmed });
     console.error(`[x] post failed: ${status ?? "?"} ${detail ?? message}`.slice(0, 300));
     return { posted: false, reason: `post failed: ${(detail ?? message).slice(0, 160)}`, text: trimmed };
+  }
+}
+
+/**
+ * Delete a tweet this account posted. Exists for the case a guard defect ships
+ * something broken (the "meridian402. xyz" link): the repair is delete and
+ * repost, and both halves belong in the same audited client.
+ */
+export async function deleteTweet(id: string): Promise<{ deleted: boolean; reason?: string }> {
+  if (!/^\d{5,25}$/.test(id)) return { deleted: false, reason: "not a tweet id" };
+  const cfg = readConfig();
+  if (!cfg) return { deleted: false, reason: "X keys not configured" };
+  if (!xLive()) return { deleted: false, reason: "draft mode (set X_LIVE=true)" };
+  try {
+    const client = new TwitterApi({
+      appKey: cfg.appKey,
+      appSecret: cfg.appSecret,
+      accessToken: cfg.accessToken,
+      accessSecret: cfg.accessSecret,
+    });
+    await client.v2.deleteTweet(id);
+    appendLedger("x-posts.jsonl", { at: Date.now(), mode: "live", posted: false, deletedId: id });
+    return { deleted: true };
+  } catch (err) {
+    const { message, status, detail } = describeXError(err);
+    return { deleted: false, reason: `delete failed: ${(detail ?? message).slice(0, 160)} (${status ?? "?"})` };
   }
 }
 
@@ -282,7 +318,21 @@ function describeXError(err: unknown): { message: string; status?: number; detai
  * actually posts when X_LIVE === "true", otherwise logs what would have
  * been said and returns without posting.
  */
-export async function postReply(text: string, inReplyToId: string): Promise<PostResult> {
+/**
+ * The account is not ALLOWED to reply to strangers, as opposed to this one
+ * tweet refusing this one reply.
+ *
+ * X answers a proactive reply with "You can only reply to or quote posts where
+ * you are mentioned or are the author" when the app's access tier does not
+ * include it. That is an account-level fact, not a per-tweet one, so a caller
+ * that treats it as a normal failure will keep composing replies (a model call
+ * each) that can never post: 313 written, 0 delivered, before this existed.
+ */
+export function isReplyPermissionError(reason: string | undefined): boolean {
+  return /only reply to or quote posts where you are mentioned/i.test(reason ?? "");
+}
+
+export async function postReply(text: string, inReplyToId: string, mediaPath?: string): Promise<PostResult> {
   const trimmed = text.trim();
   const MAX = Number(process.env.X_MAX_TWEET_CHARS ?? 500);
   if (!trimmed || trimmed.length > MAX) {
@@ -304,8 +354,16 @@ export async function postReply(text: string, inReplyToId: string): Promise<Post
       accessToken: cfg.accessToken,
       accessSecret: cfg.accessSecret,
     });
-    const res = await client.v2.reply(trimmed, inReplyToId);
-    appendLedger("x-replies.jsonl", { at: Date.now(), mode: "live", posted: true, id: res.data.id, inReplyToId, text: trimmed });
+    // Same order as postTweet: upload first so a media failure aborts the reply
+    // rather than posting a bare-text link in a chain that was meant to carry a
+    // picture.
+    let mediaIds: [string] | undefined;
+    if (mediaPath) {
+      const mid = await client.v1.uploadMedia(mediaPath);
+      mediaIds = [mid];
+    }
+    const res = await client.v2.reply(trimmed, inReplyToId, mediaIds ? { media: { media_ids: mediaIds } } : undefined);
+    appendLedger("x-replies.jsonl", { at: Date.now(), mode: "live", posted: true, id: res.data.id, inReplyToId, text: trimmed, media: mediaPath ?? null });
     return { posted: true, id: res.data.id, text: trimmed };
   } catch (err) {
     const { message, status, detail } = describeXError(err);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isSkip, forbiddenReason } from "../src/social/postGuards.js";
+import { isSkip, forbiddenReason, cleanReply, MERD_CONTRACT } from "../src/social/postGuards.js";
 import { splitNote } from "../src/social/merdMemory.js";
 
 /**
@@ -136,12 +136,34 @@ test("nothing about the unlaunched token can be posted", () => {
   }
 });
 
-test("the ticker is caught by CASE, because the agent is named Merd", () => {
-  // A case-insensitive rule would gag him saying his own name in every post,
-  // so the signal is capitalisation: prose writes "Merd", a ticker shouts MERD.
-  assert.ok(forbiddenReason("MERD just crossed a dollar"), "the ticker must be blocked");
+test("after the embargo lifted, the ticker and the canonical address are sayable", () => {
+  // Until 2026-08-01 the ticker and every 40-hex string were blocked, because
+  // the token was not public. The address is now printed on the site, so a
+  // guard that still gagged it would stop the account pointing anyone at the
+  // real contract, which is the one place impersonators win.
+  assert.equal(forbiddenReason("MERD is live"), null, "the ticker is public now");
   assert.equal(forbiddenReason("Merd here. Watching the tape."), null, "his own name must survive");
-  assert.equal(forbiddenReason("I'm Merd, an agent that trades tokenized stocks."), null);
+  assert.equal(forbiddenReason(`the contract is ${MERD_CONTRACT}`), null, "the canonical address must be sayable");
+});
+
+test("but only THAT address: any other 40-hex string is still refused", () => {
+  // A lookalike address in a post is how a follower gets drained, and it is
+  // the single highest-consequence string this account could publish.
+  for (const other of [
+    "send funds to 0x9999999999999999999999999999999999999999",
+    "the treasury is 0x475C1fe4d1e7A703eaca6141978b04010e410Bf4",
+    `try ${MERD_CONTRACT.slice(0, -1)}9`, // one character off the real one
+  ]) {
+    assert.ok(forbiddenReason(other), `must be blocked: ${other}`);
+  }
+});
+
+test("sale vocabulary stays blocked even though the token is public", () => {
+  // The token being announced is not the same as a sale existing. This project
+  // has never had one, and a model inventing the word is a false market claim.
+  for (const text of ["presale opens tomorrow", "airdrop for holders", "whitelist closes tonight", "our TGE is next week"]) {
+    assert.ok(forbiddenReason(text), `must be blocked: ${text}`);
+  }
 });
 
 test("a bare contract address can never be posted", () => {
@@ -264,4 +286,61 @@ test("a real teardown is never mistaken for helplessness", () => {
     "it is compensation. the question is whether depth holds when the underlying reopens. i am " +
     "quoting it small until it does.";
   assert.equal(forbiddenReason(teardown), null);
+});
+
+test("a supply burn cannot be improvised, however it is phrased", () => {
+  // Probed 2026-08-01: every one of these passed clean. Each announces both
+  // that the token exists and how much of it we hold, and a supply event is
+  // the most market-moving sentence this account could write. It may only be
+  // said deliberately, once it is true on-chain, never invented by a model
+  // reaching for a good line.
+  for (const draft of [
+    "spent the afternoon working out how to send a quarter of the supply to a dead wallet",
+    "i am burning my whole allocation. no vesting, no unlock cliff, just gone.",
+    "figured out the burn. 235 million tokens to an address nobody has the keys to.",
+    "sending it all to a burn address later today",
+  ]) {
+    assert.notEqual(forbiddenReason(draft), null, `must be blocked: ${draft}`);
+  }
+});
+
+test("the burn guards do not gag ordinary desk talk", () => {
+  for (const fine of [
+    "i hold the treasury now. every dollar this thing earns lands in a wallet no server of ours can spend from.",
+    "amd printed minus 2.54 for four reads while the price walked to 474.98.",
+    "the desk quotes it small until depth holds. that is the whole strategy today.",
+  ]) {
+    assert.equal(forbiddenReason(fine), null, `must pass: ${fine}`);
+  }
+});
+
+test("cleanReply never breaks a link: the published 'meridian402. xyz' class", () => {
+  // The echo-splitter breaks on period-then-letter, which is also every
+  // domain's shape. It published a broken link once; these pin the mask.
+  assert.equal(cleanReply("come see meridian402.xyz today"), "come see meridian402.xyz today");
+  assert.equal(cleanReply("docs at https://meridian402.xyz/docs if curious"), "docs at https://meridian402.xyz/docs if curious");
+});
+
+test("cleanReply still strips echoes and never touches real numbers", () => {
+  assert.equal(cleanReply("a professional market.a professional market. we hold."), "a professional market. we hold.");
+  assert.equal(cleanReply("amd printed minus 2.54 while price walked to 474.98."), "amd printed minus 2.54 while price walked to 474.98.");
+});
+
+test("the account-level reply block is told apart from an ordinary failure", async () => {
+  const { isReplyPermissionError } = await import("../src/social/xClient.js");
+  // The exact string X returns, seen 244 times before anything acted on it.
+  assert.equal(
+    isReplyPermissionError("post failed: Authorization Error | You can only reply to or quote posts where you are mentioned or are the author."),
+    true,
+  );
+  // Everything else is per-tweet or transient and must NOT pause the job.
+  for (const other of [
+    "post failed: duplicate content",
+    "post failed: 429 Too Many Requests",
+    "post failed: user is suspended",
+    "post failed: tweet not found",
+    undefined,
+  ]) {
+    assert.equal(isReplyPermissionError(other), false, `must not pause on: ${other}`);
+  }
 });
