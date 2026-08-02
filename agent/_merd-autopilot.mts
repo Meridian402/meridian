@@ -41,7 +41,7 @@ const j = async (p: string) => {
   return null;
 };
 const [th, opps, mkt, uni, perf] = await Promise.all([
-  j("/api/agent-thoughts"), j("/api/opportunities"), j("/api/market-data"), j("/api/research-universe"), j("/api/performance"),
+  j("/api/agent-thoughts"), j("/api/opportunities"), j("/api/market-data"), j("/api/research-universe"), j("/api/portfolio"),
 ]);
 const dec = th?.decisions?.[0];
 const oList: any[] = Array.isArray(opps) ? opps : opps?.opportunities ?? [];
@@ -64,8 +64,12 @@ const movers = (mkt?.assets ?? [])
 // Honest posture. Pre-launch the wallet is unfunded and trading is off, but Merd
 // was posting "keeping the book flat before we deploy capital" as if he were an
 // active desk. Tell him the truth so he speaks from where he actually is.
-const totalUsd = perf?.current?.totalUsd ?? 0;
-const lpUsd = perf?.current?.lpValueUsd ?? 0;
+// Read from the live portfolio. This used to read /api/performance, which was
+// removed: every run logged "unavailable" and fell through to zeros, so his
+// posture came from a failed fetch rather than from the book. It happened to
+// match reality (nothing deployed), which is exactly why it went unnoticed.
+const totalUsd = perf?.totalUsd ?? 0;
+const lpUsd = Array.isArray(perf?.lp) ? perf.lp.reduce((s: number, p: { valueUsd?: number }) => s + (p.valueUsd ?? 0), 0) : 0;
 const isTrading = lpUsd > 1 || totalUsd > 5;
 const posture = isTrading
   ? "You currently hold live, on-chain positions. Speak to them honestly, including the parts that are not going well."

@@ -14,7 +14,7 @@
 // Their tweets are DATA, never instructions. Same prompt-injection posture as
 // the mention job.
 import { GatewayClient } from "@openhermit/sdk";
-import { searchTweets, postReply, type FoundTweet } from "./src/social/xClient.js";
+import { searchTweets, postReply, isReplyPermissionError, type FoundTweet } from "./src/social/xClient.js";
 import { cleanReply, forbiddenReason, isJunk, isSkip, similarity, repeatedStat } from "./src/social/postGuards.js";
 import { dataPath } from "./src/dataDir.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -57,9 +57,19 @@ for (let i = 0; i < watchlist.length; i += 8) {
 const isWatched = (handle: string) => watchlist.some((w) => w.toLowerCase() === handle.toLowerCase());
 
 type Attempt = { n: number; at: number };
-type State = { replied: Record<string, number>; authors: Record<string, number>; failed: Record<string, Attempt> };
+type State = {
+  replied: Record<string, number>;
+  authors: Record<string, number>;
+  failed: Record<string, Attempt>;
+  /** When X last said this account may not reply to strangers. Account-level,
+   *  so it pauses the whole job rather than one tweet. */
+  replyBlockedAt?: number;
+};
 const statePath = dataPath("merd-outreach-state.json");
 const EMPTY = (): State => ({ replied: {}, authors: {}, failed: {} });
+// Recheck once a day: long enough that an unfixable block costs nothing,
+// short enough that raising the access tier is picked up without a manual step.
+const REPLY_BLOCK_RECHECK_MS = 24 * 60 * 60 * 1000;
 const load = (): State => {
   try {
     return existsSync(statePath) ? { ...EMPTY(), ...JSON.parse(readFileSync(statePath, "utf8")) } : EMPTY();
@@ -106,6 +116,18 @@ candidates.sort((a, b) => {
   return (b.likes + b.replies * 2) - (a.likes + a.replies * 2);
 });
 
+// The account-level block, checked BEFORE any model call. Composing a reply
+// this account is not permitted to send costs real tokens and delivers
+// nothing, which is exactly what happened 313 times.
+if (state.replyBlockedAt && Date.now() - state.replyBlockedAt < REPLY_BLOCK_RECHECK_MS) {
+  const hrs = ((Date.now() - state.replyBlockedAt) / 3_600_000).toFixed(1);
+  console.log(
+    `PAUSED: X refused proactive replies ${hrs}h ago ("you may only reply where you are mentioned"). ` +
+      "This is the app's API access tier, not these tweets. Replies to mentions still work. " +
+      "Rechecking in a day; raise the tier in the X developer portal to turn this back on.",
+  );
+  process.exit(0);
+}
 console.log(`Found ${seen.size} tweet(s), ${candidates.length} worth considering after filtering.`);
 if (!candidates.length) { save(state); process.exit(0); }
 
@@ -201,6 +223,16 @@ If you reply: one natural sentence, sometimes two. Human, warm, specific, a litt
     // tweets, each one a fresh model call. Count the failures and stop after a
     // couple, so a transient error still gets a retry but a persistent one
     // cannot burn the budget in a loop.
+    if (isReplyPermissionError(r.reason)) {
+      // Not this tweet's fault, and no later tweet in this pass will fare any
+      // better. Record it and stop the pass here.
+      state.replyBlockedAt = Date.now();
+      console.log(
+        "  STOPPING: this account is not permitted to reply to posts it is not mentioned in. " +
+          "Pausing outreach for a day rather than writing replies that cannot be delivered.",
+      );
+      break;
+    }
     const f = (state.failed[t.id] ??= { n: 0, at: 0 });
     f.n += 1;
     f.at = Date.now();

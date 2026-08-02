@@ -96,23 +96,60 @@ async function ensureHouseSession(gw: GatewayClient, agentId: string, sessionId:
  * anything clearing them there (a redeploy, a prune, an expiry) leaves us
  * confidently wrong and every exchange dead until a restart.
  */
-async function sendWithSession(gw: GatewayClient, agentId: string, sessionId: string, prompt: string): Promise<string> {
-  const send = async (): Promise<string> => {
+/**
+ * The model refused because the conversation no longer fits its context.
+ *
+ * One durable session per agent (see the comment at the sessionId below) means
+ * history only ever grows, so this is not an edge case: it is where every
+ * participant ends up. The equities desk got there first, at ~187k tokens of
+ * accumulated turns, and every exchange it joined failed until it was
+ * sidelined. Matched on the shape of the message rather than a provider's
+ * error code because the gateway forwards whatever the upstream said.
+ */
+export function isContextOverflow(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /context length|context_length|too many tokens|maximum context|prompt is too long/i.test(msg);
+}
+
+/** Bumped per agent when its history stops fitting; part of the session id. */
+const sessionGeneration = new Map<string, number>();
+
+function sessionIdFor(participantId: string): string {
+  const gen = sessionGeneration.get(participantId) ?? 0;
+  return gen === 0 ? `swarm-${participantId}` : `swarm-${participantId}-g${gen}`;
+}
+
+async function sendWithSession(gw: GatewayClient, agentId: string, participantId: string, prompt: string): Promise<string> {
+  const send = async (sessionId: string): Promise<string> => {
     const resp = await gw.agent(agentId).postMessageSync(sessionId, { text: prompt }, { timeout: TURN_TIMEOUT_MS });
     const text = sanitizeChunk(resp.text ?? "").trim();
     if (!text) throw new Error(`${agentId} returned no text${resp.error ? `: ${resp.error}` : ""}`);
     return text;
   };
 
+  const sessionId = sessionIdFor(participantId);
   await ensureHouseSession(gw, agentId, sessionId);
   try {
-    return await send();
+    return await send(sessionId);
   } catch (err) {
+    if (isContextOverflow(err)) {
+      // Start a fresh session for this agent. Its LEARNING is not lost: the
+      // takeaways it accumulated are written into a durable instruction slot
+      // by applyLearning, which is exactly what survives this. Only the raw
+      // turn-by-turn transcript is dropped, and that transcript is what made
+      // the agent unusable.
+      const next = (sessionGeneration.get(participantId) ?? 0) + 1;
+      sessionGeneration.set(participantId, next);
+      const fresh = sessionIdFor(participantId);
+      console.error(`[swarm] ${sessionId} outgrew its context; rotating to ${fresh} (takeaways are kept)`);
+      await ensureHouseSession(gw, agentId, fresh);
+      return await send(fresh);
+    }
     if (!isMissingSession(err)) throw err;
     console.error(`[swarm] ${sessionId} vanished on the gateway, reopening and retrying once`);
     openedSessions.delete(sessionId);
     await ensureHouseSession(gw, agentId, sessionId);
-    return await send();
+    return await send(sessionId);
   }
 }
 
@@ -138,9 +175,10 @@ async function speak(participant: Participant, exchangeId: string, prompt: strin
   // each other over time" would be a claim the code does not support. This
   // matches how a user's agent already works (messageUserAgent keeps one
   // swarm-<wallet> session), so both kinds of participant accumulate history
-  // the same way.
-  const sessionId = `swarm-${participant.id}`;
-  return capReply(await sendWithSession(gw, participant.id, sessionId, prompt));
+  // the same way. Durable, but no longer unbounded: sendWithSession rotates
+  // the session when its history stops fitting, and the takeaways that carry
+  // the actual learning live in an instruction slot, not in the transcript.
+  return capReply(await sendWithSession(gw, participant.id, participant.id, prompt));
 }
 
 /**

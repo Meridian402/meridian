@@ -241,3 +241,40 @@ test("standing is keyed by public id, so asking for it never needs a wallet", ()
   // The gateway id is not an alias for it: nothing keyed by wallet resolves.
   assert.equal(standingFor(agentIdForWallet(SOLO)).exchanges, 0);
 });
+
+// ── context overflow ────────────────────────────────────────────────────────
+//
+// One durable session per agent means history only grows, so "the model will
+// not accept this conversation any more" is not an edge case, it is the
+// destination. The equities desk reached it first at ~187k tokens and every
+// exchange it joined failed until it was sidelined. The recogniser has to
+// match on the SHAPE of the message, because the gateway forwards whatever
+// the upstream provider said rather than a code of its own.
+test("a context-length refusal is recognised, whatever the provider called it", async () => {
+  const { isContextOverflow } = await import("../src/swarm/exchange.js");
+  const real =
+    "turn_failed: rwa-research-equities returned no text: 400 This endpoint's maximum context length is 200000 tokens. " +
+    "However, you requested about 200342 tokens (187352 of text input, 4798 of tool input, 8192 in the output).";
+  assert.equal(isContextOverflow(new Error(real)), true, "the exact production failure must be caught");
+  for (const variant of [
+    "400 maximum context length exceeded",
+    "prompt is too long: 210000 tokens > 200000 maximum",
+    "Request exceeded context_length_exceeded",
+    "too many tokens in the request",
+  ]) {
+    assert.equal(isContextOverflow(new Error(variant)), true, `must catch: ${variant}`);
+  }
+});
+
+test("ordinary failures are NOT treated as overflow, so the session is not rotated for nothing", async () => {
+  const { isContextOverflow } = await import("../src/swarm/exchange.js");
+  for (const other of [
+    "session not found",
+    "429 rate limited",
+    "502 bad gateway",
+    "turn_failed: agent returned no text",
+    "insufficient credits",
+  ]) {
+    assert.equal(isContextOverflow(new Error(other)), false, `must not rotate on: ${other}`);
+  }
+});

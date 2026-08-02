@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { trailingMovePct } from "../src/marketData.js";
+import { trailingMovePct, trimAndPickBaseline, type PoolSample } from "../src/marketData.js";
 
 // The whole live price feed hung on this function and it was returning null for
 // every symbol, on every cycle, for weeks: "live refresh: 0/18" in production,
@@ -63,4 +63,63 @@ test("the window is anchored to the last bar, so an off-hours call still works",
   // and the function must still measure the end of that session.
   const { timestamps, closes } = bars(60, (i) => 100 + i);
   assert.equal(trailingMovePct(timestamps, closes, 240), trailingMovePct(timestamps.map((t) => t - 86_400 * 30), closes, 240));
+});
+
+// ── pool-price history retention ────────────────────────────────────────────
+//
+// The second freeze, and the one Merd narrated in public for days: pool
+// momentum silently stopped computing because the history trim was tighter
+// than the sampling interval, so the baseline sample was evicted a cycle
+// before the code went looking for it. The symptom was identical percentages
+// standing for 12+ hours while prices drifted, which reads as a data feed
+// lying rather than a window being one sample too short.
+
+const LOOKBACK = 240 * 60_000; // the shipped 240-minute momentum window
+const TTL = 180_000; // the shipped 3-minute sampling interval
+
+/** Replay the real sampling loop: one sample every ttl, for `minutes`. */
+function replay(minutes: number, ttlMs = TTL): { hist: PoolSample[]; now: number } {
+  const start = 1_700_000_000_000;
+  let hist: PoolSample[] = [];
+  let now = start;
+  for (let elapsed = 0; elapsed <= minutes * 60_000; elapsed += ttlMs) {
+    now = start + elapsed;
+    hist.push({ ts: now, priceUsd: 100 + elapsed / 60_000 / 100 });
+    hist = trimAndPickBaseline(hist, now, LOOKBACK, ttlMs).kept;
+  }
+  return { hist, now };
+}
+
+test("a baseline survives the trim on every cycle once history is deep enough", () => {
+  // Six hours of sampling at the shipped cadence. Past the 4h lookback there
+  // must ALWAYS be a baseline; the old 120s margin lost it on most cycles.
+  const { hist, now } = replay(360);
+  for (let step = 0; step < 20; step++) {
+    const t = now + step * TTL;
+    const { baseline } = trimAndPickBaseline([...hist, { ts: t, priceUsd: 104 }], t, LOOKBACK, TTL);
+    assert.ok(baseline, `no baseline at step ${step}: momentum would silently freeze`);
+    assert.ok(t - baseline.ts >= LOOKBACK, "the baseline must sit at or before the window start");
+  }
+});
+
+test("the retention margin scales with the sampling interval, not a fixed guess", () => {
+  // A slower cadence must not reintroduce the bug. At a 10-minute interval the
+  // old fixed 120s margin would evict the baseline immediately.
+  const slow = 600_000;
+  const { hist, now } = replay(360, slow);
+  const { baseline } = trimAndPickBaseline([...hist, { ts: now + slow, priceUsd: 104 }], now + slow, LOOKBACK, slow);
+  assert.ok(baseline, "a slower sampler must still keep a usable baseline");
+});
+
+test("history is still bounded: it does not grow without limit", () => {
+  const { hist } = replay(600); // ten hours at 3-minute samples
+  const span = hist[hist.length - 1].ts - hist[0].ts;
+  assert.ok(span <= LOOKBACK + 2 * TTL + TTL, `retained span ${span}ms should stay near the window`);
+  assert.ok(hist.length < 100, `retained ${hist.length} samples, expected the window's worth`);
+});
+
+test("early on, with no sample old enough, there is no baseline and no invented number", () => {
+  const { hist, now } = replay(30); // half an hour in, far short of the window
+  const { baseline } = trimAndPickBaseline(hist, now, LOOKBACK, TTL);
+  assert.equal(baseline, undefined, "the equity feed's number must stand until pool history is deep enough");
 });

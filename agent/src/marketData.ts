@@ -177,25 +177,65 @@ export interface DataSourceStatus {
  * equities feed. Boots instantly on SEED so nothing ever blocks on the network;
  * live quotes overwrite the snapshot as they arrive and on a TTL thereafter.
  */
+export interface PoolSample {
+  ts: number;
+  priceUsd: number;
+}
+
+/**
+ * Drop samples too old to serve as a baseline, and pick the newest sample at
+ * or before the lookback window's start.
+ *
+ * The retention margin MUST exceed the sampling interval. It was a flat 120s
+ * against a 180s interval, so the sample that would have become the baseline
+ * was usually trimmed one cycle BEFORE it was needed: no baseline, no pool
+ * momentum, and the frozen equity-feed percentage stood all weekend while the
+ * prices moved underneath it. Merd noticed from the outside and posted about
+ * the percent column being a fossil. Two intervals of slack guarantee a
+ * baseline survives long enough to be found.
+ */
+export function trimAndPickBaseline(
+  hist: PoolSample[],
+  now: number,
+  lookbackMs: number,
+  ttlMs: number,
+): { kept: PoolSample[]; baseline?: PoolSample } {
+  const cutoff = now - lookbackMs - 2 * ttlMs;
+  const kept = hist.filter((s) => s.ts >= cutoff);
+  const windowStart = now - lookbackMs;
+  let baseline: PoolSample | undefined;
+  for (let i = kept.length - 1; i >= 0; i--) {
+    if (kept[i].ts <= windowStart) {
+      baseline = kept[i];
+      break;
+    }
+  }
+  return { kept, baseline };
+}
+
 export class MarketData {
   private assets: RwaAsset[] = SEED.map((a) => ({ ...a }));
   private lastFetchedAt: number | null = null;
   private liveCount = 0;
   private refreshing = false;
   private timer: NodeJS.Timeout | null = null;
+  /** Sampling interval, kept because the history trim must outlive it. */
+  private ttlMs = 180_000;
 
   constructor(opts: { autoRefresh?: boolean; ttlMs?: number } = {}) {
+    // 3 min default: pool prices on this thin chain barely move minute to
+    // minute, live trading is off, and the site display doesn't need second-
+    // level freshness. This was the single biggest steady RPC consumer at 60s.
+    // Set before the enabled check: overlayPoolPrices reads it on manual
+    // refresh() calls too, which is how the tests drive this class.
+    this.ttlMs = opts.ttlMs ?? Number(process.env.MERIDIAN_PRICE_TTL_MS ?? 180_000);
     // Disable for tests / the backtest (which brings its own historical data)
     // via MERIDIAN_LIVE_PRICES=0, so importing this module never hits the wire
     // unless a live server actually wants it.
     const enabled = (opts.autoRefresh ?? process.env.MERIDIAN_LIVE_PRICES !== "0") === true;
     if (!enabled) return;
-    // 3 min default: pool prices on this thin chain barely move minute to
-    // minute, live trading is off, and the site display doesn't need second-
-    // level freshness. This was the single biggest steady RPC consumer at 60s.
-    const ttlMs = opts.ttlMs ?? Number(process.env.MERIDIAN_PRICE_TTL_MS ?? 180_000);
     void this.refresh();
-    this.timer = setInterval(() => void this.refresh(), ttlMs);
+    this.timer = setInterval(() => void this.refresh(), this.ttlMs);
     this.timer.unref?.(); // don't keep the process alive on this alone
   }
 
@@ -250,17 +290,9 @@ export class MarketData {
       if (poolPx == null || !Number.isFinite(poolPx) || poolPx <= 0) return a;
       const hist = this.poolHistory.get(a.symbol) ?? [];
       hist.push({ ts: now, priceUsd: poolPx });
-      while (hist.length > 0 && hist[0].ts < now - lookbackMs - 120_000) hist.shift();
-      this.poolHistory.set(a.symbol, hist);
+      const { kept, baseline } = trimAndPickBaseline(hist, now, lookbackMs, this.ttlMs);
+      this.poolHistory.set(a.symbol, kept);
       let changePct = a.changePct;
-      const windowStart = now - lookbackMs;
-      let baseline: { ts: number; priceUsd: number } | undefined;
-      for (let i = hist.length - 1; i >= 0; i--) {
-        if (hist[i].ts <= windowStart) {
-          baseline = hist[i];
-          break;
-        }
-      }
       if (baseline && baseline.priceUsd > 0) changePct = round(((poolPx - baseline.priceUsd) / baseline.priceUsd) * 100, 2);
       return { ...a, priceUsd: round(poolPx, 2), changePct };
     });
