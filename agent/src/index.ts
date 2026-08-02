@@ -64,6 +64,8 @@ import { earnOpportunities, prepareCarry } from "./earn/carry.js";
 import { prepareIndexYield } from "./earn/yieldPosition.js";
 import { stakingState, prepareStake } from "./earn/staking.js";
 import { runScout, scoutAllowed, bountyBoard, settleBounties, pendingPayouts, recordExternalPayout } from "./earn/scout.js";
+import { knobsState, setKnob } from "./platformKnobs.js";
+import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
@@ -126,7 +128,7 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 // Operator-only ops snapshot: how we're handling load right now — chat
 // concurrency vs the cap, request volume, unique signups, memory, uptime.
 // Bearer-gated (MERIDIAN_MCP_TOKEN). All in-memory, so it resets on deploy.
-app.get("/api/ops", (req: Request, res: Response) => {
+app.get("/api/ops", async (req: Request, res: Response) => {
   if (!authorized(req)) {
     res.status(401).json({ error: "unauthorized" });
     return;
@@ -147,7 +149,11 @@ app.get("/api/ops", (req: Request, res: Response) => {
   } catch {}
   const chat = chatLoad();
   const windowSec = Math.max(1, Math.round((Date.now() - reqStats.since) / 1000));
+  // Money health, so an underfunded wallet is visible here rather than
+  // discovered when a payout quietly does not happen.
+  const funding = await fundingHealth().catch(() => null);
   res.json({
+    funding,
     uptimeSec: Math.round(process.uptime()),
     memory: { rssMB: mb(mem.rss), heapUsedMB: mb(mem.heapUsed) },
     chat: { ...chat, utilizationPct: Math.round((chat.active / chat.max) * 100) },
@@ -1597,6 +1603,23 @@ app.post("/api/admin/record-payout", async (req: Request, res: Response) => {
   }
 });
 
+// The dials Merd turns himself. The ranges live in platformKnobs.ts and are
+// not settable over the wire: this surface can move a value inside its walls,
+// never move a wall.
+app.get("/api/admin/knobs", (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  res.json(knobsState());
+});
+
+app.post("/api/admin/knobs", (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  const body = (req.body ?? {}) as { name?: unknown; value?: unknown; reason?: unknown; by?: unknown };
+  const name = typeof body.name === "string" ? body.name : "";
+  const reason = typeof body.reason === "string" ? body.reason : "";
+  const by = typeof body.by === "string" && /^[a-z0-9_-]{1,24}$/i.test(body.by) ? body.by : "operator";
+  res.json(setKnob(name, body.value, reason, by));
+});
+
 // Profiler reservations from the site. Public write-only waitlist endpoint:
 // strict schema validation, append-only ledger, and (token permitting) the
 // profile is provisioned as a gateway agent immediately — the ecosystem
@@ -1988,6 +2011,7 @@ startSwarmLoop(); // agent-to-agent exchanges on a cadence; logs whether it is o
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();
 if (process.env.MERIDIAN_RUN_YIELD_LOGGER === "1") startYieldLogger();
+void logFundingHealthAtBoot(); // says what the wallets can actually pay for, before anything needs them to
 startBackups(); // Postgres mirror of the durable JSONL/JSON state + boot-time restore
 void initLedger(); // row-level Postgres ledger: table + one-time history backfill, then live dual-writes
 scheduleOpenDeploy(); // one-shot capital deployment at the next open, if a plan is configured

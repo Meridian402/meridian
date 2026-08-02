@@ -25,7 +25,7 @@
 // SIMULATE BEFORE SPEND: every launch is simulated against the chain first, so a
 // request that would revert costs nothing. Money only moves once the launch is
 // proven to land.
-import { createWalletClient, http, type Address, type Hex } from "viem";
+import { createWalletClient, http, parseEther, formatEther, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { existsSync, readFileSync } from "node:fs";
 import { getPublicClient, robinhoodChain } from "../venues/signer.js";
@@ -50,6 +50,22 @@ export function maxLaunchesPerDay(): number {
  *  thing anyone needs to do repeatedly, and a low number blunts a spam-drain. */
 export function maxPerRequesterPerDay(): number {
   return intEnv("LAUNCH_MAX_PER_REQUESTER_PER_DAY", 1);
+}
+/**
+ * The most ETH one launch may carry. The caps above count LAUNCHES, so without
+ * this a PONS fee increase would scale the daily drain silently: 25 launches a
+ * day is a very different promise at 0.001 ETH each versus 0.1. The fee is
+ * read live from the factory, so the ceiling is what turns "whatever PONS
+ * charges" back into an operator decision.
+ */
+export function maxLaunchSpendWei(): bigint {
+  const raw = process.env.MERD_LAUNCH_MAX_ETH ?? "0.02";
+  try {
+    const wei = parseEther(raw.trim());
+    return wei > 0n ? wei : parseEther("0.02");
+  } catch {
+    return parseEther("0.02");
+  }
 }
 
 function normalizeKey(raw: string): Hex {
@@ -85,6 +101,11 @@ interface LaunchRow {
   symbol?: string;
   txHash?: string;
   at?: number;
+  /** "attempt" is written before the send and is what the caps count, so a
+   *  send that dies mid-flight still consumed its slot. "landed"/"reverted"
+   *  are audit outcomes for the same launch and are excluded from cap math.
+   *  Legacy rows (no status) predate the split and count as attempts. */
+  status?: "attempt" | "landed" | "reverted";
 }
 
 function readLaunches(): LaunchRow[] {
@@ -117,7 +138,9 @@ export interface CapStatus {
 /** How much of the daily allowance is used, globally and for one requester. */
 export function launchCapStatus(requester?: string, now = Date.now()): CapStatus {
   const since = now - DAY_MS;
-  const recent = readLaunches().filter((r) => typeof r.at === "number" && (r.at as number) >= since);
+  const recent = readLaunches().filter(
+    (r) => typeof r.at === "number" && (r.at as number) >= since && (r.status === "attempt" || r.status === undefined),
+  );
   const requesterToday = requester
     ? recent.filter((r) => (r.requester ?? "").toLowerCase() === requester.toLowerCase()).length
     : 0;
@@ -135,25 +158,43 @@ export interface LaunchRequest {
   /** The requester's wallet: receives the token's fees and initial buy. */
   feeWallet: string;
   /** A stable id for the requester (e.g. an X user id) for the per-requester
-   *  cap. Falls back to the fee wallet, so the cap always has something to key
-   *  on even if the caller does not supply one. */
+   *  cap. REQUIRED: with a wallet-based fallback, one person rotates fee
+   *  wallets and the per-requester cap stops existing. No identity, no
+   *  launch. */
   requester?: string;
 }
 
 export type LaunchResult =
   | { ok: true; token: Address; txHash: Hex; symbol: string; name: string }
-  | { ok: false; error: string; code: "disabled" | "invalid" | "capped" | "would_revert" | "failed" };
+  | { ok: false; error: string; code: "disabled" | "invalid" | "capped" | "would_revert" | "reverted" | "failed" };
+
+// One launch at a time. The caps are read from the ledger and the attempt row
+// is written back to it, so two mentions racing through the gap would both
+// pass a cap with one slot left. The engage runner is a single process, which
+// makes this queue a complete fix, not a best effort.
+let queue: Promise<unknown> = Promise.resolve();
 
 /**
  * Deploy a token to PONS from the launch wallet. Validates identity, enforces
- * the caps, simulates, then sends. On-chain creator is the launch wallet;
+ * the caps and the per-launch spend ceiling, simulates, writes the attempt to
+ * the cap ledger, then sends. On-chain creator is the launch wallet;
  * feeWallet is the requester, so Meridian pays but does not profit.
  */
-export async function executeCustodialLaunch(req: LaunchRequest): Promise<LaunchResult> {
+export function executeCustodialLaunch(req: LaunchRequest): Promise<LaunchResult> {
+  const run = queue.then(() => doLaunch(req));
+  queue = run.catch(() => undefined);
+  return run;
+}
+
+async function doLaunch(req: LaunchRequest): Promise<LaunchResult> {
   const wallet = launchWallet();
   if (!wallet) return { ok: false, code: "disabled", error: "custodial launch is not enabled" };
   if (!ADDRESS_RE.test(req.feeWallet)) {
     return { ok: false, code: "invalid", error: "a valid fee-wallet address is required so you own the token" };
+  }
+  const requester = (req.requester ?? "").trim().toLowerCase();
+  if (!requester) {
+    return { ok: false, code: "invalid", error: "a stable requester identity is required for the daily limit" };
   }
 
   let id: { name: string; symbol: string };
@@ -164,7 +205,6 @@ export async function executeCustodialLaunch(req: LaunchRequest): Promise<Launch
   }
 
   // Caps, checked BEFORE any chain work so a capped request costs nothing.
-  const requester = (req.requester ?? req.feeWallet).toLowerCase();
   const caps = launchCapStatus(requester);
   if (caps.globalToday >= caps.globalMax) {
     return { ok: false, code: "capped", error: "the daily launch limit is reached, try again tomorrow" };
@@ -182,6 +222,18 @@ export async function executeCustodialLaunch(req: LaunchRequest): Promise<Launch
     initialBuyWei: 0n,
   });
 
+  // The fee is read live from the factory; the ceiling is ours. Refusing here
+  // means a PONS fee hike parks the feature loudly instead of scaling the
+  // daily spend 25x quietly.
+  const ceiling = maxLaunchSpendWei();
+  if (built.value > ceiling) {
+    return {
+      ok: false,
+      code: "capped",
+      error: `the launch fee (${formatEther(built.value)} ETH) is over the per-launch ceiling (${formatEther(ceiling)} ETH), so launches are paused`,
+    };
+  }
+
   // Prove it lands before spending a cent.
   const sim = await simulatePonsLaunch(built, wallet.address);
   if (!sim.ok) {
@@ -189,15 +241,27 @@ export async function executeCustodialLaunch(req: LaunchRequest): Promise<Launch
     return { ok: false, code: "would_revert", error: `launch not sent: ${why}` };
   }
 
+  // The attempt is ledgered BEFORE the send: a send that dies after leaving
+  // this process (or a receipt wait that throws) has still spent money, so it
+  // must have already consumed its cap slot. Simulation has passed by here, so
+  // an honest requester's slot is not burned on a launch that never could land.
+  appendLedger(LAUNCHES_FILE, {
+    requester,
+    feeWallet: req.feeWallet.toLowerCase(),
+    symbol: id.symbol,
+    at: Date.now(),
+    status: "attempt",
+  });
+
   try {
     const client = createWalletClient({ account: wallet.account, chain: robinhoodChain, transport: http(config.robinhoodWriteRpcUrl) });
     const txHash = await client.sendTransaction({ to: built.to, data: built.data, value: built.value });
     const receipt = await getPublicClient().waitForTransactionReceipt({ hash: txHash });
     if (receipt.status !== "success") {
-      return { ok: false, code: "failed", error: `launch transaction reverted: ${txHash}` };
+      appendLedger(LAUNCHES_FILE, { requester, txHash, at: Date.now(), status: "reverted" });
+      return { ok: false, code: "reverted", error: `launch transaction reverted: ${txHash}` };
     }
-    // Record only a landed launch: the caps count real spends, and an audit row
-    // ties every token this wallet created to the requester who asked for it.
+    // The audit row ties every token this wallet created to who asked for it.
     appendLedger(LAUNCHES_FILE, {
       requester,
       feeWallet: req.feeWallet.toLowerCase(),
@@ -205,6 +269,7 @@ export async function executeCustodialLaunch(req: LaunchRequest): Promise<Launch
       symbol: id.symbol,
       txHash,
       at: Date.now(),
+      status: "landed",
     });
     return { ok: true, token: built.predictedToken, txHash, symbol: id.symbol, name: id.name };
   } catch (err) {

@@ -115,7 +115,10 @@ export async function handleLaunchMention(m: LaunchMention): Promise<MentionOutc
   if (launched.ok) {
     return { action: "reply", text: launchDoneReply(launched.symbol, launched.token), launched };
   }
-  // Turn the machine reason into something a person can act on.
+  // Turn the machine reason into something a person can act on. "reverted"
+  // and "failed" are deliberately different sentences: a reverted launch
+  // landed on-chain and burned gas, so telling that person "nothing was
+  // spent" would be a lie with a public receipt.
   const text =
     launched.code === "disabled"
       ? "launches from X are not open yet. hang tight."
@@ -123,6 +126,8 @@ export async function handleLaunchMention(m: LaunchMention): Promise<MentionOutc
         ? launched.error
         : launched.code === "invalid"
           ? `i could not launch that: ${launched.error}`
-          : "something went wrong launching that, and nothing was spent. try again in a bit.";
+          : launched.code === "reverted"
+            ? "the launch transaction reverted on-chain, so no token was created. try again in a bit."
+            : "something went wrong launching that, and nothing was spent. try again in a bit.";
   return { action: "reply", text, launched };
 }

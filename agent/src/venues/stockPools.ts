@@ -424,6 +424,26 @@ async function swapExactInPath(params: {
 }
 
 const BRIDGE_HOP_TO_USDG: RouteHop = { outputCurrency: USDG, fee: BRIDGE_FEE, tickSpacing: BRIDGE_TICK_SPACING };
+
+/**
+ * Pure NATIVE to USDG swap builder through the proven bridge pool, for a
+ * sender whose key lives OFF this box (the treasury funding its own scout
+ * payouts from its fee income). No reads, no signing: the caller owns the
+ * amounts, the slippage floor, and the signature.
+ */
+export function buildEthToUsdgCalldata(params: { amountInWei: bigint; amountOutMinimum: bigint; recipient: Address }): {
+  to: Address;
+  data: Hex;
+  value: bigint;
+} {
+  return buildSwapExactInCalldata({
+    currencyIn: NATIVE,
+    route: [BRIDGE_HOP_TO_USDG],
+    amountIn: params.amountInWei,
+    amountOutMinimum: params.amountOutMinimum,
+    recipient: params.recipient,
+  });
+}
 const BRIDGE_HOP_TO_NATIVE: RouteHop = { outputCurrency: NATIVE, fee: BRIDGE_FEE, tickSpacing: BRIDGE_TICK_SPACING };
 
 /**

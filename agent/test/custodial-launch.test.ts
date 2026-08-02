@@ -32,7 +32,7 @@ test("dormant by default: no key means no launching", async () => {
   const { custodialLaunchEnabled, launchWallet, executeCustodialLaunch } = await load();
   assert.equal(custodialLaunchEnabled(), false);
   assert.equal(launchWallet(), null);
-  const r = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: FEE_WALLET });
+  const r = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: FEE_WALLET, requester: "x1" });
   assert.deepEqual({ ok: r.ok, code: r.code }, { ok: false, code: "disabled" });
 });
 
@@ -53,8 +53,41 @@ test("a bad fee wallet is refused before any chain work", async () => {
   process.env.MERD_LAUNCH_WALLET_KEY = TEST_KEY;
   writeLaunches([]);
   const { executeCustodialLaunch } = await load();
-  const r = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: "0xnope" });
+  const r = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: "0xnope", requester: "x1" });
   assert.deepEqual({ ok: r.ok, code: r.code }, { ok: false, code: "invalid" });
+});
+
+test("no requester identity, no launch: a wallet fallback would let one person rotate wallets past the cap", async () => {
+  process.env.MERD_LAUNCH_WALLET_KEY = TEST_KEY;
+  writeLaunches([]);
+  const { executeCustodialLaunch } = await load();
+  const r = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: FEE_WALLET });
+  assert.deepEqual({ ok: r.ok, code: r.code }, { ok: false, code: "invalid" });
+  assert.match(r.error, /requester identity/);
+});
+
+test("the per-launch spend ceiling has a sane default and survives a garbage env value", async () => {
+  const { maxLaunchSpendWei } = await load();
+  delete process.env.MERD_LAUNCH_MAX_ETH;
+  assert.equal(maxLaunchSpendWei(), 20_000_000_000_000_000n, "default is 0.02 ETH");
+  process.env.MERD_LAUNCH_MAX_ETH = "not-a-number";
+  assert.equal(maxLaunchSpendWei(), 20_000_000_000_000_000n, "garbage falls back, never throws");
+  process.env.MERD_LAUNCH_MAX_ETH = "0.005";
+  assert.equal(maxLaunchSpendWei(), 5_000_000_000_000_000n);
+  delete process.env.MERD_LAUNCH_MAX_ETH;
+});
+
+test("caps count attempts, not just landed launches, so a mid-flight death still consumed its slot", async () => {
+  process.env.MERD_LAUNCH_WALLET_KEY = TEST_KEY;
+  const now = Date.now();
+  writeLaunches([
+    { requester: "x9", at: now - 1000, status: "attempt" },
+    { requester: "x9", at: now - 900, status: "landed", txHash: "0xabc" }, // outcome row for the same launch
+    { requester: "x9", at: now - 500, status: "attempt" },
+    { requester: "x9", at: now - 400, status: "reverted", txHash: "0xdef" }, // outcome row, gas spent, no token
+  ]);
+  const { launchCapStatus } = await load();
+  assert.equal(launchCapStatus("x9").requesterToday, 2, "two attempts, two slots consumed; outcome rows do not double-count");
 });
 
 test("the global daily cap stops a launch before it spends", async () => {
@@ -70,7 +103,7 @@ test("the global daily cap stops a launch before it spends", async () => {
   ]);
   const { executeCustodialLaunch, launchCapStatus } = await load();
   assert.equal(launchCapStatus().globalToday, 3);
-  const r = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: FEE_WALLET });
+  const r = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: FEE_WALLET, requester: "x1" });
   assert.deepEqual({ ok: r.ok, code: r.code }, { ok: false, code: "capped" });
   delete process.env.LAUNCH_MAX_PER_DAY;
   delete process.env.LAUNCH_MAX_PER_REQUESTER_PER_DAY;
@@ -85,7 +118,7 @@ test("the per-requester cap stops a repeat launcher while others can still go", 
   const { executeCustodialLaunch, launchCapStatus } = await load();
   // The repeat requester is capped...
   assert.equal(launchCapStatus(FEE_WALLET).requesterToday, 1);
-  const capped = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: FEE_WALLET });
+  const capped = await executeCustodialLaunch({ symbol: "DOGE", name: "Doge", feeWallet: FEE_WALLET, requester: FEE_WALLET });
   assert.deepEqual({ ok: capped.ok, code: capped.code }, { ok: false, code: "capped" });
   // ...but a different requester is not (they will fail later on the chain, not
   // the cap: the wallet is unfunded, so this proves the cap PASSED, not the send).

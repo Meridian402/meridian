@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.meridian.merdx</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zach/dev/meridian/agent/_merd-post.sh</string>
+  </array>
+  <!-- 2h. The cadence floor in _merd-autopilot.mts (MERD_MIN_POST_GAP_MIN,
+       default 90m) is the real guard: it is checked BEFORE the model call, so
+       a cycle that fires too soon after a manual post costs nothing. -->
+  <key>StartInterval</key>
+  <integer>7200</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/zach/Library/Logs/merd-autopilot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zach/Library/Logs/merd-autopilot.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
