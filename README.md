@@ -15,6 +15,11 @@ on, metered over [x402](https://www.x402.org).
 **Live:** [meridian402.xyz](https://meridian402.xyz) · Watch the agent reason in
 real time on the live desk. Every position and swap is on-chain and public.
 
+**MERD contract (Robinhood Chain):**
+[`0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8`](https://robinhoodchain.blockscout.com/token/0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8)
+· the same address is published in the site footer. Anything that differs is not
+this token.
+
 ## What it does
 
 - **Makes markets autonomously.** Merd provides concentrated liquidity in
@@ -165,8 +170,9 @@ Honest about where this is.
   current scale. Market-making margins are thin until volume and depth grow. We
   say this plainly rather than dress it up: the edge is meant to be real and
   checkable, not reliably profitable yet.
-- **MERD is live.** The token trades on Robinhood Chain and its address is
-  published on the site. Platform revenue collects to a wallet the agent itself
+- **MERD is live.** The token trades on Robinhood Chain at
+  `0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8`, the same address published in the
+  site footer and at the top of this file. Platform revenue collects to a wallet the agent itself
   custodies, separate from the key that signs engine operations. The staking and
   fee-routing contracts around the token are drafts, unaudited and not deployed
   (see [`contracts/STAKING.md`](contracts/STAKING.md)). None of this holds your
