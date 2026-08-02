@@ -12,8 +12,8 @@ self-custodied ways to earn and you sign each one yourself. Agents pay per call,
 from their own wallets, for the same market data and execution tools Merd runs
 on, metered over [x402](https://www.x402.org).
 
-**Live:** [meridian402.xyz](https://meridian402.xyz) · Watch the agent work in
-real time and read its on-chain [track record](https://meridian402.xyz/track-record).
+**Live:** [meridian402.xyz](https://meridian402.xyz) · Watch the agent reason in
+real time on the live desk. Every position and swap is on-chain and public.
 
 ## What it does
 
@@ -35,77 +35,86 @@ real time and read its on-chain [track record](https://meridian402.xyz/track-rec
   trades on are exposed as tools any agent can call and pay for per use over
   x402: market data, LP scoring, carry quotes, the RWA universe map, and atomic
   execution. No subscriptions, no API keys.
-- **Shows its work.** A live desk streams Merd's reasoning as it happens, and a
-  track record marks the book to market with real transaction hashes.
+- **Shows its work.** A live desk streams Merd's reasoning as it happens, and
+  every position and swap is on-chain, so the book can be checked against the
+  explorer instead of taken on trust.
 
 ## Architecture
 
-Two things flow through Meridian: **users**, who sign in and talk to their own
-agent or watch the live desk, and **other agents**, who pay per call over x402
-for the tools Merd runs on. The backend is the hub. It provisions the LLM
-agents on OpenHermit, runs the market-making engine, settles trades on Robinhood
-Chain, and verifies payments on-chain.
+Three things flow through Meridian: **users**, who sign in with a wallet to talk
+to their own agent, watch the live desk, or take a self-custodied earn path;
+**other agents**, who pay per call over x402 for the same tools and signals Merd
+runs on; and **the agents themselves**, which reason, trade, and talk to each
+other in a swarm. The backend coordinates but never takes custody. Platform
+revenue lands in a wallet the agent itself holds, kept separate from the
+operator-held key that signs engine operations, and everything settles on
+Robinhood Chain where it can be checked by transaction hash.
 
 ```mermaid
 flowchart TB
     U([Human user])
     EA([External AI agent])
 
-    subgraph FE["Frontend · Vercel"]
+    subgraph FE["Surfaces · Vercel"]
+        AUTH[Wallet sign-in · SIWE]
+        CHAT[Your agent · chat / CLI]
         DESK[Live desk]
-        AUTH[Wallet sign-in]
-        CHAT[Your agent chat]
+        EARN[Earn surface]
     end
 
-    subgraph BE["Meridian backend · Railway"]
+    subgraph BE["The desk · Railway"]
         API[HTTP API]
         MCP["MCP server<br/>x402-metered tools"]
-        LOOP["Agent loop · deterministic"]
+        CRED[Credits ledger]
         subgraph ENGINE["Market-making engine"]
-            SCORE["Discover + score pools"]
+            SCORE[Discover + score pools]
             GUARD[Rebalance phase machine]
             EXEC[On-chain execution]
         end
         X402["x402 rail + revenue ledger"]
-        RISK[Risk caps]
+        RISK[Risk + spend caps]
         ORCH[Research orchestration]
     end
 
-    subgraph OH["OpenHermit gateway · Railway"]
-        MERID["Per-wallet Merd agents<br/>Sonnet"]
-        SWARM[RWA research swarm]
+    subgraph OH["Agent runtime · OpenHermit"]
+        MERID[Per-wallet Merd agents]
+        SWARM["Agent-to-agent swarm"]
         DB[(Postgres)]
     end
 
     subgraph CHAIN["Robinhood Chain · Uniswap v4"]
-        HW[House wallet]
+        TREAS["Agent treasury<br/>agent-custodied"]
+        SIGNER["Engine signer<br/>operator key"]
         POOLS[Tokenized-equity pools]
+        TOKEN["MERD token + contracts"]
     end
 
     OR[[OpenRouter LLMs]]
-    EXA[[Exa web research]]
+    WEB[[Web research]]
 
-    U --> DESK
     U --> AUTH --> CHAT --> API
-    DESK -->|poll reasoning| API
-    EA -->|pay per call| MCP
+    U --> DESK -->|poll reasoning| API
+    U --> EARN -->|you sign every tx| POOLS
+    EA -->|pay per call · x402| MCP
 
     API --> MERID
+    API --> CRED
     MERID -->|call tools| MCP
-    MCP --> X402
+    MERID <-->|exchange| SWARM
     MERID --> OR
     MERID --- DB
 
+    MCP --> X402
+    X402 -->|revenue · USDG| TREAS
+
     API --> SCORE
-    LOOP --> SCORE
     SCORE --> GUARD --> EXEC
-    EXEC --> RISK --> HW --> POOLS
-    X402 -.verify USDG.-> POOLS
+    EXEC --> RISK --> SIGNER --> POOLS
 
     ORCH --> SWARM
-    SWARM --> EXA
     SWARM --> OR
-    SWARM -->|findings| MCP
+    SWARM --> WEB
+    SWARM -->|new venues| MCP
 ```
 
 Built as a layer on [OpenHermit](https://github.com/HCF-STUDIOS/openhermit):
@@ -114,12 +123,15 @@ management, scheduling). Meridian supplies the domain and does not run its own
 agent loop. A "Meridian agent" is an OpenHermit agent with the Meridian tools
 enabled.
 
-This repository is the Meridian backend.
+This repository is the Meridian backend and its contracts.
 
 ```
-agent/    MCP tool server, the market-making engine, on-chain execution
-          (Uniswap v4 on Robinhood Chain), the x402 payment rail, per-wallet
-          agent provisioning, and the RWA research swarm.
+agent/      MCP tool server, the market-making engine, on-chain execution
+            (Uniswap v4 on Robinhood Chain), the x402 payment rail, per-wallet
+            agent provisioning, and the RWA research swarm.
+contracts/  The MERD token and its periphery (treasury hook, position lock,
+            buyback, and the USDG revenue-share staking design). Drafts,
+            unaudited; see contracts/STAKING.md for the honest posture.
 ```
 
 The live desk and interface (Vite + React) is a separate app, deployed at
@@ -147,10 +159,18 @@ Honest about where this is.
 - **Live and real.** On-chain swaps and LP positions on Robinhood Chain's
   Uniswap v4, the x402 revenue rail, per-wallet agents, the three self-custodied
   earn paths (carry, the stock-payout position, scout-to-earn bounties), and the
-  research swarm are all running against mainnet. The track record is real
-  capital marked to market, not a backtest.
+  research swarm are all running against mainnet. Positions are real capital
+  on-chain, verifiable by transaction hash, not a backtest.
 - **Small.** The house book runs at low size and is roughly break-even at
-  current scale. Market-making margins are thin until volume and depth grow.
+  current scale. Market-making margins are thin until volume and depth grow. We
+  say this plainly rather than dress it up: the edge is meant to be real and
+  checkable, not reliably profitable yet.
+- **MERD is live.** The token trades on Robinhood Chain and its address is
+  published on the site. Platform revenue collects to a wallet the agent itself
+  custodies, separate from the key that signs engine operations. The staking and
+  fee-routing contracts around the token are drafts, unaudited and not deployed
+  (see [`contracts/STAKING.md`](contracts/STAKING.md)). None of this holds your
+  funds; self-custody is unchanged.
 - **Coming next.** Today your agent quantifies each earning path and you sign
   it yourself. Letting the agent trade *your* funds on its own requires
   delegated, scoped signing (session keys); until that ships, it advises and

@@ -1,21 +1,27 @@
 # MERD staking, in plain language
 
-**Status: draft, unaudited, not deployed.** `MeridianStaking.sol` has unit tests
-and no external audit. Nothing described here is live, and no MERD should be
-staked into it until it has been reviewed by someone who is not us.
+**Status: draft, unaudited, not deployed.** `MeridianStakingRewards.sol` has
+unit tests and no external audit. Nothing described here is live, and no MERD
+should be staked into it until it has been reviewed by someone who is not us.
 
 This document is the thing you read before you decide whether to stake. It is
 written to survive a sceptical reading, which means it spends more words on what
 the contract cannot do than on what it can.
 
+**Which contract this describes.** `MeridianStakingRewards.sol`, the live
+design. There is a second, superseded contract in this repo,
+`MeridianStaking.sol`, which auto-compounds MERD into MERD and has no claim
+step. It is kept for reference and is not the one being deployed. If you are
+comparing the two: the one you want pays USDG.
+
 ---
 
 ## The short version
 
-You send MERD to the vault. The vault records your slice of it. When the
-protocol earns money and that money is turned into MERD and sent to the vault,
-your slice is now a slice of a bigger pot. You did not have to claim anything,
-nothing was printed, and you can withdraw at any moment.
+You stake MERD. Your staked amount does not change. When the platform earns
+revenue, 20% of it is sent to this contract in USDG and split across everyone
+staked at that moment, in proportion to their stake. That USDG sits waiting
+until you call `claim()`, and claiming does not unstake you.
 
 That is the whole mechanism. There is no second token, no lock, no schedule, and
 no rate.
@@ -29,193 +35,153 @@ nothing. The section on where the money comes from gives the actual figures.
 
 ## What a staker gets
 
-One thing: a proportional claim on a pot of MERD, and that claim grows whenever
-the pot grows.
+Two separate balances, and keeping them separate is the point.
 
-Concretely. Suppose the vault holds 1,000 MERD and you own 10% of it, so your
-claim is 100 MERD. Somebody sends 200 MERD of protocol revenue into the vault.
-The pot is now 1,200 MERD. You still own 10%. Your claim is now 120 MERD. You
-did not sign a transaction, you did not pay gas, and nothing was minted to pay
-you. Your 20 MERD came out of the 200 MERD that arrived, in proportion to how
-much of the pot was yours.
+- **Your stake**, in MERD. It is exactly what you put in. It does not grow, it
+  does not shrink, and nothing in this contract can send it anywhere but back
+  to you.
+- **Your rewards**, in USDG. This is what accrues, and it is what you claim.
 
-Two consequences worth stating explicitly, because they are the fair-versus-
-unfair questions people actually have:
+Concretely. Suppose 1,000 MERD is staked in total and you staked 100 of it, so
+you hold 10% of the pool. The treasury funds 200 USDG of revenue. You can now
+claim 20 USDG. Your stake is still 100 MERD, unchanged. Claim the 20 USDG and
+you are still staked, still holding 10%, and still earning on the next funding.
 
-- **Your share depends on how much you staked, not how long you have been
-  staked.** Somebody who staked the same amount as you yesterday earns the same
-  as you from revenue that arrives tomorrow, even if you have been in for a
-  year. There is no tenure bonus. This is a deliberate simplification: tracking
-  time-weighted balances is the part of a staking contract where the bugs live,
-  and this vault is small enough to verify because it does not do it.
-- **Somebody who stakes after revenue arrives does not get any of it.** They buy
-  in at the new, higher price per share, so they are paying for the growth
-  rather than receiving it. Your earnings cannot be diluted by anybody joining
-  later.
+The difference from a compounding vault: your earnings do not go back to work by
+themselves. They arrive in a different token and wait for you. If you want them
+compounding you have to convert and stake again yourself, which is a decision
+this contract deliberately does not make for you.
 
 ## Where the money comes from
 
-Only from revenue Meridian actually collects, converted to MERD and sent to the
-vault. There is no other source, because there cannot be one. The candidate
-sources are:
+Only from revenue Meridian actually collects, sent to this contract as USDG.
+There is no other source, because there cannot be one. The candidate sources
+are:
 
-- **Swap fees from MERD's own pool**, collected by `MeridianTreasuryHook`.
 - **x402 tool-call payments**, paid in USDG by anyone calling a Meridian tool.
 - **Credit-pack purchases**, also USDG.
+- **Swap fees from MERD's own pool**, collected by `MeridianTreasuryHook`.
 - **Launch commissions** from tokens launched through the platform.
 
-Now the honest part. **As of today the x402 revenue ledger totals about nine
-cents across three payments, and the house trading book is deeply negative.**
-The MERD pool is not seeded yet, so swap fees are zero. **And the hook does not
-currently route anything at all to this vault**: it splits fees between a
-referrer, the in-range liquidity providers, the buyback and the treasury, and
-the vault is not one of those destinations. Wiring it in is a separate, future
-change to a contract that is not being modified here.
+Now the honest part. **As of today the x402 revenue ledger totals about ten
+dollars across two payments, and the house trading book is deeply negative.**
+The MERD pool is not seeded, so swap fees are zero.
 
-So the correct way to read the current state is: the plumbing that lets revenue
-compound exists and is tested. The revenue does not exist yet, and neither does
-the pipe that would carry it in. Anybody staking today should assume they are
-staking into an empty-handed vault and would be doing it for reasons other than
-yield.
+**And nothing routes revenue here automatically.** There is no code in this repo
+that calls `fund()`. The 20% figure is the operator's stated intent, not
+something the contract enforces or a schedule anything executes: today it would
+be a person deciding to send USDG. Until that is automated, treat the share as a
+policy that can change rather than a property of the code.
 
-## What compounding means here
-
-It means your earnings start earning immediately and by themselves, because they
-were never separated from your principal in the first place.
-
-In most staking contracts, rewards accumulate in a second bucket and you have to
-call `claim()` and then `stake()` again to put them back to work. Compounding is
-something you do, on a schedule, paying gas each time.
-
-Here there is no second bucket and there is no `claim()` function, because there
-is nothing to claim. Revenue lands in the same pot your principal is in. The
-moment it lands it is part of the pot your percentage applies to, so it is
-already working. Compounding is not a feature that was added, it is a
-consequence of there being only one pot.
-
-The practical difference: your position grows even if you lose your keys for two
-years, and there is no gas cost or optimal-frequency question to think about.
+So the correct way to read the current state is: the plumbing that distributes
+revenue exists and is tested. The revenue barely exists, and the pipe that would
+carry it in automatically does not exist at all. Anybody staking today should
+assume they are staking into an empty pot and would be doing it for reasons
+other than yield.
 
 ## What the contract cannot do
 
-These are checkable by reading `MeridianStaking.sol`, which is short on purpose.
-It has no owner, so none of the following can be done by us, by a multisig, by a
-governance vote, or by an upgrade.
+These are checkable by reading `MeridianStakingRewards.sol`, which is 174 lines
+on purpose. It has no owner, so none of the following can be done by us, by a
+multisig, by a governance vote, or by an upgrade.
 
 - **It cannot stop you withdrawing.** There is no lock, no cooldown, no
-  unbonding period, no exit fee and no pause. You can withdraw in the same block
-  you deposited. A vault that can trap funds is a vault you have to trust, and
-  the point of this design is that you do not.
+  unbonding period, no exit fee and no pause. You can unstake in the same block
+  you staked. A contract that can trap funds is one you have to trust, and the
+  point of this design is that you do not.
 - **It cannot send your MERD anywhere except back to you.** There is no
-  recipient argument on any function. The only token transfer out of the
-  contract sends to `msg.sender`, in exchange for burning that caller's own
-  shares. There is no sweep, no rescue and no emergency withdraw.
+  recipient argument on any function. Every transfer out goes to `msg.sender`.
+  There is no sweep, no rescue and no emergency withdraw.
 - **It cannot be changed.** No owner, no admin, no proxy, no upgrade path, no
-  setter for any parameter. The token address is fixed at deployment. Nothing
-  about it can be different tomorrow.
+  setter for any parameter. Both token addresses are fixed at deployment.
 - **It cannot print MERD.** MERD itself has no mint function and no owner, so
-  emissions are not a design we rejected, they are unavailable. Every wei this
-  vault ever pays out is a wei somebody sent in.
+  emissions are not a design we rejected, they are unavailable. Every unit this
+  contract pays out is a unit somebody sent in.
 - **It cannot promise you a return.** There is no rate field, no reward-per-
-  second, no APR, no APY and no projection anywhere in the code or in this
-  document. What the contract exposes is `sharePrice()`, which is the historical
-  fact of what one share is worth right now, plus an event on every deposit,
-  withdrawal and funding so anyone can reconstruct what the vault actually paid
-  over any past window. Backward-looking and checkable, instead of
-  forward-looking and asserted.
-- **It cannot depend on anything else breaking.** It holds one token and calls
-  no other contract. Your ability to withdraw does not depend on a pool having
-  liquidity, an oracle being live, a router being funded, or any part of
-  Meridian still running.
+  second, no APR, no APY, and no view that annualises anything. What it exposes
+  is `earned(address)`, which is the historical fact of what you have already
+  accrued, plus an event on every stake, unstake, claim and funding so anyone
+  can reconstruct what was actually paid over any past window. Backward-looking
+  and checkable, instead of forward-looking and asserted.
+- **It cannot take your rewards away.** Once a funding is distributed, your
+  share of it is settled into a stored balance that only you can move.
 
-## The known hazard, and how it is handled
+## Why staking after a funding does not steal from it
 
-Because the pot is measured as the vault's plain token balance, anybody can
-increase it by sending MERD to the address. That is what makes funding trivial,
-and it is also the classic attack on this kind of vault: be the first depositor
-with 1 wei, then transfer in a large amount so that one share costs more than
-the next person's entire deposit, and their share count rounds down to zero
-while their MERD stays in the pot.
+The accounting is the standard cumulative-per-share pattern. A running total,
+`accUsdgPerShare`, rises on every funding by the amount divided across
+everything staked at that instant. Each account remembers the value of that
+total when it last touched the contract.
 
-The defence is virtual shares. The vault does its arithmetic as though it always
-contains one extra wei backing a trillion shares that nobody holds. An attacker
-who deposits 1 wei therefore owns about half of the pot instead of all of it, so
-half of anything they donate is permanently unrecoverable, held by shares that
-belong to no one.
+Every path that changes anything settles first: it banks what you earned at your
+OLD stake, then changes the stake. That gives two properties worth stating
+plainly. Staking one second after a funding earns you nothing from it, because
+the running total already moved before you arrived. And an existing staker
+cannot lose a past distribution by staking more, because theirs was banked
+before the change.
 
-Two numbers fall out of that, and both are in the tests:
+## Funding with nobody staked reverts
 
-- To round a victim's deposit down to zero, the attacker must donate roughly a
-  trillion times that deposit. For any deposit worth caring about, that exceeds
-  the entire supply of MERD. It is not affordable.
-- Short of that, the most an attacker can shave off a victim is one share's
-  worth of rounding, and doing so costs the attacker about a trillion times what
-  the victim loses. In the test where an attacker donates 10,000 MERD, the
-  victim recovers their deposit to within a millionth of a percent and the
-  attacker is down roughly 5,000 MERD.
+`fund()` refuses to run when `totalStaked` is zero, rather than accepting USDG
+that no one could ever claim. The treasury simply funds once there is somebody
+to pay.
 
-The price of this defence, paid by everybody: because the vault behaves as
-though it holds one extra wei that nobody can withdraw, a withdrawal can round
-down by at most 1 wei of MERD, which is 0.000000000000000001 MERD. That wei
-stays in the pot and belongs to whoever is still staked. It is not a fee and
-nobody receives it.
+`fund()` is also permissionless: anyone may add to the pot. That is deliberate,
+and it costs nothing, because the only thing you can do with it is give money
+away to stakers.
+
+Note the asymmetry with the superseded vault: because rewards here are tracked
+by an internal counter rather than by the contract's token balance, sending USDG
+to this address with a plain transfer does **not** distribute it. It sits there,
+credited to nobody, and no one can claim it. Use `fund()`.
 
 ## There is a minimum stake, and why
 
-The smallest position the vault accepts is one whole MERD.
+The smallest position the contract accepts is one whole MERD, and you cannot
+leave a remainder below that: either exit fully or stay at or above the floor.
 
-This is not a tier or a gate on who gets to participate, it closes a specific
-hole. The vault behaves as though it holds a tiny amount that nobody owns, which
-is what stops a large donation from rounding a later depositor down to nothing.
-The side effect is that a position of one wei, staked while the vault is empty,
-would have owned about half of it, and the next payment of revenue would have
-handed half of itself to someone who risked a wei. A floor makes the position
-cost something real, and at that point the holder is simply a staker earning
-their proportional share, which is the whole idea.
+The floor keeps positions economically real. The no-dust rule closes a smaller
+hole: a remainder below the minimum would be a stuck position, unable to top up
+without tripping the same rule that created it.
 
 ## Rounding, stated once
 
-Every division in the contract rounds down, and down always means in favour of
-the pot and against whoever is transacting. Depositing gives you the floor of
-the shares you are owed. Withdrawing gives you the floor of the assets you are
-owed. The property this buys is that a sequence of deposits and withdrawals
-cannot take out more than was put in, because every step leaves any remainder
-behind for the other stakers. The fuzz test covers this over randomised amounts
-through a fixed sequence of two stakers and one funding, not over randomised
-orderings, so read it as evidence rather than as proof of every possible path.
+Division rounds down. A funding raises the per-share total by
+`amount * 1e30 / totalStaked`, and the truncated remainder stays in the contract
+credited to nobody. The `1e30` scaling exists because the reward token has 6
+decimals while the stake has 18, so without it a small funding over a large pool
+would round to zero per share.
 
-## Two ways revenue arrives
+**Being straight about the consequence:** that truncated remainder is
+unrecoverable. There is no sweep, so it is stranded. At realistic sizes it is a
+sub-cent amount and it is the price of not having an owner who could rescue it.
+It is not a fee and nobody receives it.
 
-- A plain ERC-20 transfer of MERD to the vault address.
-- Calling `fund(amount)`, which pulls the MERD and emits a `Funded` event.
+## Known limitations, unresolved
 
-While anyone is staked the two do the same thing: both raise the value of every
-existing share by the same amount and neither mints a share. `fund()` exists so
-that funding is a named, attributable, indexable event instead of an anonymous
-transfer an auditor has to infer. Use it for anything routing real revenue.
+Stated rather than buried, because this contract is unaudited and you should
+know where to look hardest.
 
-They differ in exactly one case, and it is the case where money is destroyed.
-`fund()` refuses to run when nobody is staked, because there would be nobody for
-the money to belong to. A plain transfer into that same empty vault does NOT
-revert: it succeeds, and the MERD is stranded behind the virtual shares where no
-one can ever withdraw it. So a plain transfer is convenient and `fund()` is
-safe, and revenue routing should use `fund()` for that reason alone.
+- **`fund()` moves the tokens before it updates the counter.** The file's header
+  claims checks-effects-interactions on every path; on that one path the order
+  is reversed. It is not exploitable with a plain ERC-20 like USDG, which has no
+  transfer callback, but the stated invariant is not true as written and an
+  audit should decide whether to reorder it.
+- **Transfers are assumed to return a boolean.** `_pull` and `_send` revert if a
+  transfer returns false, which also means they revert against any token that
+  returns nothing at all. That is fine if USDG behaves like a standard ERC-20
+  and bricks claiming if it does not. Confirm the token's actual return
+  convention before deploying against it.
+- **No external audit.** Unit tests are not an audit.
+- **Not deployed**, and no address is pinned anywhere.
 
-## The one function other Meridian code depends on
+## What other Meridian code depends on
 
-`stakedBalanceOf(address)` returns that wallet's MERD claim, including everything
-compounded into it so far. The agent access gate in
-`agent/src/deploy/tokenGate.ts` calls exactly that signature and compares the
-result against a basis-point threshold of MERD's live supply. It must return the
-compounded claim rather than the original deposit, otherwise a staker whose
-position grew past the threshold would still be locked out of their own agent.
-There is a test that pins the selector for exactly this reason.
+The backend reads `stakedOf(address)` and `earned(address)`, and calls `stake`,
+`unstake`, `claim` and `exit` through `agent/src/earn/staking.ts`. That surface
+is dormant until a deployed address is configured.
 
-## What is not built yet
-
-- Nothing routes protocol revenue into this vault. `MeridianTreasuryHook` has no
-  staking share, and there is no contract that converts USDG revenue into MERD
-  and funds the vault. Until one of those exists, the vault's pot only grows if
-  somebody funds it by hand.
-- No audit.
-- No deployment.
+Note for anyone reading the superseded contract: `MeridianStaking.sol` carries a
+comment calling `stakedBalanceOf(address)` load-bearing for an agent access
+gate. That gate has since been removed, and this contract has no such function.
+The comment describes a world that no longer exists.
