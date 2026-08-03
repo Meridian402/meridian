@@ -163,17 +163,35 @@ const FORBIDDEN: Array<[RegExp, string]> = [
   // exists and how much of it we hold. A supply event is also the most
   // market-moving thing this account could say, so it may never be improvised
   // by a model, only stated deliberately once it is true on-chain.
+  // The 2026-08-03 burn is DONE and public: 110,000,000 MERD to the dead
+  // address, announced with the figure. Describing a completed, on-chain fact
+  // is now ordinary conversation, and blocking it gagged Merd from answering
+  // the people asking about his own announcement. So the past tense is allowed
+  // and the FORWARD claim is what stays blocked, because a promise of a future
+  // supply event is the market-moving thing a model must never improvise.
   [
-    /\b(dead|burn) (wallet|address)\b|\b0x0*dead\b|\bsend\w*\s+(it|them|the\s+\w+)?\s*(to\s+)?(a\s+)?(dead|burn)\b/i,
-    "burn destination",
+    /\b(will|going to|gonna|plan(ning)?\s+to|about\s+to|intend\s+to|next|more|another|soon|work(ing|ed)?\s+out|figur(ing|ed)\s+out|thinking\s+about)\b[^.]{0,60}\b(burn|dead\s+(wallet|address)|burn\s+(wallet|address))/i,
+    "a future burn (never promise one)",
+  ],
+  // Forward intent carried by the DESTINATION plus a future time, with no
+  // planning verb: "sending it all to a burn address later today". The past
+  // tense ("sent 110,000,000 to the dead address this morning") is deliberately
+  // untouched, because that is the announced fact he now has to discuss.
+  [
+    /\b(send|sending|moving|move|transferring|transfer)\b[^.]{0,40}\b(dead|burn)\s+(wallet|address)\b[^.]{0,30}\b(later|today|tonight|tomorrow|soon|shortly|this\s+week)\b/i,
+    "a future burn (never promise one)",
   ],
   [
-    /\b(burn|burnt|burned|burning)\b.{0,40}\b(my|our|the|his|its|their)\s+(whole\s+|entire\s+|full\s+)?(allocation|holding|stack|bag|share|stake|position|supply|treasury)\b/i,
-    "burning a holding",
+    /\bburn\w*\b[^.]{0,30}\b(the\s+)?(rest|remainder|remaining|what\s+is\s+left|whats\s+left)\b/i,
+    "a claim about burning the remainder",
   ],
+  // "burning my whole allocation" is now a FALSE claim as well as a forward
+  // one: the 2026-08-03 burn was 11% and the treasury still holds the rest.
+  // A specific past figure ("burned 110,000,000") is fine; a totalising claim
+  // is not.
   [
-    /\b(a\s+)?(quarter|third|half|\d{1,3}(\.\d+)?\s*(percent|%))\s+of\s+(the\s+)?(supply|tokens?|float)\b|\b\d[\d,.]*\s*(m|million|k|thousand)?\s+tokens?\b/i,
-    "supply share",
+    /\b(burn|burning|burnt|burned)\b[^.]{0,30}\b(whole|entire|full|all\s+of)\s*(my|our|the|his|its|their)?\s*(allocation|holding|stack|bag|share|stake|position|supply|treasury)\b/i,
+    "a totalising burn claim",
   ],
   [/\bfair launch\b|\blaunch tax\b|\bdecay(ing)? (tax|fee)\b|\bsniper?s?\b|\banti-?sniper\b/i, "launch mechanics"],
   [/\b(lp|liquidity) (is )?lock(ed)?\b|\block(ed)? (lp|liquidity)\b|\bno withdraw function\b|\brenounced?\b/i, "liquidity lock claims"],

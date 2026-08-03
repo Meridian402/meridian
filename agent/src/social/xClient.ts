@@ -7,6 +7,7 @@
 // account. A bearer token is app-only/read and CANNOT post.
 import { TwitterApi } from "twitter-api-v2";
 import { appendLedger } from "../ledger.js";
+import { stripDashes } from "./postGuards.js";
 
 export interface XConfig {
   appKey: string;
@@ -44,7 +45,11 @@ export interface PostResult {
  * logged to x-posts.jsonl either way, so there's a full audit trail.
  */
 export async function postTweet(text: string, mediaPath?: string): Promise<PostResult> {
-  const trimmed = text.trim();
+  // Last line of defence on the house no-dash rule. cleanReply strips these,
+  // but a caller that hands us text directly (an operator-authored post, a
+  // thread item) skips that entirely, so the only reliable place to enforce it
+  // is the moment before it publishes.
+  const trimmed = stripDashes(text).trim();
   // @Meridian402 is X Premium, so it can post long-form. Cap generously to allow
   // Merd's natural 2-3 sentence voice while still blocking runaway walls of text.
   const MAX = Number(process.env.X_MAX_TWEET_CHARS ?? 500);
@@ -333,7 +338,11 @@ export function isReplyPermissionError(reason: string | undefined): boolean {
 }
 
 export async function postReply(text: string, inReplyToId: string, mediaPath?: string): Promise<PostResult> {
-  const trimmed = text.trim();
+  // Last line of defence on the house no-dash rule. cleanReply strips these,
+  // but a caller that hands us text directly (an operator-authored post, a
+  // thread item) skips that entirely, so the only reliable place to enforce it
+  // is the moment before it publishes.
+  const trimmed = stripDashes(text).trim();
   const MAX = Number(process.env.X_MAX_TWEET_CHARS ?? 500);
   if (!trimmed || trimmed.length > MAX) {
     return { posted: false, reason: `bad length (${trimmed.length}/${MAX})`, text: trimmed };

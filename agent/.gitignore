@@ -10,3 +10,6 @@ position-state.json
 _sk-state.json
 merd-daily-plan.jsonl
 merd-daily-done.jsonl
+
+# Runtime lock held by the 2-minute engage job; per-machine, never shared.
+merd-engage.lock
