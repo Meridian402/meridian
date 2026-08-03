@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { assertTreasuryIsLive } from "../src/config.js";
-import { TREASURY_WALLET, ENGINE_SIGNER_WALLET, RETIRED_WALLET } from "../src/merd/wallets.js";
+import { TREASURY_WALLET, ENGINE_SIGNER_WALLET, PREVIOUS_ENGINE_SIGNER_WALLET, RETIRED_WALLET } from "../src/merd/wallets.js";
 
 /**
  * treasuryAddress is the payTo of the whole x402 rail — the address callers are
@@ -25,10 +25,17 @@ test("the real treasury passes", () => {
 });
 
 test("the engine signer is refused as a treasury value", () => {
-  // 2026-08-01 rotation: the signer wallet WAS the treasury, so a stale
-  // MERIDIAN_TREASURY_ADDRESS pointing at it is the single most likely
-  // misconfiguration. Signing authority may live there; revenue must not.
-  assert.throws(() => assertTreasuryIsLive(ENGINE_SIGNER_WALLET), /retired wallet/);
+  // The signer is the treasury's execution wallet, so a stale or confused
+  // MERIDIAN_TREASURY_ADDRESS pointing at it is the most likely
+  // misconfiguration. Signing authority lives there; revenue must not.
+  assert.throws(() => assertTreasuryIsLive(ENGINE_SIGNER_WALLET), /not the canonical treasury/);
+});
+
+test("the previous signer, which WAS the treasury, is refused as retired", () => {
+  // 0x7037 was the treasury 2026-07-27 to 2026-08-01 and the signer until the
+  // 2026-08-03 rotation, so it is the address most likely to survive in a
+  // stale env somewhere. It gets the specific "retired" message.
+  assert.throws(() => assertTreasuryIsLive(PREVIOUS_ENGINE_SIGNER_WALLET), /retired wallet/);
 });
 
 test("an unknown but plausible address is refused: allowlist, not denylist", () => {

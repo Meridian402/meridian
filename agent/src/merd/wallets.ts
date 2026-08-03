@@ -34,13 +34,24 @@ import type { Address } from "viem";
 export const TREASURY_WALLET: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
 
 /**
- * The engine's signing wallet. venues/signer.ts refuses to boot if
- * AGENT_SIGNER_PRIVATE_KEY derives to anything else. Treasury from 2026-07-27
- * to 2026-08-01 (the single-wallet era), and it lives on as the hot signer,
- * so it is NOT retired; but revenue must no longer collect into it, which is
- * why config.ts lists it as a retired TREASURY value.
+ * The engine's signing wallet, rotated 2026-08-03. venues/signer.ts refuses to
+ * boot if AGENT_SIGNER_PRIVATE_KEY derives to anything else.
+ *
+ * This is the treasury's EXECUTION wallet: the treasury itself sits behind
+ * Privy and can only transfer, as a safeguard, so this wallet does the
+ * signing the engine needs (LP mints, re-centers, collects, payouts) and
+ * holds only the float the treasury pushes to it. A compromise of this key
+ * loses the float, never the treasury.
  */
-export const ENGINE_SIGNER_WALLET: Address = "0x7037b347B21D5e72452dA1445FB1f01D652d40CC";
+export const ENGINE_SIGNER_WALLET: Address = "0xDFF0Cf4f18dA55f931ae2A5a0770BaAD1e45D7fe";
+
+/**
+ * Engine signer 2026-08-01 to 2026-08-03, and treasury 2026-07-27 to
+ * 2026-08-01 before that (the single-wallet era). Superseded by the execution
+ * wallet above; retired holding ~$0.90 of gas ETH. Recorded so its appearance
+ * in executions and the published track record reads as history.
+ */
+export const PREVIOUS_ENGINE_SIGNER_WALLET: Address = "0x7037b347B21D5e72452dA1445FB1f01D652d40CC";
 
 /**
  * Treasury from 2026-07-26 to 2026-07-27, superseded in the single-wallet
