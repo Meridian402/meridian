@@ -24,7 +24,7 @@
 // guard over the house wallet, so exactly one may run at a time. See the note
 // on getAgentSigner in venues/signer.ts.
 import { openPositionsOnChain, withdrawPosition, mintRange, poolTick, lastMintedPosition, lastPoolOnChain, uncollectedFeesUsd, collectFees, type LpPositionRecord } from "./venues/lpPositions.js";
-import { realBuyStockFromNative, realSellStockForUsdg, poolPricesUsd, isTradable, isAutoExecutable, poolFeePct } from "./venues/stockPools.js";
+import { realBuyStockFromNative, realSellStockForUsdg, poolPricesUsd, isTradable, isAutoExecutable, poolFeePct, unwrapWeth } from "./venues/stockPools.js";
 import { getAgentSigner, getPublicClient } from "./venues/signer.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { latestScan, scanOpportunities } from "./lpAllocator.js";
@@ -403,6 +403,17 @@ export function startLpGuard(): NodeJS.Timeout {
   const runCheck = async () => {
     const now = new Date();
     const phase = phaseOf(now);
+
+    // Housekeeping first: fold any WETH that landed in the signer into the
+    // native balance. Every pool route starts from NATIVE, so wrapped ETH is
+    // capital the sizing counts (see ethSideUsd) but no swap can reach until
+    // this runs. Best-effort: a failed unwrap must never cost a guard tick.
+    try {
+      const unwrapped = await unwrapWeth();
+      if (unwrapped) console.log(`[lpGuard] unwrapped ${Number(unwrapped.amountWei) / 1e18} WETH to native (${unwrapped.hash})`);
+    } catch (err) {
+      console.error(`[lpGuard] weth unwrap failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+    }
 
     const positions = await openPositionsOnChain();
     // Flat during market hours → auto-recovery re-establishes the position

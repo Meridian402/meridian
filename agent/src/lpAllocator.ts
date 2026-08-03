@@ -12,7 +12,8 @@ import { getPublicClient, getAgentAddress } from "./venues/signer.js";
 import { lpScores } from "./signals/lpScore.js";
 import { qualifyDeployablePools } from "./signals/poolQualify.js";
 import { openPositionsOnChain, lpPositionsWithValue, configuredPool, LP_BASELINE_SYMBOLS } from "./venues/lpPositions.js";
-import { poolCandidates, poolFeePct, poolPricesUsd } from "./venues/stockPools.js";
+import { poolCandidates, poolFeePct, poolPricesUsd, WETH } from "./venues/stockPools.js";
+import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { dataPath } from "./dataDir.js";
 
@@ -113,12 +114,32 @@ export function latestScan(): OpportunityScan | null {
  * a zeroed capital makes every pool's expected $/day 0 and the ranking
  * meaningless.
  */
+/**
+ * Gas the book must never spend. Native ETH is deployable capital here because
+ * realBuyStockFromNative gives it a real spend path into any pool, but it is
+ * ALSO the gas token, so counting all of it would let sizing plan away the
+ * engine's ability to sign. 0.001 ETH covers a comfortable run of mints,
+ * re-centers and collects on this chain (fundingHealth warns at half that).
+ */
+export const GAS_RESERVE_ETH = 0.001;
+
+/**
+ * Pure sizing arithmetic, split out for tests: WETH counts in full (the guard
+ * unwraps it on its next tick, so it is native with a one-tick delay), native
+ * counts above the gas reserve, and a bad or missing ETH price counts both at
+ * zero rather than poisoning the total.
+ */
+export function ethSideUsd(nativeEth: number, wethEth: number, ethUsd: number | null): number {
+  if (ethUsd == null || !Number.isFinite(ethUsd) || ethUsd <= 0) return 0;
+  return (Math.max(0, nativeEth - GAS_RESERVE_ETH) + Math.max(0, wethEth)) * ethUsd;
+}
+
 export async function deployableCapitalUsd(): Promise<number | null> {
   const wallet = getAgentAddress();
   if (!wallet) return null;
   try {
     const client = getPublicClient();
-    const [usdgRaw, balances, prices, positions] = await Promise.all([
+    const [usdgRaw, balances, prices, positions, nativeWei, wethRaw, ethUsd] = await Promise.all([
       client.readContract({
         address: USDG,
         abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
@@ -128,11 +149,22 @@ export async function deployableCapitalUsd(): Promise<number | null> {
       readStockBalances(wallet),
       poolPricesUsd(),
       lpPositionsWithValue().catch(() => []),
+      client.getBalance({ address: wallet }),
+      client
+        .readContract({
+          address: WETH,
+          abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
+          functionName: "balanceOf",
+          args: [wallet],
+        })
+        .catch(() => 0n),
+      fetchEthUsd().catch(() => null),
     ]);
     const usdg = Number(usdgRaw) / 1e6;
     const stock = Object.entries(balances).reduce((s, [sym, qty]) => s + qty * (prices[sym] ?? 0), 0);
     const lp = positions.reduce((s, p) => s + p.valueUsd, 0);
-    return usdg + stock + lp;
+    const eth = ethSideUsd(Number(nativeWei) / 1e18, Number(wethRaw as bigint) / 1e18, ethUsd);
+    return usdg + stock + lp + eth;
   } catch {
     return null;
   }

@@ -43,6 +43,16 @@ const POOL_MANAGER = INDEX_CONTRACTS.poolManager as Address;
 export const UNIVERSAL_ROUTER: Address = "0x8876789976dEcBfCbBbe364623C63652db8C0904";
 export const USDG: Address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"; // Robinhood's native stablecoin, assumed ~$1 like any USD stablecoin
 
+/**
+ * Canonical WETH on Robinhood Chain (aeWETH behind a TransparentUpgradeableProxy,
+ * the standard Arbitrum Orbit bridge token; implementation verified on
+ * Blockscout with WETH9-style withdraw/deposit). The engine never HOLDS this
+ * deliberately: every v4 pool here quotes native ETH, so WETH only appears when
+ * someone funds the signer with it, and unwrapWeth() folds it into the native
+ * balance the engine can actually spend.
+ */
+export const WETH: Address = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
+
 type Quote = "NATIVE" | "USDG";
 
 interface PoolEntry {
@@ -424,6 +434,42 @@ async function swapExactInPath(params: {
 }
 
 const BRIDGE_HOP_TO_USDG: RouteHop = { outputCurrency: USDG, fee: BRIDGE_FEE, tickSpacing: BRIDGE_TICK_SPACING };
+
+/**
+ * Fold any WETH the signer holds into its native balance. WETH is the same
+ * asset with no autonomous spend path (every pool route starts from NATIVE),
+ * so leaving it wrapped is capital the engine can see but not use. Unwrap is
+ * same-asset and loses nothing but gas.
+ *
+ * Returns the amount unwrapped in wei (0n when below dust, so callers can log
+ * only when something happened). Counts as a wallet op: it is a signed tx, and
+ * the runaway breaker should see every one of those.
+ */
+const WETH_DUST_WEI = 10n ** 13n; // 0.00001 ETH — beneath this, gas outweighs the tidy-up
+export async function unwrapWeth(): Promise<{ hash: Hex; amountWei: bigint } | null> {
+  const signer = getAgentSigner();
+  if (!signer) return null;
+  const client = getPublicClient();
+  const balance = (await client.readContract({
+    address: WETH,
+    abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
+    functionName: "balanceOf",
+    args: [signer.address],
+  })) as bigint;
+  if (balance <= WETH_DUST_WEI) return null;
+  guardWalletOp(`unwrap ${Number(balance) / 1e18} WETH`);
+  // Same-asset unwrap: notional 0 so the breaker counts the op, not the size.
+  recordWalletOp(0, "weth-unwrap");
+  const wallet = getWalletClient();
+  const hash = await wallet.writeContract({
+    address: WETH,
+    abi: [parseAbiItem("function withdraw(uint256)")],
+    functionName: "withdraw",
+    args: [balance],
+  });
+  await client.waitForTransactionReceipt({ hash });
+  return { hash, amountWei: balance };
+}
 
 /**
  * Pure NATIVE to USDG swap builder through the proven bridge pool, for a
