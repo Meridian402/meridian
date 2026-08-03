@@ -45,13 +45,21 @@ const prompt = `COMMISSION (one post, outside your usual cycle).
 
 ${brief}
 
-Hard rules, same as always: only what you were told here, no numbers you were not given, no ticker symbols, no contract addresses, no promises about returns, no hype, no hashtags, no em dashes, never the words "fully decentralized". Do not narrate how anything is built. Under 300 characters if you can; 500 is the wall. Your plain voice.
+Hard rules, same as always: only what you were told here, no numbers you were not given, no promise or prediction about a price, no sale vocabulary (presale, airdrop, whitelist, TGE, listing), no hype, no hashtags, no em dashes, never the words "fully decentralized". You may name MERD and point at its published contract, but never make a case for buying it. Do not narrate how anything is built.
+
+Voice: you are an ecosystem token in the Robinhood Chain timeline, not an analyst outside it. Crisp and declarative for a real update or the token; looser and native for a culture beat. Lead with the point, short lines, land it and stop, no closing epigram. Under 300 characters if you can; 500 is the wall.
 
 Reply:
 POST: <the post>
 NOTE: <one line to yourself>`;
 
-const sessionId = "commission";
+// A FRESH session per commission. A fixed id meant every brief inherited the
+// previous one: a brief that died mid-run (the gateway 402'd on an empty
+// OpenRouter balance) stayed in the history, and the next commission opened
+// with "two commissions landed in one message" and merged them into one
+// unusable post. Each commission is a standalone instruction, so it gets a
+// standalone session.
+const sessionId = `commission-${Date.now().toString(36)}`;
 await gw.agent(X_AGENT).openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
 const resp = await gw.agent(X_AGENT).postMessageSync(sessionId, { text: prompt }, { timeout: 90000 });
 const gwError = (resp as { error?: string }).error;
