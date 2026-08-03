@@ -8,3 +8,5 @@ position-state.json
 
 # session-key spike state (deployed addresses, no secrets)
 _sk-state.json
+merd-daily-plan.jsonl
+merd-daily-done.jsonl
