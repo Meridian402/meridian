@@ -88,7 +88,12 @@ function roadmap(): string[] {
 }
 const next = roadmap();
 const recent = readJsonl<{ posted?: boolean; text?: string; at?: number; id?: string }>("x-posts.jsonl").filter((x) => x.posted && x.text);
-const recentTexts = recent.slice(-10).map((x) => x.text as string);
+// Two days of history, not one. At 5-7 posts a day a 6-post window covers under
+// 24h, which is how "your agent pulls what the other agents learned" (2026-08-02
+// 16:30) came back reworded on 2026-08-03 19:48 and drew 93 impressions against
+// the 2165 its original slot did. tooSimilar() compares WORDING and passed it;
+// only a wider window lets him notice he is restating a claim.
+const recentTexts = recent.slice(-14).map((x) => x.text as string);
 const lastPostAt = recent.length ? (recent[recent.length - 1].at ?? 0) : 0;
 
 // Self-learning: how his own recent posts actually landed, fed back as an
@@ -106,11 +111,18 @@ try {
       const m = metrics[r.id as string];
       if (!m) return null;
       const ageH = Math.round((Date.now() - (r.at as number)) / 3600_000);
-      return `- (${ageH}h, ${(r.text as string).length}c) "${(r.text as string).slice(0, 55)}..." ${m.likes} likes, ${m.replies} replies, ${m.reposts} reposts`;
+      // Rate, not raw likes. Raw counts mostly track how far a post travelled,
+      // so they rank by reach and hide the thing worth learning: which posts
+      // made the people who SAW them respond. Impressions vary 30x across a
+      // week here, and the two highest-rate posts were not the two most-seen.
+      const eng = m.likes + m.replies + m.reposts + m.quotes;
+      const rate = m.impressions ? ((eng / m.impressions) * 100).toFixed(1) : "?";
+      return `- (${ageH}h, ${(r.text as string).length}c) "${(r.text as string).slice(0, 55)}..." ${m.impressions} seen, ${eng} responded (${rate}%)`;
     }).filter(Boolean) as string[];
     if (lines.length >= 4) {
       performance =
         `How your own recent posts landed. Engagement builds over hours, so a newer post reads low regardless, and small numbers are noise: look ONLY for a pattern across several, never react to one tweet.\n${lines.join("\n")}\n` +
+        `The percentage is how many of the people who saw it responded, which is the honest measure; a post can be seen a lot and land badly.\n` +
         `Observation, not a target. Notice what kind of post tends to land, shorter or longer, an update or a read, and let it inform how you write this one. Never chase engagement or reach for hype to farm it; the voice rules always win. No clear pattern, ignore this.\n\n`;
     }
   }
@@ -125,7 +137,7 @@ async function generatePlan(day: string): Promise<PlanItem[]> {
 Today's live state:
 ${marketSummary || "(market feed quiet)"}
 
-${shipped.length ? "Recently true for users (build-in-public material):\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (the roadmap you may point at, no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${recentTexts.length ? "Already said recently, do NOT repeat:\n" + recentTexts.slice(-6).map((r) => "- " + r).join("\n") + "\n" : ""}
+${shipped.length ? "Recently true for users (build-in-public material):\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (the roadmap you may point at, no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${recentTexts.length ? "Already said recently. Do not repeat the CLAIM, not just the wording: rephrasing one of these into new sentences still reads as a repeat and lands worse than saying nothing.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
 Produce 3 to 5 to-dos for today. This is a project manager's feed, so it is MOSTLY the project: what shipped, what is in progress, what is next, the state of things. Each to-do is ONE specific post. Choose from:
 - PROGRESS: where the project stands right now, an honest status update, no counts or metrics
 - NEXT: what is coming, from the roadmap above, plainly, no date and no hard promise
@@ -137,6 +149,8 @@ Produce 3 to 5 to-dos for today. This is a project manager's feed, so it is MOST
 - ASIDE: a short human post. Something you noticed, a reaction, a half-thought you have not resolved, one line about the hour you are working. NOT an announcement and NOT about the product. This is the one that stops the feed reading like a changelog.
 
 Weight the day toward PROGRESS, NEXT, SHIPPED and PRODUCT: that is the substance. But include at least one ASIDE every day, and at most ONE MARKET and ONE TOKEN. Include at least one PROGRESS or NEXT.
+
+Measured over 27 posts to 2026-08-03, and the clearest signal in the account's history: posts that narrate the market (a name, a percentage, a board turning over) landed between 0.0 and 1.3 percent, while posts where you state a position you hold or an act you took landed between 3 and 13 percent. The five best were all first person, carried no market data at all, and each named one concrete thing: what you sent and where it can be verified, what you control, where you are pointing this, what you are, what is coming next. So a MARKET to-do has to earn its place against that, and the brief for any to-do is stronger when it fixes on ONE act or ONE position rather than a survey of several.
 
 LENGTH: mark each to-do with how long the post should be. Vary them deliberately across the day, and make at least one SHORT. A day of five medium posts is the machine tell you are trying to break.
 
@@ -210,7 +224,7 @@ LENGTH FOR THIS POST: ${todo.length ?? "MEDIUM"}. SHORT means under fifteen word
 Today's live state (only cite a number that appears here; never invent one):
 ${marketSummary || "(quiet)"}
 
-${shipped.length ? "Things now true for users you may mention:\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (for a NEXT to-do; no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${performance}${journal ? "Your recent notes:\n" + journal + "\n" : ""}${recentTexts.length ? "You already said these, say something new:\n" + recentTexts.slice(-6).map((r) => "- " + r).join("\n") + "\n" : ""}
+${shipped.length ? "Things now true for users you may mention:\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (for a NEXT to-do; no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${performance}${journal ? "Your recent notes:\n" + journal + "\n" : ""}${recentTexts.length ? "You already said these. Say something new, and note that a repeat means the same CLAIM, not the same wording: putting one of these in fresh sentences is still a repeat.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
 Voice: you are a person who runs this thing, posting from your own account. Not a company account, not an analyst, not a changelog. Lowercase by default, first person, plain. Say "i" when it is you.
 
 LENGTH IS THE THING THAT GIVES YOU AWAY. Your posts have been landing between 276 and 296 characters over and over, which is a machine hitting a target, and no human writes like that. Decide the length from the thought, then commit to it:
