@@ -1244,6 +1244,18 @@ app.post("/api/credits/buy", async (req: Request, res: Response) => {
   setWalletCors(res);
   const address = requireWallet(req, res);
   if (!address) return;
+  // Charging is off, so there is nothing to sell. Without this the route still
+  // issued a 402, took real USDG, and banked credits nobody needs, while
+  // /api/cli told the same user "charging is off, there is nothing to buy".
+  // Taking money for a product we have stopped selling is the one outcome
+  // worth a hard refusal.
+  if (!creditsEnforced()) {
+    res.status(409).json({
+      ok: false,
+      error: "chat is free right now, so credits are not for sale. Nothing was charged.",
+    });
+    return;
+  }
   const body = req.body ?? {};
   const packId = body.pack;
   const catalogue = packs();

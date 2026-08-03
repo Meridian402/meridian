@@ -18,12 +18,12 @@ const empty: AgentSettings = {};
 test("help states the split, including that earning is never paywalled", () => {
   // Stated in both helps: the short one a newcomer reads, and the full index.
   const short = routeCli("/help", empty).lines.join("\n");
-  assert.match(short, /cost/i, "the price of a message must be visible");
-  assert.match(short, /earn/i, "and that earning is not part of it");
+  assert.match(short, /free/i, "that talking to your agent is free must be visible");
+  assert.match(short, /earn/i, "and that earning is part of what is free");
 
   const all = routeCli("/help all", empty).lines.join("\n");
-  assert.match(all, /one credit each/i);
-  assert.match(all, /never behind the paywall/i, "the promise has to be written down to be a promise");
+  assert.match(all, /free/i, "the full index says the same thing");
+  assert.doesNotMatch(all, /one credit each|credit packs/i, "the retired price model must not linger in the reference");
 });
 
 test("commands stay free, so exploring never costs anything", () => {

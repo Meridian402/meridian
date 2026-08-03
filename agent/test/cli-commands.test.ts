@@ -159,15 +159,17 @@ test("help states the cost model, because a CLI is where it finally makes sense"
   const short = routeCli("/help", empty);
   const shortText = short.lines.join("\n");
   assert.ok(short.lines.length <= 14, `short help is ${short.lines.length} lines, which is a wall again`);
-  assert.match(shortText, /cost/i, "the price of a message must be visible without asking");
-  assert.match(shortText, /free/i, "and so must the fact that most of it is free");
+  // Chat is free while usage is early, so the help must say so plainly rather
+  // than quote a price that no longer exists.
+  assert.match(shortText, /free/i, "the fact that it costs nothing must be visible without asking");
+  assert.doesNotMatch(shortText, /one credit|credit packs/i, "no stale price may survive in the help");
   assert.match(shortText, /\/help all/, "the way to the full list has to be in the short one");
   assert.deepEqual(short.suggest, ["/explore", "/whoami", "/status"], "short help should end in things to press");
 
   const all = routeCli("/help all", empty).lines.join("\n");
-  assert.match(all, /what costs/i);
-  assert.match(all, /what does not/i);
-  assert.ok(all.includes("/buy"));
+  assert.match(all, /what costs/i, "the full index still answers the money question");
+  assert.match(all, /nothing right now/i, "and the honest answer today is nothing");
+  assert.ok(!all.includes("/buy"), "the retired purchase command must not be listed");
   assert.ok(all.length > shortText.length, "the full index should actually be fuller");
 });
 

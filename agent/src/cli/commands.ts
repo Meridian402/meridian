@@ -84,7 +84,7 @@ const HELP = [
   "",
   "  /help all          every command",
   "",
-  "messages cost one credit. commands, the desk and all of earn are free.",
+  "talking to your agent is free. so is the desk, and so is everything in earn.",
 ];
 
 const HELP_ALL = [
@@ -105,19 +105,13 @@ const HELP_ALL = [
   "    /status /pnl /position /proof /why /trades",
   "    /basis /lp /scan /universe /tools /wallet",
   "",
-  "  credits",
-  "    /credits           your balance and what spends it",
-  "    /buy               credit packs",
-  "    /buy <pack>        start a purchase",
-  "",
   "  session",
   "    /explore           a short tour, one thing at a time",
   "    /clear             clear this transcript",
   "    /help              the short version",
   "",
-  "  what costs: a message to your agent. one credit each.",
-  "  what does not: every command above, the whole desk, and all of earn.",
-  "                 earning is never behind the paywall.",
+  "  what costs: nothing right now. talking to your agent is free,",
+  "              and so is every command, the desk, and all of earn.",
 ];
 
 /**
