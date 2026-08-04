@@ -45,7 +45,10 @@ caps in `src/risk.ts` are enforced server-side, so a prompt cannot exceed them.
 ## Market-making engine
 
 The core of the agent is a liquidity-provision engine, not a directional
-trader. It:
+trader. The 24/7 autonomous meme-family desk (rotation, concentration, fee
+banking, the never-stuck exit ladder, the public decision journal) is
+documented in [DESK.md](DESK.md); the equity-family engine below shares the
+wallet and the house lock. It:
 
 - **Discovers pools dynamically** (`src/lpAllocator.ts`, `src/signals/lpScore.ts`):
   scans candidate tokenized-equity pools across fee tiers, measures real swap
