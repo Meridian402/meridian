@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { targetRange, bandAmounts, tickDriftPctPerHour, fastFlipCondition, type MemeBand } from "../src/memeGuard.js";
+import { targetRange, bandAmounts, tickDriftPctPerHour, fastFlipCondition, shouldConcentrate, type MemeBand } from "../src/memeGuard.js";
 import { vetRow, poolYardstick, type AnalystRow } from "../src/signals/tokenAnalyst.js";
 import { ETH_POOLS } from "../src/venues/ethPools.js";
 
@@ -72,6 +72,12 @@ test("fast flip fires only on a band filled through its top", () => {
   assert.equal(fastFlipCondition(band, 101700), false, "in range = earning, never touch");
   assert.equal(fastFlipCondition(band, 101500), false, "below = waiting, the slow clock owns bids");
   assert.equal(fastFlipCondition({ ...band, side: "token" } as MemeBand, 101900), false, "already a sell band: nothing to flip");
+});
+
+test("concentration needs a printing leader with a 3x window edge", () => {
+  assert.equal(shouldConcentrate(9, 0.5), true, "clear leader takes waiting capital");
+  assert.equal(shouldConcentrate(9, 4), false, "close race: capital stays put");
+  assert.equal(shouldConcentrate(0.6, 0), false, "a leader below the printing floor moves nothing");
 });
 
 test("a knife gets deeper bids: offset override moves the target away from spot", () => {

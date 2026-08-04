@@ -408,8 +408,15 @@ const EARN_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MIN_PRINTING_USD = 1;
 /** Concentration cap: the best earner takes the float until it holds this share
  *  of the band book. Concentrated, not all-in: one memecoin never becomes the
- *  whole desk. */
-const MAX_VENUE_SHARE = 0.6;
+ *  whole desk. Raised 0.6 -> 0.75 on the operator's concentration order
+ *  (2026-08-05): measured 7x per-dollar earn gaps deserve weight. */
+const MAX_VENUE_SHARE = 0.75;
+
+/** A leader must be genuinely printing AND out-earn the laggard 3x in the
+ *  window before working capital moves venues. Pure, for tests. */
+export function shouldConcentrate(leaderWindowUsd: number, laggardWindowUsd: number): boolean {
+  return leaderWindowUsd >= MIN_PRINTING_USD && leaderWindowUsd >= 3 * laggardWindowUsd;
+}
 
 function updateEarnTracking(bands: MemeBand[]): void {
   const now = Date.now();
@@ -552,8 +559,60 @@ export async function memeRotorTick(): Promise<void> {
 
   await inventoryStopLoss(bands, ethUsd);
   await collectAndSkim(bands, ethUsd);
+  await maybeConcentrate(bands, ethUsd);
   await maybeExpand(bands, ethUsd);
   await maybeMigrate(bands, ethUsd);
+}
+
+// --- Concentration: working capital follows the per-dollar leader ------------
+// The operator's allocation order (2026-08-05): position size goes to the
+// bands earning the most, not to being spread. Migration only moved DEAD
+// venues; this moves WAITING capital out of measured laggards whenever the
+// leader out-earns them 3x in the window. In-range bands never move (they are
+// earning where they stand); only out-of-range, persistent waiters travel,
+// and only their ETH side (tokens have their own exit ladder).
+const CONCENTRATIONS_PER_DAY = 2;
+let concDay = "";
+let concToday = 0;
+
+async function maybeConcentrate(bands: MemeBand[], ethUsd: number): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== concDay) {
+    concDay = today;
+    concToday = 0;
+  }
+  if (concToday >= CONCENTRATIONS_PER_DAY) return;
+  if (Date.now() - lastMoveAt < GLOBAL_COOLDOWN_MS) return;
+  const leader = bestEarner(bands);
+  if (!leader) return;
+
+  for (const b of bands) {
+    if (b.poolId === leader.poolId) continue;
+    if (b.inRange || b.side !== "eth") continue;
+    const since = outOfRangeSince.get(b.tokenId);
+    if (!since || Date.now() - since < OUT_OF_RANGE_MIN_MS) continue;
+    if (b.valueUsd < MIN_BAND_USD) continue;
+    const laggardEarn = poolEarnWindow.get(b.poolId)?.usd ?? 0;
+    const leaderEarn = poolEarnWindow.get(leader.poolId)?.usd ?? 0;
+    if (!shouldConcentrate(leaderEarn, laggardEarn)) continue;
+
+    try {
+      const srcReg = venueByToken.get(b.token.toLowerCase());
+      if (!srcReg) continue;
+      await migrate([b], leader.pool, ethUsd, {
+        capped: false,
+        adopt: false,
+        reason: `concentrate: leader ${leader.pool.symbol} $${leaderEarn.toFixed(2)} vs $${laggardEarn.toFixed(2)} in window`,
+      });
+      concToday += 1;
+      lastMoveAt = Date.now();
+      outOfRangeSince.delete(b.tokenId);
+      return; // one move per tick
+    } catch (err) {
+      console.error(`[memeRotor] concentration move of #${b.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
+      return;
+    }
+  }
 }
 
 // --- Never stuck: the inventory stop-loss ------------------------------------
@@ -729,18 +788,16 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   if (expandsToday >= EXPANSIONS_PER_DAY) return;
   if (Date.now() - lastMoveAt < GLOBAL_COOLDOWN_MS) return;
 
-  // Priority order is the operator's allocation policy:
-  //   1. PROBE an unquoted pinned venue (small, capped: breadth stays cheap)
-  //   2. COMPOUND into the venue that is measurably printing (concentration)
+  // Priority order is the operator's allocation policy (flipped 2026-08-05,
+  // concentration order):
+  //   1. COMPOUND into the venue that is measurably printing
+  //   2. only when no earner wants capital, PROBE an unquoted pinned venue
   //   3. only then a fresh analyst candidate
   // A venue that is not printing gets nothing here; its exit is maybeMigrate's.
   const quoted = new Set(bands.map((b) => b.poolId.toLowerCase()));
-  let target: EthPool | null = [...venueByToken.values()].find((p) => !quoted.has(poolId(p).toLowerCase())) ?? null;
+  let target: EthPool | null = bestEarner(bands)?.pool ?? null;
   let adopted: CandidateVenue | null = null;
-  if (!target) {
-    const earner = bestEarner(bands);
-    if (earner) target = earner.pool;
-  }
+  if (!target) target = [...venueByToken.values()].find((p) => !quoted.has(poolId(p).toLowerCase())) ?? null;
   if (!target && Date.now() - candidates.at <= CANDIDATE_TTL_MS) {
     adopted = candidates.list.find((c) => !quoted.has(c.poolId.toLowerCase()) && !venueByToken.has(c.token.toLowerCase())) ?? null;
     if (adopted) {
