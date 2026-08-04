@@ -1,5 +1,9 @@
 {
   "note": "Robinhood Chain ecosystem accounts Merd prioritises engaging with. These are peers and neighbours, not strangers, so they bypass the junk and follower filters that keyword search results must pass. Merd's own judgment and every output guard still apply. Add or remove handles freely; no @ prefix.",
+  "avoidNote": "Accounts Merd must NEVER interact with: no replies, no quotes, no mentions, not even answering their mentions of us. Operator-maintained.",
+  "avoid": [
+    "clawpumptech"
+  ],
   "accounts": [
     "vladtenev",
     "ponsdotfamily",

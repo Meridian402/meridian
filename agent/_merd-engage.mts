@@ -70,12 +70,24 @@ console.log(`${mentions.length} new mention(s).`);
 const sessionId = "x-engage";
 await gw.agent(X_AGENT).openSession({ sessionId, source: { kind: "api", interactive: true, type: "direct" } }).catch(() => {});
 
+// Operator avoid list: accounts Merd never interacts with, even when they
+// mention him. Their mentions advance the cursor and get nothing back.
+let avoidlist: string[] = [];
+try {
+  const wl = JSON.parse(readFileSync(new URL("./merd-watchlist.json", import.meta.url), "utf8"));
+  avoidlist = (wl.avoid ?? []).map((h: string) => h.replace(/^@/, "").trim()).filter(Boolean);
+} catch { /* no list: nothing avoided */ }
+
 let replied = 0;
 for (const m of mentions) {
   // Always advance the cursor, even for skipped/hostile mentions, so we
   // never reprocess or dwell on the same thread.
   state.lastMentionId = m.id;
 
+  if (avoidlist.some((a) => a.toLowerCase() === m.authorHandle.toLowerCase())) {
+    console.log(`[avoid list, ignoring @${m.authorHandle}]`);
+    continue;
+  }
   if (replied >= REPLY_CAP) { console.log(`[cap reached, skipping @${m.authorHandle}]`); continue; }
 
   // LAUNCH REQUESTS are handled before freeform engagement. handleLaunchMention

@@ -39,9 +39,11 @@ const AUTHOR_COOLDOWN_H = Number(process.env.MERD_OUTREACH_AUTHOR_COOLDOWN_H ?? 
 // phrase from an unknown account is pump noise. Merd's judgment and every output
 // guard still apply to both.
 let watchlist: string[] = [];
+let avoidlist: string[] = [];
 try {
   const wl = JSON.parse(readFileSync(new URL("./merd-watchlist.json", import.meta.url), "utf8"));
   watchlist = (wl.accounts ?? []).map((h: string) => h.replace(/^@/, "").trim()).filter(Boolean);
+  avoidlist = (wl.avoid ?? []).map((h: string) => h.replace(/^@/, "").trim()).filter(Boolean);
 } catch { /* no watchlist: keyword search still works */ }
 
 const QUERIES = [
@@ -101,6 +103,7 @@ for (const q of QUERIES) {
 
 const authorCooldownMs = AUTHOR_COOLDOWN_H * 3600_000;
 const candidates = [...seen.values()].filter((t) => {
+  if (avoidlist.some((a) => a.toLowerCase() === t.authorHandle.toLowerCase())) return false; // operator: never interact
   if (state.replied[t.id]) return false;                                   // never reply twice (or re-decide a skip)
   if ((state.failed[t.id]?.n ?? 0) >= MAX_ATTEMPTS) return false;          // stop hammering a tweet that will not accept a reply
   const last = state.authors[t.authorHandle.toLowerCase()];
