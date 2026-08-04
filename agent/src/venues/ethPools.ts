@@ -80,19 +80,12 @@ export const ETH_POOLS: Record<string, EthPool> = {
     offsetAbove: 1,
     widthSpacings: 4,
   },
-  // Pinned 2026-08-04 from the analyst's vetted sweep, net-yardstick leaders:
-  // UniFrog's markout is POSITIVE (mean-reverting flow, LPs win both ways),
-  // BOURSE keeps 90% of gross. Note the imitator trap: a second "UNIFROG"
-  // symbol exists on 0x8750...; this is the measured one, pinned by address.
-  UNIFROG: {
-    symbol: "UNIFROG",
-    token: "0x12BC14C180c8A46a34177ec6126B7209ad9A9818",
-    fee: 10000,
-    tickSpacing: 200,
-    expectedId: "0x0efe8767dc4668ff115120fb4f601f086374aaa2f6686419ee29eb13929987de",
-    offsetAbove: 1,
-    widthSpacings: 4,
-  },
+  // Pinned 2026-08-04 from the analyst's vetted sweep. UNIFROG was pinned in
+  // the same batch and UNPINNED 2026-08-05 after three stop-loss cycles in one
+  // day: its one great 24h snapshot was a pump top, and pinned venues bypass
+  // the entry gates that would have refused it afterward. If it re-earns its
+  // way through the analyst's two-sweep gate as a candidate, so be it; it gets
+  // no standing invitation. BOURSE keeps 90% of gross after toxicity.
   BOURSE: {
     symbol: "BOURSE",
     token: "0x60Edd303679c3923b628c8F02cE0bE69e96deb1d",
