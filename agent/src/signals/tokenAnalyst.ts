@@ -180,3 +180,53 @@ export async function analyzeEthPools(minSwaps = 50): Promise<{ ethUsd: number; 
   rows.sort((a, b) => b.lpNetUsd24h - a.lpNetUsd24h);
   return { ethUsd, scanned: ids.length, rows };
 }
+
+export interface TokenView {
+  token: Address;
+  symbol: string;
+  totalVolumeUsd24h: number;
+  totalFeesUsd24h: number;
+  totalLpNetUsd24h: number;
+  /** Every indexed pool for this token, best net first: the flow map the
+   *  operator asked for, because volume migrates between a token's venues and
+   *  yesterday's best tier is routinely today's dead one. */
+  pools: AnalystRow[];
+}
+
+/**
+ * The same analysis, grouped by TOKEN: one row per asset, all its pools under
+ * it with the flow split visible. Scope note, stated rather than hidden: this
+ * covers v4 ETH-quoted hookless pools (what the index holds). A token's v3
+ * venues and USDG-quoted v4 pools are outside this index; the per-token view
+ * shows where flow sits WITHIN the family we can mint into.
+ */
+export async function analyzeByToken(minSwaps = 50): Promise<{ ethUsd: number; tokens: TokenView[] }> {
+  const { ethUsd, rows } = await analyzeEthPools(minSwaps);
+  const byToken = new Map<string, AnalystRow[]>();
+  for (const r of rows) {
+    const k = r.token.toLowerCase();
+    (byToken.get(k) ?? byToken.set(k, []).get(k)!).push(r);
+  }
+  // Resolve symbols in one multicall; a token that reverts stays addressed.
+  const addrs = [...byToken.keys()] as Address[];
+  const client = getPublicClient();
+  const symAbi = [parseAbiItem("function symbol() view returns (string)")];
+  const syms = await client.multicall({
+    contracts: addrs.map((a) => ({ address: a, abi: symAbi, functionName: "symbol" }) as const),
+    allowFailure: true,
+    multicallAddress: "0xca11bde05977b3631167028862be2a173976ca11",
+  });
+  const tokens: TokenView[] = addrs.map((a, i) => {
+    const pools = byToken.get(a.toLowerCase())!.sort((x, y) => y.lpNetUsd24h - x.lpNetUsd24h);
+    return {
+      token: a,
+      symbol: syms[i].status === "success" ? String(syms[i].result).slice(0, 20) : a.slice(0, 10),
+      totalVolumeUsd24h: pools.reduce((s, p) => s + p.volumeUsd24h, 0),
+      totalFeesUsd24h: Math.round(pools.reduce((s, p) => s + p.feesUsd24h, 0) * 100) / 100,
+      totalLpNetUsd24h: Math.round(pools.reduce((s, p) => s + p.lpNetUsd24h, 0) * 100) / 100,
+      pools,
+    };
+  });
+  tokens.sort((a, b) => b.totalLpNetUsd24h - a.totalLpNetUsd24h);
+  return { ethUsd, tokens };
+}
