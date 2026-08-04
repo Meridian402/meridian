@@ -124,6 +124,17 @@ export class ResearchStrategy implements Strategy {
         );
       } else {
         for (const p of positions) {
+          // Positions in venues the pricer does not know (the ETH-quoted meme
+          // family) come back with an address-shaped symbol and raw liquidity
+          // units where a dollar value should be. Narrating that printed
+          // "0x0000.../USDG with $2.3e15 working" on the public desk. Name
+          // them honestly and skip the number we cannot price.
+          if (!/^[A-Z0-9]{1,12}$/.test(p.symbol)) {
+            thoughts.push(
+              `Book: making markets in a 24/7 ETH-quoted venue (position #${p.tokenId}), ${p.inRange ? "in range and earning the fee" : "out of range, watching whether to re-ladder"}. Fees accrue on-chain; full pricing lands when the desk's pricer covers this venue.`,
+            );
+            continue;
+          }
           thoughts.push(
             `Book: making markets in ${p.symbol}/USDG, a +/-${p.rangePct.toFixed(1)}% band with ~$${p.valueUsd.toFixed(0)} working, ${p.inRange ? "in range and earning the fee" : "out of range, watching whether to re-center"}.`,
           );
