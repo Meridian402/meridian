@@ -26,7 +26,7 @@ const BOOTED_AT = Date.now();
 let basisCache: { at: number; lines: string[] } | null = null;
 
 const QUICKSTART_URL = "https://meridian402.xyz/quickstart";
-const DEPLOY_URL = "https://meridian402.xyz/#launchpad";
+const DEPLOY_URL = "https://meridian402.xyz/#chat";
 const MCP_ENDPOINT = "https://meridian402-api-production.up.railway.app/mcp";
 
 const HELP = [
@@ -55,7 +55,7 @@ const HELP = [
 
 const WELCOME = [
   "welcome, this is Merd, Meridian's own trading agent, live and auditable.",
-  "it makes markets in tokenized stocks on Robinhood Chain from a public wallet.",
+  "it makes markets around the clock on Robinhood Chain from a public wallet, in 24/7 ETH-quoted pools first and tokenized stocks when they measure up.",
   "",
   "  · see it work:     try  status  ·  pnl  ·  trades",
   "  · use its tools:   try  integrate  ·  pricing",
