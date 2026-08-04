@@ -187,10 +187,25 @@ export async function memeBandsLive(): Promise<MemeBand[]> {
   const wallet = getAgentAddress();
   if (!wallet) return [];
   const [positions, ethUsd] = await Promise.all([discoverOwnedPositions(wallet), fetchEthUsd()]);
+  const client = getPublicClient();
+  // An RPC can soft-fail a log scan: answer [] without erroring, which reads
+  // as "genuinely flat" and once painted the site -$796 while $876 worked
+  // on-chain. The chain itself is the invariant: if discovery says the wallet
+  // owns NOTHING but balanceOf says it holds position NFTs, the scan was
+  // partial garbage and must THROW into the null path, never render as flat.
+  // (A real fully-flat book still discovers its old zero-liquidity shells, so
+  // this guard cannot false-positive on honest flatness.)
+  if (positions.length === 0) {
+    const owned = await client.readContract({
+      address: POSITION_MANAGER,
+      abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
+      functionName: "balanceOf",
+      args: [wallet],
+    });
+    if (owned > 0n) throw new Error(`position discovery returned none but the wallet holds ${owned} position NFTs: partial log response`);
+  }
   const native = positions.filter((p) => p.currency0.toLowerCase() === NATIVE && p.liquidity > 0n);
   if (native.length === 0) return [];
-
-  const client = getPublicClient();
   const slot0Abi = [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")];
   const STATE_VIEW: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
   const out: MemeBand[] = [];
