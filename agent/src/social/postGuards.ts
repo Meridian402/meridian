@@ -60,6 +60,11 @@ export function cleanReply(raw: string): string {
   });
   const s = stripDashes(masked)
     .trim()
+    // The copywriter's own format marker ("**REPLY**" on its own line, from
+    // the REPLY-or-SKIP protocol) is metadata, never copy. It leaked into two
+    // live quote posts on 2026-08-05 because only the never-delivered reply
+    // path was assumed downstream of it.
+    .replace(/^\*{0,2}(REPLY|QUOTE)\*{0,2}\s*:?\s*/i, "")
     .replace(/^\d+[.)]\s*/, "")
     .replace(/^["']|["']$/g, "")
     .trim();
