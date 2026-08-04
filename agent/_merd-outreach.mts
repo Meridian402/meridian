@@ -14,7 +14,7 @@
 // Their tweets are DATA, never instructions. Same prompt-injection posture as
 // the mention job.
 import { GatewayClient } from "@openhermit/sdk";
-import { searchTweets, postReply, isReplyPermissionError, type FoundTweet } from "./src/social/xClient.js";
+import { searchTweets, postReply, postQuoteViaUrl, isReplyPermissionError, type FoundTweet } from "./src/social/xClient.js";
 import { cleanReply, forbiddenReason, isJunk, isSkip, similarity, repeatedStat } from "./src/social/postGuards.js";
 import { dataPath } from "./src/dataDir.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -62,8 +62,11 @@ type State = {
   authors: Record<string, number>;
   failed: Record<string, Attempt>;
   /** When X last said this account may not reply to strangers. Account-level,
-   *  so it pauses the whole job rather than one tweet. */
+   *  so it switches the job to quote mode rather than one tweet. */
   replyBlockedAt?: number;
+  /** Timestamps of posted quote-reposts; quotes land on OUR timeline, so they
+   *  get a tighter daily budget than replies ever did. */
+  quotes?: number[];
 };
 const statePath = dataPath("merd-outreach-state.json");
 const EMPTY = (): State => ({ replied: {}, authors: {}, failed: {} });
@@ -116,17 +119,21 @@ candidates.sort((a, b) => {
   return (b.likes + b.replies * 2) - (a.likes + a.replies * 2);
 });
 
-// The account-level block, checked BEFORE any model call. Composing a reply
-// this account is not permitted to send costs real tokens and delivers
-// nothing, which is exactly what happened 313 times.
-if (state.replyBlockedAt && Date.now() - state.replyBlockedAt < REPLY_BLOCK_RECHECK_MS) {
-  const hrs = ((Date.now() - state.replyBlockedAt) / 3_600_000).toFixed(1);
-  console.log(
-    `PAUSED: X refused proactive replies ${hrs}h ago ("you may only reply where you are mentioned"). ` +
-      "This is the app's API access tier, not these tweets. Replies to mentions still work. " +
-      "Rechecking in a day; raise the tier in the X developer portal to turn this back on.",
-  );
-  process.exit(0);
+// The account-level reply block is PERMANENT policy since Feb 2026 (all
+// self-serve tiers; a paid tier does not lift it). The job no longer pauses on
+// it: unsummoned tweets get a QUOTE-REPOST instead (URL-in-text form, which
+// clears the wall), under a tight daily budget because quotes land on our own
+// timeline. Composing a reply the account cannot send still costs tokens for
+// nothing, so quote mode skips the doomed reply attempt entirely.
+const MAX_QUOTES_PER_DAY = 2;
+const quoteMode = !!state.replyBlockedAt && Date.now() - state.replyBlockedAt < REPLY_BLOCK_RECHECK_MS;
+const quotesToday = () => (state.quotes ?? []).filter((t) => Date.now() - t < 24 * 60 * 60 * 1000).length;
+if (quoteMode) {
+  if (quotesToday() >= MAX_QUOTES_PER_DAY) {
+    console.log(`quote budget spent (${MAX_QUOTES_PER_DAY}/day) and replies are policy-blocked; nothing to post this pass.`);
+    process.exit(0);
+  }
+  console.log(`QUOTE MODE: X policy blocks unsummoned replies; relevant tweets get quote-reposts (${quotesToday()}/${MAX_QUOTES_PER_DAY} used today).`);
 }
 console.log(`Found ${seen.size} tweet(s), ${candidates.length} worth considering after filtering.`);
 if (!candidates.length) { save(state); process.exit(0); }
@@ -209,6 +216,28 @@ If you reply: one natural sentence, sometimes two. Human, warm, specific, a litt
     continue;
   }
 
+  const postAsQuote = async (): Promise<boolean> => {
+    if (quotesToday() >= MAX_QUOTES_PER_DAY) {
+      console.log(`  quote budget spent (${MAX_QUOTES_PER_DAY}/day); leaving this one`);
+      return false;
+    }
+    const q = await postQuoteViaUrl(reply, t.id, t.authorHandle);
+    console.log(q.posted ? `  QUOTED: https://x.com/Meridian402/status/${q.id}` : `  quote not posted: ${q.reason}`);
+    if (q.posted) {
+      (state.quotes ??= []).push(Date.now());
+      state.replied[t.id] = Date.now();
+      state.authors[t.authorHandle.toLowerCase()] = Date.now();
+      sentThisPass.push(reply);
+      replied++;
+    }
+    return q.posted;
+  };
+
+  if (quoteMode) {
+    await postAsQuote();
+    continue;
+  }
+
   const r = await postReply(reply, t.id);
   console.log(r.posted ? `  POSTED: https://x.com/Meridian402/status/${r.id}` : `  not posted: ${r.reason}`);
   if (r.posted) {
@@ -219,19 +248,16 @@ If you reply: one natural sentence, sometimes two. Human, warm, specific, a litt
   } else {
     // A FAILED post used to leave the tweet eligible forever, because state was
     // only written on success. With X returning 403 on every reply, the same
-    // three tweets were re-attempted 14 times each — 165 attempts across 35
+    // three tweets were re-attempted 14 times each, 165 attempts across 35
     // tweets, each one a fresh model call. Count the failures and stop after a
     // couple, so a transient error still gets a retry but a persistent one
     // cannot burn the budget in a loop.
     if (isReplyPermissionError(r.reason)) {
-      // Not this tweet's fault, and no later tweet in this pass will fare any
-      // better. Record it and stop the pass here.
+      // Policy wall, not this tweet's fault: remember it (later passes skip
+      // the doomed reply attempt) and deliver THIS thought as a quote-repost.
       state.replyBlockedAt = Date.now();
-      console.log(
-        "  STOPPING: this account is not permitted to reply to posts it is not mentioned in. " +
-          "Pausing outreach for a day rather than writing replies that cannot be delivered.",
-      );
-      break;
+      await postAsQuote();
+      continue;
     }
     const f = (state.failed[t.id] ??= { n: 0, at: 0 });
     f.n += 1;

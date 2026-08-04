@@ -337,6 +337,18 @@ export function isReplyPermissionError(reason: string | undefined): boolean {
   return /only reply to or quote posts where you are mentioned/i.test(reason ?? "");
 }
 
+/**
+ * Quote-repost WITHOUT the summon gate: since Feb 2026 X blocks API replies
+ * and formal quotes to accounts that have not mentioned us, on every
+ * self-serve tier. A plain post CONTAINING the tweet's URL travels through the
+ * ordinary posting endpoint and renders as a quote card in every client.
+ * Verified live 2026-08-05 (formal quote 403'd, this posted). Rides
+ * postTweet, so X_LIVE gating and the no-dash rule apply unchanged.
+ */
+export async function postQuoteViaUrl(text: string, tweetId: string, authorHandle: string): Promise<PostResult> {
+  return postTweet(`${text} https://x.com/${authorHandle.replace(/^@/, "")}/status/${tweetId}`);
+}
+
 export async function postReply(text: string, inReplyToId: string, mediaPath?: string): Promise<PostResult> {
   // Last line of defence on the house no-dash rule. cleanReply strips these,
   // but a caller that hands us text directly (an operator-authored post, a
