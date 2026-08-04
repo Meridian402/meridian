@@ -75,6 +75,32 @@ const marketSummary = [
   venues != null ? `${venues} rwa venues mapped` : "",
 ].filter(Boolean).join("\n");
 
+// The desk's own decision journal, from the API: every rotation, collect,
+// bank, entry, migration and stop-loss the live book executed, with reasons.
+// This is what "talking about all of it in real time" means: he narrates
+// DECISIONS his desk actually made, never invented ones.
+function deskLogLines(raw: any): string[] {
+  const entries: any[] = raw?.entries ?? [];
+  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  return entries
+    .filter((e) => (e?.ts ?? 0) > dayAgo)
+    .slice(-10)
+    .map((e) => {
+      const t = new Date(e.ts).toISOString().slice(11, 16);
+      if (e.kind === "stop-loss") return `${t} cut ${e.pool} at market (${e.reason}): sold ${Number(e.tokensSold).toFixed(0)} tokens for ${Number(e.ethRealized).toFixed(4)} eth, flat`;
+      if (e.kind === "collect") return `${t} collected fees from ${e.pool}${Number(e.ethBankedToTreasury) > 0 ? `, banked ${Number(e.ethBankedToTreasury).toFixed(4)} eth to the treasury` : ""}`;
+      if (e.kind === "expand") return `${t} entered ${e.venue} with ${Number(e.ethIn).toFixed(3)} eth (probation-sized probe)`;
+      if (e.kind === "migrate") return `${t} moved capital ${e.from} -> ${e.to} (${e.reason})`;
+      if (e.kind === "wallet-sweep") return `${t} swept loose ${e.pool} tokens back to eth`;
+      const drift = e.driftPctPerHr != null ? `, drift ${e.driftPctPerHr}%/hr` : "";
+      return `${t} re-quoted ${e.pool} to the market (spot ${e.spot}${drift})`;
+    });
+}
+let deskLog: string[] = [];
+try {
+  deskLog = deskLogLines(await j("/api/desk-journal"));
+} catch { /* narration degrades, never blocks */ }
+
 const shipped = recentlyShipped(4);
 // The forward feed: what Merd may say is coming, so the day's plan carries the
 // project's trajectory. Same discipline as the shipped list; operator-maintained.
@@ -137,18 +163,19 @@ async function generatePlan(day: string): Promise<PlanItem[]> {
 Today's live state:
 ${marketSummary || "(market feed quiet)"}
 
-${shipped.length ? "Recently true for users (build-in-public material):\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (the roadmap you may point at, no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${recentTexts.length ? "Already said recently. Do not repeat the CLAIM, not just the wording: rephrasing one of these into new sentences still reads as a repeat and lands worse than saying nothing.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
+${deskLog.length ? "Your desk's OWN decisions in the last 24h (real, journaled, on-chain; the times are UTC):\n" + deskLog.map((s) => "- " + s).join("\n") + "\n" : ""}${shipped.length ? "Recently true for users (build-in-public material):\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (the roadmap you may point at, no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${recentTexts.length ? "Already said recently. Do not repeat the CLAIM, not just the wording: rephrasing one of these into new sentences still reads as a repeat and lands worse than saying nothing.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
 Produce 3 to 5 to-dos for today. This is a project manager's feed, so it is MOSTLY the project: what shipped, what is in progress, what is next, the state of things. Each to-do is ONE specific post. Choose from:
 - PROGRESS: where the project stands right now, an honest status update, no counts or metrics
 - NEXT: what is coming, from the roadmap above, plainly, no date and no hard promise
 - SHIPPED: one true user-facing thing from the build-in-public list
 - PRODUCT: a pillar people can use (your own agent / the cli, the earn paths, self-custody, agents paying each other over x402)
+- DESK: narrate ONE decision your desk made from the journal above, first person, why it did what it did, including the ones that cost money. A cut position told straight builds more trust than a win. Never invent a decision that is not in the journal.
 - MARKET: a sharp read on a real number from today's state, your operator edge, used sparingly
 - TOKEN: an honest note about MERD as a live ecosystem token (no price, no buy case)
 
 - ASIDE: a short human post. Something you noticed, a reaction, a half-thought you have not resolved, one line about the hour you are working. NOT an announcement and NOT about the product. This is the one that stops the feed reading like a changelog.
 
-Weight the day toward PROGRESS, NEXT, SHIPPED and PRODUCT: that is the substance. But include at least one ASIDE every day, and at most ONE MARKET and ONE TOKEN. Include at least one PROGRESS or NEXT.
+Weight the day toward PROGRESS, NEXT, SHIPPED, PRODUCT and DESK: that is the substance. When the desk acted in the last day, include at least one DESK, and at most TWO: the feed narrates the desk, it does not tick every trade. But include at least one ASIDE every day, and at most ONE MARKET and ONE TOKEN. Include at least one PROGRESS or NEXT.
 
 Measured over 27 posts to 2026-08-03, and the clearest signal in the account's history: posts that narrate the market (a name, a percentage, a board turning over) landed between 0.0 and 1.3 percent, while posts where you state a position you hold or an act you took landed between 3 and 13 percent. The five best were all first person, carried no market data at all, and each named one concrete thing: what you sent and where it can be verified, what you control, where you are pointing this, what you are, what is coming next. So a MARKET to-do has to earn its place against that, and the brief for any to-do is stronger when it fixes on ONE act or ONE position rather than a survey of several.
 
@@ -166,7 +193,7 @@ Ground every brief in something real above.`;
     console.error(`[daily] planner failed: ${(resp as { error?: string }).error ?? "no text"}`);
     return [];
   }
-  const types = new Set(["PRODUCT", "MARKET", "SHIPPED", "NEXT", "PROGRESS", "CULTURE", "TOKEN", "ASIDE"]);
+  const types = new Set(["PRODUCT", "MARKET", "SHIPPED", "NEXT", "PROGRESS", "CULTURE", "TOKEN", "ASIDE", "DESK"]);
   const items: PlanItem[] = [];
   for (const line of (resp.text ?? "").split("\n")) {
     const m = line.match(/^\s*[-*]?\s*([A-Z]+)\s*\|\s*(SHORT|MEDIUM|LONG)\s*\|\s*(.+?)\s*$/i)
@@ -224,7 +251,7 @@ LENGTH FOR THIS POST: ${todo.length ?? "MEDIUM"}. SHORT means under fifteen word
 Today's live state (only cite a number that appears here; never invent one):
 ${marketSummary || "(quiet)"}
 
-${shipped.length ? "Things now true for users you may mention:\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (for a NEXT to-do; no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${performance}${journal ? "Your recent notes:\n" + journal + "\n" : ""}${recentTexts.length ? "You already said these. Say something new, and note that a repeat means the same CLAIM, not the same wording: putting one of these in fresh sentences is still a repeat.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
+${deskLog.length ? "Your desk's own journaled decisions in the last 24h (for a DESK to-do; cite only these, never an invented one):\n" + deskLog.map((s) => "- " + s).join("\n") + "\n" : ""}${shipped.length ? "Things now true for users you may mention:\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (for a NEXT to-do; no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${performance}${journal ? "Your recent notes:\n" + journal + "\n" : ""}${recentTexts.length ? "You already said these. Say something new, and note that a repeat means the same CLAIM, not the same wording: putting one of these in fresh sentences is still a repeat.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
 Voice: you are a person who runs this thing, posting from your own account. Not a company account, not an analyst, not a changelog. Lowercase by default, first person, plain. Say "i" when it is you.
 
 LENGTH IS THE THING THAT GIVES YOU AWAY. Your posts have been landing between 276 and 296 characters over and over, which is a machine hitting a target, and no human writes like that. Decide the length from the thought, then commit to it:

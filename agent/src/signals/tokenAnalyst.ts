@@ -101,6 +101,10 @@ export interface AnalystRow {
   feesUsd24h: number;
   markoutUsd24h: number;
   lpNetUsd24h: number;
+  /** Price change over the trailing quarter of the window, percent. The
+   *  UNIFROG lesson: a great 24h snapshot taken at the top of a pump is a
+   *  trap; entries need to know what the token did RECENTLY. */
+  recentMovePct: number;
   verdict: "fees beat toxicity" | "toxic: fees lose";
 }
 
@@ -165,6 +169,8 @@ export async function analyzeEthPools(minSwaps = 50): Promise<{ ethUsd: number; 
       if (!Number.isFinite(ret) || Math.abs(ret) > 0.5) continue;
       markout += sw.dir * ret * sw.usd;
     }
+    const qStart = s[Math.floor(s.length * 0.75)];
+    const recentMovePct = qStart && qStart.px > 0 ? ((s[s.length - 1].px - qStart.px) / qStart.px) * 100 : 0;
     rows.push({
       poolId: id,
       token: p.token,
@@ -174,11 +180,126 @@ export async function analyzeEthPools(minSwaps = 50): Promise<{ ethUsd: number; 
       feesUsd24h: Math.round(fees * 100) / 100,
       markoutUsd24h: Math.round(markout * 100) / 100,
       lpNetUsd24h: Math.round((fees - markout) * 100) / 100,
+      recentMovePct: Math.round(recentMovePct * 100) / 100,
       verdict: fees - markout > 0 ? "fees beat toxicity" : "toxic: fees lose",
     });
   }
   rows.sort((a, b) => b.lpNetUsd24h - a.lpNetUsd24h);
   return { ethUsd, scanned: ids.length, rows };
+}
+
+// --- Vetting: the analyst's leaderboard is a ranking, this is a GATE ---------
+// A pool the desk may auto-enter must clear every filter. The census taught
+// each one: predator pools carry 5%+ fee tiers that no organic taker pays
+// (their "fees" are wash flow); sub-500-swap pools die between scans; toxic
+// pools pay fees and lose more to informed flow; thin volume means our size IS
+// the market and the measured numbers stop applying the moment we arrive.
+export function vetRow(r: AnalystRow): { ok: boolean; reason: string } {
+  if (r.verdict !== "fees beat toxicity") return { ok: false, reason: "toxic: fees lose to informed flow" };
+  if (r.feeTierPct < 0.25) return { ok: false, reason: "fee tier too thin to pay for toxicity" };
+  if (r.feeTierPct > 3) return { ok: false, reason: "predator-tier fee: flow is not organic" };
+  if (r.swaps24h < 500) return { ok: false, reason: "too few swaps: dies between scans" };
+  if (r.volumeUsd24h < 100_000) return { ok: false, reason: "volume too thin for our size" };
+  if (r.feesUsd24h < 500) return { ok: false, reason: "fee flow below the floor" };
+  // The UNIFROG lesson, encoded: entering right after a pump buys the retrace,
+  // entering into a dump catches the knife. Flat arrivals only.
+  if (r.recentMovePct < -5) return { ok: false, reason: "dumping on arrival: entering catches the knife" };
+  if (r.recentMovePct > 15) return { ok: false, reason: "freshly pumped: entering buys the retrace" };
+  return { ok: true, reason: "cleared" };
+}
+
+const initEventForAge = parseAbiItem(
+  "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)",
+);
+
+/** Pool age in hours, from its Initialize event. A pool younger than three
+ *  days has not proven its flow persists; day-one wonders are where great
+ *  snapshots lie. */
+export async function poolAgeHours(id: string): Promise<number | null> {
+  try {
+    const client = getPublicClient();
+    const logs = await client.getLogs({
+      address: POOL_MANAGER,
+      event: initEventForAge,
+      args: { id: id as Hex },
+      fromBlock: 0n,
+      toBlock: "latest",
+    });
+    if (!logs.length) return null;
+    const blk = await client.getBlock({ blockNumber: logs[0].blockNumber });
+    return (Date.now() / 1000 - Number(blk.timestamp)) / 3600;
+  } catch {
+    return null;
+  }
+}
+
+/** Fees per unit of at-spot liquidity VALUE, comparable across pools: for a
+ *  band of relative width r around spot, valueUsd scales with L * r / sqrtP,
+ *  so fees-per-dollar scales with feesUsd * sqrtP / L (r cancels). */
+export const poolYardstick = (feesUsd24h: number, sqrtPfrac: number, activeL: number): number =>
+  activeL > 0 ? (feesUsd24h * sqrtPfrac) / activeL : 0;
+
+export interface CandidateVenue {
+  poolId: string;
+  token: Address;
+  symbol: string;
+  fee: number;
+  tickSpacing: number;
+  feeTierPct: number;
+  feesUsd24h: number;
+  lpNetUsd24h: number;
+  yardstick: number;
+}
+
+/**
+ * The venues the desk is ALLOWED to migrate into: full 24h analysis, vetting
+ * gate, then fees-per-liquidity yardstick from live pool state. Heavy (a full
+ * swap sweep); callers cache the result and refresh on a slow clock.
+ */
+export async function candidateVenues(excludePoolIds: Set<string>): Promise<CandidateVenue[]> {
+  await updatePoolIndex();
+  const { rows } = await analyzeEthPools(500);
+  const idx = loadIndex();
+  const cleared = rows.filter((r) => !excludePoolIds.has(r.poolId.toLowerCase()) && vetRow(r).ok).slice(0, 8);
+  if (cleared.length === 0) return [];
+
+  const client = getPublicClient();
+  const slot0Abi = [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")];
+  const liqAbi = [parseAbiItem("function getLiquidity(bytes32) view returns (uint128)")];
+  const STATE_VIEW: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
+  const symAbi = [parseAbiItem("function symbol() view returns (string)")];
+  const syms = await client.multicall({
+    contracts: cleared.map((r) => ({ address: r.token, abi: symAbi, functionName: "symbol" }) as const),
+    allowFailure: true,
+    multicallAddress: "0xca11bde05977b3631167028862be2a173976ca11",
+  });
+
+  const out: CandidateVenue[] = [];
+  for (let i = 0; i < cleared.length; i++) {
+    const r = cleared[i];
+    try {
+      const age = await poolAgeHours(r.poolId);
+      if (age == null || age < 72) continue; // unproven pools never clear
+      const [sqrtP] = await client.readContract({ address: STATE_VIEW, abi: slot0Abi, functionName: "getSlot0", args: [r.poolId as Hex] });
+      const activeL = await client.readContract({ address: STATE_VIEW, abi: liqAbi, functionName: "getLiquidity", args: [r.poolId as Hex] });
+      const p = idx.pools[r.poolId.toLowerCase()];
+      if (!p || Number(sqrtP) === 0) continue;
+      out.push({
+        poolId: r.poolId,
+        token: r.token,
+        symbol: syms[i].status === "success" ? String(syms[i].result).slice(0, 20) : r.token.slice(0, 10),
+        fee: p.fee,
+        tickSpacing: p.tickSpacing,
+        feeTierPct: r.feeTierPct,
+        feesUsd24h: r.feesUsd24h,
+        lpNetUsd24h: r.lpNetUsd24h,
+        // Ranked on NET flow: markout is shared pro-rata exactly like fees, so
+        // gross-fee ranking flatters pools whose flow is informed.
+        yardstick: poolYardstick(r.lpNetUsd24h, Number(sqrtP) / Q96, Number(activeL)),
+      });
+    } catch { /* a pool that cannot be read cannot be entered */ }
+  }
+  return out.sort((a, b) => b.yardstick - a.yardstick);
 }
 
 export interface TokenView {

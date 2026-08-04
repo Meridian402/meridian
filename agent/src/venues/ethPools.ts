@@ -47,6 +47,14 @@ export interface EthPool {
   tickSpacing: number;
   /** The census-measured pool id; poolId() must reproduce it exactly. */
   expectedId: Hex;
+  /** Spacings between spot and a fresh ETH band's lower bound. Coarse-spacing
+   *  pools use 1 (STONK's 2%-per-spacing at the default 2 idled 11% off spot);
+   *  fine-spacing pools keep 2 for drift headroom. */
+  offsetAbove: number;
+  /** Band width in spacings. Width is fee density's denominator: the same
+   *  capital across 16% of price earns half of what it earns across 8%, so
+   *  coarse-spacing pools take fewer spacings. Absent means 8. */
+  widthSpacings?: number;
 }
 
 /**
@@ -61,6 +69,7 @@ export const ETH_POOLS: Record<string, EthPool> = {
     fee: 2900,
     tickSpacing: 29,
     expectedId: "0x1252fbfc4f6530a025ca351494245797b2a147b7b5d2dc8af7893e4e1a2e9df3",
+    offsetAbove: 2,
   },
   STONKBROKER: {
     symbol: "STONKBROKER",
@@ -68,6 +77,30 @@ export const ETH_POOLS: Record<string, EthPool> = {
     fee: 10000,
     tickSpacing: 200,
     expectedId: "0xd33c8fd38b06e989cdbd4dffdefab71c4bdd415b24964c8d69e38ff35b068f92",
+    offsetAbove: 1,
+    widthSpacings: 4,
+  },
+  // Pinned 2026-08-04 from the analyst's vetted sweep, net-yardstick leaders:
+  // UniFrog's markout is POSITIVE (mean-reverting flow, LPs win both ways),
+  // BOURSE keeps 90% of gross. Note the imitator trap: a second "UNIFROG"
+  // symbol exists on 0x8750...; this is the measured one, pinned by address.
+  UNIFROG: {
+    symbol: "UNIFROG",
+    token: "0x12BC14C180c8A46a34177ec6126B7209ad9A9818",
+    fee: 10000,
+    tickSpacing: 200,
+    expectedId: "0x0efe8767dc4668ff115120fb4f601f086374aaa2f6686419ee29eb13929987de",
+    offsetAbove: 1,
+    widthSpacings: 4,
+  },
+  BOURSE: {
+    symbol: "BOURSE",
+    token: "0x60Edd303679c3923b628c8F02cE0bE69e96deb1d",
+    fee: 20000,
+    tickSpacing: 200,
+    expectedId: "0x7eba77f0403bd49df11633280d276e008f561b797a9acede173ae6e90f0086aa",
+    offsetAbove: 1,
+    widthSpacings: 4,
   },
 };
 
@@ -107,12 +140,14 @@ const sqrtAtTick = (tick: number) => Math.sqrt(1.0001 ** tick) * Q96;
  * (payable settle + sweep); the production two-sided mint reuses exactly this
  * action string with a real token balance.
  */
-export function buildNativeOnlyMint(p: EthPool, currentTick: number, ethWei: bigint, recipient: Address) {
+export function buildNativeOnlyMint(p: EthPool, currentTick: number, ethWei: bigint, recipient: Address, spacingsAbove = 2) {
   const ts = p.tickSpacing;
-  // Entirely above spot: lower bound two spacings up so a small drift cannot
-  // drag the range into two-sided territory mid-flight.
-  const tickLower = (Math.floor(currentTick / ts) + 2) * ts;
-  const tickUpper = tickLower + 8 * ts;
+  // Entirely above spot: default two spacings up so a small drift cannot drag
+  // the range into two-sided territory mid-flight. Coarse-spacing pools
+  // (STONKBROKER ts=200 means 2% per spacing) pass 1: at +2 the band starts 4%
+  // above spot and measured flow rarely reaches it.
+  const tickLower = (Math.floor(currentTick / ts) + Math.max(1, spacingsAbove)) * ts;
+  const tickUpper = tickLower + (p.widthSpacings ?? 8) * ts;
   const sA = sqrtAtTick(tickLower) / Q96;
   const sB = sqrtAtTick(tickUpper) / Q96;
   // All-currency0 range: L = amt0 * (sA*sB)/(sB-sA), with a 1% haircut so the
@@ -159,6 +194,49 @@ export async function simulateNativeMint(symbol: string, ethAmount: number): Pro
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message.slice(0, 300) : String(err) };
   }
+}
+
+/** Canonical Permit2, verified deployed on Robinhood Chain. The token side of
+ *  a mint settles by Permit2 pull, so both approvals (token to Permit2, then
+ *  Permit2 to the PositionManager) must exist before a token mint simulates. */
+export const PERMIT2: Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
+/**
+ * Build a SINGLE-SIDED token mint: a range entirely below the current tick, so
+ * the position holds only currency1 (the token) and zero ETH. This is the
+ * sell side of the book: as the token's price climbs (tick falls) through the
+ * range, inventory converts to ETH while EARNING the pool fee, instead of
+ * paying that same fee to exit by swapping. If price never climbs, we simply
+ * still hold the tokens, inside the position instead of the wallet.
+ */
+export function buildTokenOnlyMint(p: EthPool, currentTick: number, tokenWei: bigint, recipient: Address, spacingsBelow = 1) {
+  const ts = p.tickSpacing;
+  // Entirely below spot, with at least one spacing of headroom so a small
+  // drift cannot drag the range two-sided mid-flight.
+  const tickUpper = (Math.floor(currentTick / ts) - Math.max(1, spacingsBelow)) * ts;
+  const tickLower = tickUpper - (p.widthSpacings ?? 8) * ts;
+  const sA = sqrtAtTick(tickLower) / Q96;
+  const sB = sqrtAtTick(tickUpper) / Q96;
+  // All-currency1 range: amt1 = L * (sB - sA), with a small haircut so the
+  // execution-time pull can never exceed the approval.
+  const liquidity = BigInt(Math.floor((Number(tokenWei) / (sB - sA)) * 0.999));
+  if (liquidity <= 0n) throw new Error("tokenWei too small for any liquidity in this range");
+
+  const mintParams = encodeAbiParameters(
+    parseAbiParameters("(address,address,uint24,int24,address), int24, int24, uint256, uint128, uint128, address, bytes"),
+    [[NATIVE, p.token, p.fee, p.tickSpacing, NATIVE], tickLower, tickUpper, liquidity, 0n, tokenWei, recipient, "0x"],
+  );
+  const settleParams = encodeAbiParameters(parseAbiParameters("address, address"), [NATIVE, p.token]);
+  // No SWEEP: the ERC20 settle pulls exactly what is owed, nothing strands.
+  const actions = encodePacked(["bytes1", "bytes1"], [MINT_POSITION, SETTLE_PAIR]);
+  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, [mintParams, settleParams]]);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  const data = encodeFunctionData({
+    abi: [parseAbiItem("function modifyLiquidities(bytes unlockData, uint256 deadline) payable")],
+    functionName: "modifyLiquidities",
+    args: [unlockData, deadline],
+  });
+  return { to: POSITION_MANAGER, data, tickLower, tickUpper, liquidity };
 }
 
 // v4-periphery action ids for the unwind, mirrored from the equity path where

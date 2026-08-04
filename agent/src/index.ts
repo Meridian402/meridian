@@ -11,6 +11,7 @@ import { ponsDeployment } from "./launch/pons.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
+import { startMemeFastWatch } from "./memeGuard.js";
 import { lpPositionsWithValue } from "./venues/lpPositions.js";
 import { market, decisionLog, universe } from "./state.js";
 import { executeIndexTrade } from "./actions/executeIndexTrade.js";
@@ -570,6 +571,32 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // The proof instrument: isolated market-making P&L (fees - impermanent loss -
 // gas, vs holding). The honest, on-chain-reproducible answer to "is the agent
 // profitable." Open, read-only.
+// The desk's decision journal: every rotation, collect, bank, expansion,
+// migration and stop-loss, with the reason it happened. Read-only, public,
+// because the whole posture is that the decisions are checkable; Merd's
+// autopilot reads this to narrate the desk on the timeline.
+app.get("/api/desk-journal", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    const path = dataPath("meme-rotations.jsonl");
+    const lines = existsSync(path)
+      ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).slice(-100)
+      : [];
+    const entries = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+    res.json({ entries, count: entries.length });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "journal unavailable" });
+  }
+});
+
 app.get("/api/proof", async (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
@@ -2009,6 +2036,9 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
   console.log("[boot] LP engine ON: autonomous liquidity management is live");
   startLpGuard();
   startLpAllocator();
+  // Seconds-scale fill detection for the meme book: flips filled bands to the
+  // sell side in under a minute. Same house lock, own kill switch.
+  startMemeFastWatch();
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
 }

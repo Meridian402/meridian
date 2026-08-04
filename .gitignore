@@ -53,3 +53,4 @@ agent/merd-engage-state.json
 
 # Merd's outreach cursor — runtime state, per-machine
 agent/merd-outreach-state.json
+agent/eth-pool-index.json

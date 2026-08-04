@@ -1,5 +1,5 @@
 import { createPublicClient, createWalletClient, http, fallback, type Address } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { privateKeyToAccount, nonceManager } from "viem/accounts";
 import { config } from "../config.js";
 import { ENGINE_SIGNER_WALLET } from "../merd/wallets.js";
 
@@ -69,7 +69,11 @@ export function getAgentSigner() {
   const key = process.env.AGENT_SIGNER_PRIVATE_KEY;
   if (!key) return null;
   if (!cached) {
-    const account = privateKeyToAccount(normalizeSignerKey(key));
+    // nonceManager: viem tracks the nonce locally across sequential sends from
+    // this process. Without it, two back-to-back transactions (a fee sweep
+    // then its treasury skim) can both fetch the same pending nonce and the
+    // second reverts with "nonce lower than current" (seen live 2026-08-04).
+    const account = privateKeyToAccount(normalizeSignerKey(key), { nonceManager });
     cached = { account, address: account.address };
   }
   return cached;

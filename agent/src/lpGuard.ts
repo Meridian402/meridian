@@ -30,6 +30,7 @@ import { readStockBalances } from "./venues/positionAccounting.js";
 import { latestScan, scanOpportunities } from "./lpAllocator.js";
 import { parseAbiItem, type Address } from "viem";
 import { withHouseWalletLock } from "./houseWallet.js";
+import { memeRotorTick } from "./memeGuard.js";
 import { readFileSync as _rf, writeFileSync as _wf, existsSync as _ex } from "node:fs";
 import { dataPath } from "./dataDir.js";
 
@@ -414,6 +415,11 @@ export function startLpGuard(): NodeJS.Timeout {
     } catch (err) {
       console.error(`[lpGuard] weth unwrap failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
     }
+
+    // The 24/7 meme book, BEFORE the equity early-returns below: those bands
+    // trade around the clock and must not depend on the stock phase. Runs
+    // inside this tick's house-wallet lock; never throws.
+    await memeRotorTick();
 
     const positions = await openPositionsOnChain();
     // Flat during market hours → auto-recovery re-establishes the position

@@ -11,6 +11,7 @@ import { getPublicClient } from "./venues/signer.js";
 import { openPositionsOnChain } from "./venues/lpPositions.js";
 import { readAllExecutions } from "./executionsLog.js";
 import { INDEX_CONTRACTS } from "./venues/indexContracts.js";
+import { memeBandsLive, type MemeBand } from "./memeGuard.js";
 
 const SV: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
 const PM_NFT: Address = "0x58daec3116aae6d93017baaea7749052e8a04fa7";
@@ -51,6 +52,13 @@ export interface MarketMakingProof {
   lifetimeFeesCollectedUsd: number;
   profitable: boolean;
   unmeasured: UnmeasuredPosition[];
+  /** The 24/7 ETH-quoted book, marked to each pool's current tick on every
+   *  request. Valuation only (fees-vs-hold for these venues is still to come),
+   *  but live valuation from chain beats a hand-updated constant going stale.
+   *  NULL means the read failed this request; [] means genuinely flat. The
+   *  distinction is load-bearing: an RPC hiccup must never render as "the
+   *  desk holds nothing" to a visitor or a monitor. */
+  memeBands: MemeBand[] | null;
   note: string;
 }
 
@@ -87,8 +95,18 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
   const positions = await openPositionsOnChain();
   const out: PositionProof[] = [];
   const unmeasured: UnmeasuredPosition[] = [];
+  // The ETH-quoted book prices itself; a read failure degrades to NULL (not
+  // []) so consumers keep their last good picture instead of showing flat.
+  let memeBands: MemeBand[] | null = null;
+  try {
+    memeBands = await memeBandsLive();
+  } catch (err) {
+    console.error(`[proof] meme band read failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+  }
+  const memeIds = new Set((memeBands ?? []).map((b) => b.tokenId));
 
   for (const p of positions) {
+    if (memeIds.has(p.tokenId)) continue; // priced live in memeBands, not "unmeasured"
     const token = (INDEX_CONTRACTS.tokens as Record<string, string>)[p.symbol] as Address;
     if (!token) {
       unmeasured.push({ tokenId: p.tokenId, symbol: p.symbol, reason: "token not in the known universe — cannot price it" });
@@ -172,6 +190,7 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
     // position unmeasured, netVsHold is 0 and "profitable" must stay false.
     profitable: out.length > 0 && netVsHoldUsd > 0,
     unmeasured,
+    memeBands,
     note:
       "Net vs hold = fees earned (collected + uncollected) minus impermanent loss minus gas, vs simply holding the deposited assets. " +
       "The only honest measure of market-making skill; the wallet total mixes in asset price moves. Every figure is reproducible on-chain." +
