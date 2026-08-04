@@ -160,3 +160,46 @@ export async function simulateNativeMint(symbol: string, ethAmount: number): Pro
     return { ok: false, detail: err instanceof Error ? err.message.slice(0, 300) : String(err) };
   }
 }
+
+// v4-periphery action ids for the unwind, mirrored from the equity path where
+// both are proven live (withdrawPosition in lpPositions.ts).
+const DECREASE_LIQUIDITY = "0x01";
+const TAKE_PAIR = "0x11";
+
+/**
+ * Build the calldata for a full unwind of a native-quoted position: burn all
+ * liquidity, take BOTH sides (ETH + token, principal plus every accrued fee)
+ * to the recipient. Native take pays out chain ETH; no value, no sweep.
+ */
+export function buildNativeWithdraw(p: EthPool, tokenId: bigint, liquidity: bigint, recipient: Address) {
+  const decreaseParams = encodeAbiParameters(
+    parseAbiParameters("uint256, uint256, uint128, uint128, bytes"),
+    [tokenId, liquidity, 0n, 0n, "0x"],
+  );
+  const takeParams = encodeAbiParameters(parseAbiParameters("address, address, address"), [NATIVE, p.token, recipient]);
+  const actions = encodePacked(["bytes1", "bytes1"], [DECREASE_LIQUIDITY, TAKE_PAIR]);
+  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, [decreaseParams, takeParams]]);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  const data = encodeFunctionData({
+    abi: [parseAbiItem("function modifyLiquidities(bytes unlockData, uint256 deadline) payable")],
+    functionName: "modifyLiquidities",
+    args: [unlockData, deadline],
+  });
+  return { to: POSITION_MANAGER, data };
+}
+
+/** Prove the unwind against the real chain without spending: eth_call from the signer. */
+export async function simulateNativeWithdraw(symbol: string, tokenId: bigint, liquidity: bigint): Promise<{ ok: boolean; detail: string }> {
+  assertRegistryIds();
+  const p = ETH_POOLS[symbol];
+  if (!p) return { ok: false, detail: `no ETH pool registered for ${symbol}` };
+  const signer = getAgentSigner();
+  if (!signer) return { ok: false, detail: "no signer key in this environment" };
+  const tx = buildNativeWithdraw(p, tokenId, liquidity, signer.address);
+  try {
+    await getPublicClient().call({ account: signer.address, to: tx.to, data: tx.data });
+    return { ok: true, detail: "withdraw encoding valid" };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message.slice(0, 300) : String(err) };
+  }
+}
