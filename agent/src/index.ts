@@ -52,6 +52,7 @@ import { initLedger, ledgerStatus } from "./ledger.js";
 import { scheduleOpenDeploy, runOpenDeploy, openDeployPreview } from "./openDeploy.js";
 import { lpProfit } from "./lpProfit.js";
 import { startEquitySnapshotter } from "./performance.js";
+import { startBookSnapshotter, readBookHistory } from "./bookSnapshot.js";
 import { marketMakingProof } from "./marketMakingPnl.js";
 import { scanOpportunities, startLpAllocator } from "./lpAllocator.js";
 import { startBasisLogger } from "./research/basisLogger.js";
@@ -586,6 +587,17 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // state and custody. Public and read-only.
 // The learning harness scoreboard (SHADOW): how much data, is the model
 // beating the dumb baseline out-of-sample yet. Nothing here drives a trade.
+// The book series that drives the live chart: server-sampled every 2 minutes,
+// one shared continuous line for every visitor. Public, read-only.
+app.get("/api/book-history", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    res.json({ points: readBookHistory() });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "book history unavailable" });
+  }
+});
+
 app.get("/api/learn/status", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
@@ -2121,6 +2133,7 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
   console.log(`[boot] launchpad: PONS on chain ${pons.chainId} (${pons.factory})`);
 }
 startEquitySnapshotter();
+startBookSnapshotter();
 startSwarmLoop(); // agent-to-agent exchanges on a cadence; logs whether it is on or off
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();
