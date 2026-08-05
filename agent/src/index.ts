@@ -14,6 +14,7 @@ import { startLpGuard, openInPool } from "./lpGuard.js";
 import { startMemeFastWatch } from "./memeGuard.js";
 import { assetScorecard } from "./assetScorecard.js";
 import { listSkills } from "./skills/registry.js";
+import { runLearningPass } from "./learn/harness.js";
 import { assessTokenForMM, prepareMMBand } from "./skills/marketMaking.js";
 import { lpPositionsWithValue } from "./venues/lpPositions.js";
 import { market, decisionLog, universe } from "./state.js";
@@ -583,6 +584,17 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // stops, rotations from the journal). Public, like every number here.
 // The agent skills catalog: what a creator's agent can turn on, with honest
 // state and custody. Public and read-only.
+// The learning harness scoreboard (SHADOW): how much data, is the model
+// beating the dumb baseline out-of-sample yet. Nothing here drives a trade.
+app.get("/api/learn/status", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    res.json(runLearningPass());
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "learn status unavailable" });
+  }
+});
+
 app.get("/api/skills", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.json({ skills: listSkills() });
