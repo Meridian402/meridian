@@ -39,39 +39,42 @@ export function mmVerdict(pools: MMPoolView[]): MMAssessment["verdict"] {
   return "no-liquidity";
 }
 
+/** A token can appear in many indexed pools (fee tiers, dupes); reading them
+ *  all sequentially is how this endpoint once hung for 60s. Cap and
+ *  parallelize: a creator only cares about the handful of real ones. */
+const MAX_POOLS_ASSESSED = 12;
+const slot0Abi = [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")];
+const liqAbi = [parseAbiItem("function getLiquidity(bytes32) view returns (uint128)")];
+
 export async function assessTokenForMM(token: Address): Promise<MMAssessment> {
   const client = getPublicClient();
-  const [ethUsd, found] = await Promise.all([fetchEthUsd().catch(() => 0), Promise.resolve(poolsForToken(token))]);
+  const ethUsd = await fetchEthUsd().catch(() => 0);
+  const found = poolsForToken(token).slice(0, MAX_POOLS_ASSESSED);
 
-  const pools: MMPoolView[] = [];
-  for (const f of found) {
-    try {
-      const [sqrtP] = await client.readContract({
-        address: STATE_VIEW,
-        abi: [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")],
-        functionName: "getSlot0",
-        args: [f.poolId as Hex],
-      });
-      const activeL = await client.readContract({
-        address: STATE_VIEW,
-        abi: [parseAbiItem("function getLiquidity(bytes32) view returns (uint128)")],
-        functionName: "getLiquidity",
-        args: [f.poolId as Hex],
-      });
-      const priceEth = Number(sqrtP) > 0 ? 1 / (Number(sqrtP) / Q96) ** 2 : 0;
-      pools.push({
-        poolId: f.poolId,
-        feePct: f.fee / 10000,
-        tickSpacing: f.tickSpacing,
-        priceEth,
-        priceUsd: priceEth * ethUsd,
-        activeLiquidity: String(activeL),
-        quotable: Number(sqrtP) > 0 && activeL > 0n,
-      });
-    } catch {
-      /* an unreadable pool is dropped, never fabricated */
-    }
-  }
+  const settled = await Promise.all(
+    found.map(async (f): Promise<MMPoolView | null> => {
+      try {
+        const [[sqrtP], activeL] = await Promise.all([
+          client.readContract({ address: STATE_VIEW, abi: slot0Abi, functionName: "getSlot0", args: [f.poolId as Hex] }),
+          client.readContract({ address: STATE_VIEW, abi: liqAbi, functionName: "getLiquidity", args: [f.poolId as Hex] }),
+        ]);
+        const priceEth = Number(sqrtP) > 0 ? 1 / (Number(sqrtP) / Q96) ** 2 : 0;
+        return {
+          poolId: f.poolId,
+          feePct: f.fee / 10000,
+          tickSpacing: f.tickSpacing,
+          priceEth,
+          priceUsd: priceEth * ethUsd,
+          activeLiquidity: String(activeL),
+          quotable: Number(sqrtP) > 0 && activeL > 0n,
+        };
+      } catch {
+        return null; // an unreadable pool is dropped, never fabricated
+      }
+    }),
+  );
+  // Best-liquidity pools first, so a creator sees the venue that matters.
+  const pools = settled.filter((p): p is MMPoolView => p !== null).sort((a, b) => (BigInt(b.activeLiquidity) > BigInt(a.activeLiquidity) ? 1 : -1));
 
   const verdict = mmVerdict(pools);
   const note =
