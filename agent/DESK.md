@@ -171,6 +171,20 @@ visitor's own browser reads from the chain.
   (it leaked into two live posts once). `merd-watchlist.json` carries an
   `avoid` list of accounts Merd never interacts with, even their mentions.
 
+## Incident log (selected)
+
+- 2026-08-05, the $30 STONKBROKER stop. STONK dumped ~6% in minutes; the
+  drawdown stop fired at 6.1% instead of 4 (slow-rotor evaluation latency)
+  and the book was 96% STONK when it hit, because two concentration moves
+  had walked past the venue cap (bestEarner checked the leader's share
+  BEFORE adding the migrated float). Fixes shipped the same hour: the 4%
+  line is now checked at swap speed with a 15s confirm (`maybeFastStop`),
+  the cap is enforced post-move, and rotor risk state (tick history, hold
+  clocks, reference prices, earn windows) persists across deploys in
+  `meme-rotor-state.json` (30min staleness ceiling). The residual truth,
+  told to the operator plainly: a desk that quotes memecoins cannot have
+  zero drawdowns; the rails bound each one, they do not abolish them.
+
 ## Reading the desk
 
 - Live: meridian402.xyz (positions, fees accruing, profit split).
