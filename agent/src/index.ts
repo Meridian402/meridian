@@ -54,6 +54,7 @@ import { lpProfit } from "./lpProfit.js";
 import { startEquitySnapshotter } from "./performance.js";
 import { startBookSnapshotter, readBookHistory } from "./bookSnapshot.js";
 import { earningsTimeline } from "./earningsHistory.js";
+import { recall } from "./learn/recall.js";
 import { marketMakingProof } from "./marketMakingPnl.js";
 import { scanOpportunities, startLpAllocator } from "./lpAllocator.js";
 import { startBasisLogger } from "./research/basisLogger.js";
@@ -593,6 +594,18 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // The earning progression, reconstructed from chain history: cumulative
 // revenue banked to the treasury (WETH x402 income + native desk skims),
 // every point a real on-chain arrival. Public, cached 5 minutes.
+// Merd's operating memory: the most similar recorded past moments for a
+// situation. Read-only over the journal and incident log; it cannot invent.
+app.get("/api/learn/recall", (req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const q = {
+    pool: typeof req.query.pool === "string" ? req.query.pool : undefined,
+    kind: typeof req.query.kind === "string" ? req.query.kind : undefined,
+    hour: new Date().getUTCHours(),
+  };
+  res.json({ query: q, memories: recall(q, 4) });
+});
+
 app.get("/api/earnings-history", async (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {

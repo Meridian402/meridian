@@ -45,7 +45,7 @@ import { TREASURY_WALLET } from "./merd/wallets.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { discoverOwnedPositions } from "./venues/lpPositions.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
-import { candidateVenues, type CandidateVenue } from "./signals/tokenAnalyst.js";
+import { candidateVenues, analyzeEthPools, vetRow, type CandidateVenue } from "./signals/tokenAnalyst.js";
 import { sellTokenForEth } from "./venues/ethSwap.js";
 import { dataPath } from "./dataDir.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -330,7 +330,6 @@ const hotTick = new Map<string, number>();
 // within minutes because a dead pool's spot teleports). Entries require a
 // pulse, not just a vetting pass.
 const swapPulse = new Map<string, number[]>();
-const watcherStartedAt = Date.now();
 export function poolPulse(pid: string): number {
   const now = Date.now();
   const arr = (swapPulse.get(pid) ?? []).filter((t) => now - t < 3600_000);
@@ -927,20 +926,38 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   //   3. only then a fresh analyst candidate
   // A venue that is not printing gets nothing here; its exit is maybeMigrate's.
   const quoted = new Set(bands.map((b) => b.poolId.toLowerCase()));
-  // Liveness gate: an unquoted pinned venue needs a pulse (5+ swaps in the
-  // trailing hour, once the watcher has been up long enough to know) before
-  // it may consume an entry slot. History is vetting; pulse is timing.
-  const pulseKnown = Date.now() - watcherStartedAt > 20 * 60 * 1000;
+  // Liveness gate, FAIL CLOSED (both halves of the BOURSE lesson): an
+  // unquoted pinned venue needs 5+ swaps in the trailing hour before it may
+  // consume an entry slot, and "the watcher has not been up long enough to
+  // know" now blocks instead of waving through; the 20 minute boot grace was
+  // exactly how BOURSE re-entered while dead. The pulse map persists with the
+  // rest of the risk state, so a warm restart loses nothing.
   let target: EthPool | null = bestEarner(bands)?.pool ?? null;
   let adopted: CandidateVenue | null = null;
-  if (!target)
-    target =
+  if (!target) {
+    const probe =
       [...venueByToken.values()].find((p) => {
         const pid = poolId(p).toLowerCase();
         if (quoted.has(pid)) return false;
-        if (pulseKnown && poolPulse(pid) < 5) return false;
+        if (poolPulse(pid) < 5) return false;
         return true;
       }) ?? null;
+    // Pinned means a human vetted it at pin time, not immunity forever: a
+    // probe re-passes the analyst's entry gates on the spot, the same bar an
+    // unknown candidate clears. A failed scan means no probe this pass, not a
+    // free pass.
+    if (probe) {
+      try {
+        const scan = await analyzeEthPools();
+        const row = scan.rows.find((r) => r.poolId.toLowerCase() === poolId(probe).toLowerCase());
+        const vet = row ? vetRow(row) : { ok: false, reason: "no analyst row (too quiet to scan)" };
+        if (vet.ok) target = probe;
+        else console.error(`[memeRotor] pinned probe ${probe.symbol} refused: ${vet.reason}`);
+      } catch (err) {
+        console.error(`[memeRotor] pinned probe scan failed, no entry this pass: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+      }
+    }
+  }
   if (!target && Date.now() - candidates.at <= CANDIDATE_TTL_MS) {
     adopted = candidates.list.find((c) => !quoted.has(c.poolId.toLowerCase()) && !venueByToken.has(c.token.toLowerCase())) ?? null;
     if (adopted) {
@@ -1353,6 +1370,7 @@ export function saveRotorState(): void {
       refPrice: Object.fromEntries(tokenRefPriceEth),
       earnWindow: Object.fromEntries(poolEarnWindow),
       feesPrev: Object.fromEntries(bandFeesPrev),
+      pulse: Object.fromEntries([...swapPulse].map(([k, v]) => [k, v.slice(-200)])),
       savedAt: Date.now(),
     };
     writeFileSync(ROTOR_STATE_PATH, JSON.stringify(state));
@@ -1370,6 +1388,7 @@ function loadRotorState(): void {
       refPrice?: Record<string, number>;
       earnWindow?: Record<string, { usd: number; start: number }>;
       feesPrev?: Record<string, number>;
+      pulse?: Record<string, number[]>;
       savedAt?: number;
     };
     if (!s.savedAt || Date.now() - s.savedAt > ROTOR_STATE_MAX_AGE_MS) return;
@@ -1378,6 +1397,7 @@ function loadRotorState(): void {
     for (const [k, v] of Object.entries(s.refPrice ?? {})) tokenRefPriceEth.set(k, v);
     for (const [k, v] of Object.entries(s.earnWindow ?? {})) poolEarnWindow.set(k, v);
     for (const [k, v] of Object.entries(s.feesPrev ?? {})) bandFeesPrev.set(k, v);
+    for (const [k, v] of Object.entries(s.pulse ?? {})) swapPulse.set(k, v);
     console.log(`[memeRotor] risk state restored (${Object.keys(s.tickHistory ?? {}).length} pools of tick history)`);
   } catch {
     /* corrupted state file: start cold, exactly like before it existed */
