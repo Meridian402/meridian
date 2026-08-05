@@ -12,6 +12,7 @@ import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
 import { startMemeFastWatch } from "./memeGuard.js";
+import { assetScorecard } from "./assetScorecard.js";
 import { lpPositionsWithValue } from "./venues/lpPositions.js";
 import { market, decisionLog, universe } from "./state.js";
 import { executeIndexTrade } from "./actions/executeIndexTrade.js";
@@ -575,6 +576,18 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // migration and stop-loss, with the reason it happened. Read-only, public,
 // because the whole posture is that the decisions are checkable; Merd's
 // autopilot reads this to narrate the desk on the timeline.
+// Per-asset performance across multiple metric points: market side (price,
+// measured drift, liquidity, holders) and the desk's own results (collects,
+// stops, rotations from the journal). Public, like every number here.
+app.get("/api/asset-scorecard", async (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    res.json(await assetScorecard());
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "scorecard unavailable" });
+  }
+});
+
 app.get("/api/desk-journal", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
