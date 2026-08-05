@@ -176,6 +176,21 @@ export function targetRange(p: EthPool, tick: number, side: "eth" | "token", off
   return { tickLower: tickUpper - width * ts, tickUpper };
 }
 
+/** High two-way volume with calm drift is when tight quoting pays: every
+ *  fill-flip round trip earns the fee twice, and a narrower band takes a
+ *  larger share of each swap. Trend or knife conditions keep the standard
+ *  conservative placement (the chase and knife clocks own those). Pure, for
+ *  tests. Thresholds from 2026-08-05: the best fee bursts printed at 50+
+ *  swaps/hr with drift under 4%/hr. */
+export function volumeMode(pulseSwapsPerHour: number, driftPctPerHr: number | null): boolean {
+  return pulseSwapsPerHour >= 50 && driftPctPerHr != null && Math.abs(driftPctPerHr) < 4;
+}
+const tightened = (p: EthPool): EthPool => ({
+  ...p,
+  offsetAbove: 1,
+  widthSpacings: Math.max(2, Math.floor((p.widthSpacings ?? 8) / 2)),
+});
+
 // The venue registry the desk trades: the pinned ETH_POOLS plus any venue the
 // migration path has since entered, persisted so a restart keeps managing
 // them. A venue in this map is one the rotor may quote; anything else is
@@ -389,9 +404,11 @@ async function fastFlipPass(pid: string): Promise<void> {
     if (movesToday >= DAILY_MOVE_CAP) return;
     const reg = venueByToken.get(b.token.toLowerCase());
     if (!reg) continue;
-    const target = targetRange(reg, b.currentTick, "token");
+    const flipDrift = tickDriftPctPerHour(poolTickHistory.get(pid) ?? [], Date.now());
+    const eff = volumeMode(poolPulse(pid), flipDrift) ? tightened(reg) : reg;
+    const target = targetRange(eff, b.currentTick, "token");
     if (target.tickLower === b.tickLower && target.tickUpper === b.tickUpper) continue;
-    await rotate(reg, b, ethUsd, reg.offsetAbove, tickDriftPctPerHour(poolTickHistory.get(pid) ?? [], Date.now()));
+    await rotate(eff, b, ethUsd, eff.offsetAbove, flipDrift);
     movesToday += 1;
     lastMoveAt = Date.now();
     console.log(`[memeFast] flipped filled band #${b.tokenId} (${reg.symbol}) to the sell side, seconds after confirmation`);
@@ -606,6 +623,11 @@ export async function memeRotorTick(): Promise<void> {
     // currentTick BELOW the bid's range = the price rose past it (tick down =
     // pricier). That is the chase-up case: fast clock, pool-local cooldown.
     const pumpChase = !knife && b.side === "eth" && b.currentTick < b.tickLower;
+    // Volume mode: hot pulse + calm drift quotes one spacing off spot at half
+    // width, so fills cycle and each swap pays a bigger share. Mutually
+    // exclusive with knife by construction (drift thresholds do not overlap).
+    const vm = !knife && volumeMode(poolPulse(b.poolId), drift);
+    const eff = vm ? tightened(reg) : reg;
     if (now - since < (knife ? KNIFE_PERSIST_MS : pumpChase ? PUMP_CHASE_MIN_MS : OUT_OF_RANGE_MIN_MS)) continue;
     if ((errorBackoffUntil.get(b.tokenId) ?? 0) > now) continue;
     if (b.valueUsd < MIN_BAND_USD) continue;
@@ -616,12 +638,12 @@ export async function memeRotorTick(): Promise<void> {
       console.error(`[memeRotor] daily cap ${DAILY_MOVE_CAP} reached; holding remaining quotes until tomorrow`);
       return;
     }
-    const offsetAbove = knife ? reg.offsetAbove + 2 : reg.offsetAbove;
-    const target = targetRange(reg, b.currentTick, b.side, offsetAbove);
+    const offsetAbove = knife ? reg.offsetAbove + 2 : eff.offsetAbove;
+    const target = targetRange(eff, b.currentTick, b.side, offsetAbove);
     if (target.tickLower === b.tickLower && target.tickUpper === b.tickUpper) continue; // already where we'd quote
 
     try {
-      await rotate(reg, b, ethUsd, offsetAbove, drift);
+      await rotate(eff, b, ethUsd, offsetAbove, drift);
       poolMoveAt.set(b.poolId, Date.now());
       // A chase-up rotation deliberately does NOT bump the global clock:
       // making other venues wait because one pool is trending would recreate
