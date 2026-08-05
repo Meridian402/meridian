@@ -818,16 +818,57 @@ async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<voi
       if (sqrtP === 0) continue;
       const px = 1 / (sqrtP / 2 ** 96) ** 2;
       if ((Number(bal) / 1e18) * px * ethUsd < STOP_MIN_USD) continue;
-      const { hash, ethOut } = await sellTokenForEth(reg, bal);
+      const sale = await sellInChunks(reg, bal, ethUsd, px);
+      if (sale.sold === 0n) continue; // nothing cleared this pass; the loop retries next tick
       appendFileSync(
         ROTATION_JOURNAL,
-        `${JSON.stringify({ ts: Date.now(), kind: "wallet-sweep", pool: reg.symbol, tokensSold: formatEther(bal), ethRealized: formatEther(ethOut), txs: [hash] })}\n`,
+        `${JSON.stringify({ ts: Date.now(), kind: "wallet-sweep", pool: reg.symbol, tokensSold: formatEther(sale.sold), tokensRemaining: formatEther(sale.remaining), ethRealized: formatEther(sale.ethRealized), txs: sale.txs })}\n`,
       );
-      console.log(`[memeRotor] swept ${formatEther(bal)} loose ${reg.symbol} to ${formatEther(ethOut)} ETH`);
+      console.log(`[memeRotor] swept ${formatEther(sale.sold)} loose ${reg.symbol} to ${formatEther(sale.ethRealized)} ETH${sale.remaining > 0n ? ` (${formatEther(sale.remaining)} left for the next pass)` : ""}`);
     } catch (err) {
       console.error(`[memeRotor] wallet sweep of ${reg.symbol} failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
     }
   }
+}
+
+/** Sell a token balance for ETH in capped chunks, HALVING the chunk on a
+ *  revert instead of giving up: the slippage floor rejects a sell the pool
+ *  cannot absorb at once, and 2026-08-05 a whole-balance wallet sweep of a
+ *  $428 remainder reverted on it every pass while the inventory sat exposed.
+ *  Small enough always clears; what will not clear this pass waits for the
+ *  next one. sellTokenForEth simulates before sending, so failed attempts
+ *  cost no gas. */
+async function sellInChunks(
+  reg: EthPool,
+  bal: bigint,
+  ethUsd: number,
+  px: number,
+): Promise<{ sold: bigint; remaining: bigint; ethRealized: bigint; txs: string[] }> {
+  const chunkWei = BigInt(Math.max(1, Math.floor((STOP_CHUNK_USD / ethUsd / px) * 1e18)));
+  let remaining = bal;
+  let sold = 0n;
+  let ethRealized = 0n;
+  const txs: string[] = [];
+  let chunk = chunkWei;
+  let attempts = 0;
+  while (remaining > 0n && txs.length < STOP_MAX_CHUNKS_PER_PASS && attempts < 8) {
+    attempts += 1;
+    const amt = remaining > chunk ? chunk : remaining;
+    try {
+      const { hash, ethOut } = await sellTokenForEth(reg, amt);
+      txs.push(hash);
+      sold += amt;
+      ethRealized += ethOut;
+      remaining -= amt;
+    } catch (err) {
+      if (chunk <= chunkWei / 8n) {
+        console.error(`[memeRotor] ${reg.symbol} sell rejected down to an eighth-chunk; leaving the rest for the next pass: ${err instanceof Error ? err.message.slice(0, 100) : err}`);
+        break;
+      }
+      chunk /= 2n;
+    }
+  }
+  return { sold, remaining, ethRealized, txs };
 }
 
 async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: number, reason: string): Promise<void> {
@@ -860,18 +901,10 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
   });
   const { sqrtP } = await ethPoolSlot0(reg);
   const px = 1 / (sqrtP / 2 ** 96) ** 2;
-  const chunkWei = BigInt(Math.max(1, Math.floor((STOP_CHUNK_USD / ethUsd / px) * 1e18)));
-  let remaining = bal;
-  let ethRealized = 0n;
-  let chunks = 0;
-  while (remaining > 0n && chunks < STOP_MAX_CHUNKS_PER_PASS) {
-    const amt = remaining > chunkWei ? chunkWei : remaining;
-    const { hash, ethOut } = await sellTokenForEth(reg, amt);
-    txs.push(hash);
-    ethRealized += ethOut;
-    remaining -= amt;
-    chunks += 1;
-  }
+  const sale = await sellInChunks(reg, bal, ethUsd, px);
+  txs.push(...sale.txs);
+  const ethRealized = sale.ethRealized;
+  const remaining = sale.remaining;
   appendFileSync(
     ROTATION_JOURNAL,
     `${JSON.stringify({
