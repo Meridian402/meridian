@@ -53,6 +53,7 @@ import { scheduleOpenDeploy, runOpenDeploy, openDeployPreview } from "./openDepl
 import { lpProfit } from "./lpProfit.js";
 import { startEquitySnapshotter } from "./performance.js";
 import { startBookSnapshotter, readBookHistory } from "./bookSnapshot.js";
+import { earningsTimeline } from "./earningsHistory.js";
 import { marketMakingProof } from "./marketMakingPnl.js";
 import { scanOpportunities, startLpAllocator } from "./lpAllocator.js";
 import { startBasisLogger } from "./research/basisLogger.js";
@@ -589,6 +590,19 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // beating the dumb baseline out-of-sample yet. Nothing here drives a trade.
 // The book series that drives the live chart: server-sampled every 2 minutes,
 // one shared continuous line for every visitor. Public, read-only.
+// The earning progression, reconstructed from chain history: cumulative
+// revenue banked to the treasury (WETH x402 income + native desk skims),
+// every point a real on-chain arrival. Public, cached 5 minutes.
+app.get("/api/earnings-history", async (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    const points = await earningsTimeline();
+    res.json({ points, ethUsd: await fetchEthUsd().catch(() => 0) });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "earnings history unavailable" });
+  }
+});
+
 app.get("/api/book-history", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
