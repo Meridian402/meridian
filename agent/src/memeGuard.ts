@@ -73,7 +73,18 @@ const FLOW_LOG = dataPath("pool-flow.jsonl");
 const OUT_OF_RANGE_MIN_MS = 10 * 60 * 1000;
 const KNIFE_PERSIST_MS = 30 * 60 * 1000;
 const GLOBAL_COOLDOWN_MS = 7 * 60 * 1000;
-const DAILY_MOVE_CAP = 24;
+// A bid the price ran away from UPWARD is a different animal than a bid in a
+// falling market: re-quoting up behind a rising price is knife-free (the new
+// bid only fills on a pullback, which is the trade this desk wants), so it
+// moves on a fast clock with a per-pool cooldown instead of contending with
+// every other band globally. Tuned 2026-08-05: CASHCAT trended +5%/hr and
+// chop-tuned clocks left every bid 1.7-7% stale, earning nothing.
+const PUMP_CHASE_MIN_MS = 3 * 60 * 1000;
+const PUMP_CHASE_POOL_COOLDOWN_MS = 5 * 60 * 1000;
+// 24 -> 36 with the pump-chase clock (2026-08-05): the cap is a runaway
+// brake, not a pacing tool, and at 24 a trending day would freeze the desk
+// out of range by evening, which is the exact failure the chase clock fixes.
+const DAILY_MOVE_CAP = 36;
 const MIN_BAND_USD = 25;
 const MIN_LEG_USD = 20;
 const ERROR_BACKOFF_MS = 60 * 60 * 1000;
@@ -441,6 +452,7 @@ export function startMemeFastWatch(): () => void {
 const outOfRangeSince = new Map<string, number>();
 const errorBackoffUntil = new Map<string, number>();
 let lastMoveAt = 0;
+const poolMoveAt = new Map<string, number>();
 let movesDay = "";
 let movesToday = 0;
 
@@ -584,10 +596,15 @@ export async function memeRotorTick(): Promise<void> {
     // every sell-side flip of filled inventory, moves on the fast clock.
     const drift = tickDriftPctPerHour(poolTickHistory.get(b.poolId) ?? [], now);
     const knife = b.side === "eth" && drift != null && drift > DUMP_DRIFT_PCT_PER_HR;
-    if (now - since < (knife ? KNIFE_PERSIST_MS : OUT_OF_RANGE_MIN_MS)) continue;
+    // currentTick BELOW the bid's range = the price rose past it (tick down =
+    // pricier). That is the chase-up case: fast clock, pool-local cooldown.
+    const pumpChase = !knife && b.side === "eth" && b.currentTick < b.tickLower;
+    if (now - since < (knife ? KNIFE_PERSIST_MS : pumpChase ? PUMP_CHASE_MIN_MS : OUT_OF_RANGE_MIN_MS)) continue;
     if ((errorBackoffUntil.get(b.tokenId) ?? 0) > now) continue;
     if (b.valueUsd < MIN_BAND_USD) continue;
-    if (now - lastMoveAt < GLOBAL_COOLDOWN_MS) continue;
+    if (pumpChase
+      ? now - (poolMoveAt.get(b.poolId) ?? 0) < PUMP_CHASE_POOL_COOLDOWN_MS
+      : now - lastMoveAt < GLOBAL_COOLDOWN_MS) continue;
     if (movesToday >= DAILY_MOVE_CAP) {
       console.error(`[memeRotor] daily cap ${DAILY_MOVE_CAP} reached; holding remaining quotes until tomorrow`);
       return;
@@ -598,7 +615,11 @@ export async function memeRotorTick(): Promise<void> {
 
     try {
       await rotate(reg, b, ethUsd, offsetAbove, drift);
-      lastMoveAt = Date.now();
+      poolMoveAt.set(b.poolId, Date.now());
+      // A chase-up rotation deliberately does NOT bump the global clock:
+      // making other venues wait because one pool is trending would recreate
+      // the contention the pool-local cooldown exists to remove.
+      if (!pumpChase) lastMoveAt = Date.now();
       movesToday += 1;
       outOfRangeSince.delete(b.tokenId);
     } catch (err) {
