@@ -55,6 +55,12 @@ const POSITION_MANAGER: Address = "0x58daec3116aae6d93017baaea7749052e8a04fa7";
 const POOL_MANAGER: Address = "0x8366a39CC670B4001A1121B8F6A443A643e40951";
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const ROTATION_JOURNAL = dataPath("meme-rotations.jsonl");
+// Every swap the fast watcher already sees, persisted: size, direction, tick.
+// Pure recording, no behavior change. This is the dataset that turns
+// hand-tuned knobs (patience windows, knife thresholds, band widths, side
+// skew) into measured per-pool curves: hourly liquidity profiles, realized
+// volatility, flow imbalance, fill-probability by distance-from-spot.
+const FLOW_LOG = dataPath("pool-flow.jsonl");
 
 // Rails. Out-of-range must PERSIST before a move (filters oscillation), moves
 // are globally rate-limited and day-capped, and legs below the dust floor stay
@@ -385,7 +391,17 @@ export function startMemeFastWatch(): () => void {
       args: { id: [...venueByToken.values()].map((p) => poolId(p)) },
       pollingInterval: FAST_POLL_MS,
       onLogs: (logs) => {
-        for (const l of logs) onSwap(String(l.args.id).toLowerCase(), Number(l.args.tick));
+        for (const l of logs) {
+          const pid = String(l.args.id).toLowerCase();
+          const tick = Number(l.args.tick);
+          try {
+            appendFileSync(
+              FLOW_LOG,
+              `${JSON.stringify({ t: Date.now(), p: pid.slice(0, 10), tick, a0: String(l.args.amount0), a1: String(l.args.amount1) })}\n`,
+            );
+          } catch { /* recording must never cost the watcher */ }
+          onSwap(pid, tick);
+        }
       },
       onError: () => { /* transient; the poller retries on its own */ },
     });
