@@ -26,6 +26,13 @@ export interface BookPoint {
   book: number;
   banked: number;
   working: number;
+  /** Fees accruing in open bands right now. */
+  accruingUsd: number;
+  /** Cumulative fee income: the running integral of positive accrual changes.
+   *  Monotonic by construction, so a collect moving fees accrued -> banked
+   *  never reads as a loss. This is the desk EARNING, cent by cent, distinct
+   *  from the mark-to-market book which wobbles with ETH price and inventory. */
+  feesUsd: number;
 }
 
 /** Mark the whole book now: banked (wallet + treasury ETH/WETH) + working
@@ -44,8 +51,23 @@ export async function computeBookNow(): Promise<BookPoint | null> {
     ]);
     if (!ethUsd) return null;
     const banked = ((Number(tEth) + Number(xEth) + Number(tWeth) + Number(xWeth)) / 1e18) * ethUsd;
-    const working = bands.reduce((s, b) => s + b.valueUsd + b.feesUsd, 0);
-    return { ts: Date.now(), book: Math.round((banked + working) * 100) / 100, banked: Math.round(banked * 100) / 100, working: Math.round(working * 100) / 100 };
+    const accruing = bands.reduce((s, b) => s + b.feesUsd, 0);
+    const working = bands.reduce((s, b) => s + b.valueUsd, 0) + accruing;
+    // Cumulative fee income = prior cumulative + the positive change in
+    // accrual since the last snapshot. A drop in accrual (a collect/sweep
+    // moving it to the bank) adds nothing and subtracts nothing: that income
+    // was already counted as it accrued, so the line holds instead of dipping.
+    const prev = readBookHistory(48 * 3600e3, 100_000).slice(-1)[0];
+    const feesUsd = prev ? prev.feesUsd + Math.max(0, accruing - prev.accruingUsd) : accruing;
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    return {
+      ts: Date.now(),
+      book: r2(banked + working),
+      banked: r2(banked),
+      working: r2(working),
+      accruingUsd: r2(accruing),
+      feesUsd: r2(feesUsd),
+    };
   } catch {
     return null;
   }
