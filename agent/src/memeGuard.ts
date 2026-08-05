@@ -787,7 +787,11 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
 // rails posture: capped size, capped frequency, simulated before sending.
 const EXPAND_MIN_ENTRY_WEI = 30_000_000_000_000_000n; // 0.03 ETH: below this an entry is dust
 const EXPAND_GAS_FLOOR_WEI = 4_000_000_000_000_000n; // 0.004 ETH always stays for gas
-const EXPANSIONS_PER_DAY = 3;
+// 3 -> 6 on 2026-08-05: overnight patience-cuts spent the whole budget by
+// 03:00 and the desk sat rule-bound in cash through the morning rally. Six
+// probation-capped probes bounds re-entry exposure at ~$1500/day worst case
+// while making all-day cash paralysis impossible.
+const EXPANSIONS_PER_DAY = 6;
 
 let expandDay = "";
 let expandsToday = 0;
