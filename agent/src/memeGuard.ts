@@ -72,8 +72,11 @@ const MIN_BAND_USD = 25;
 const MIN_LEG_USD = 20;
 const ERROR_BACKOFF_MS = 60 * 60 * 1000;
 /** Tick drift above this (percent per hour, positive = token dumping) counts
- *  as a knife for the ETH side. */
-const DUMP_DRIFT_PCT_PER_HR = 1.5;
+ *  as a knife for the ETH side. Raised 1.5 -> 8 on 2026-08-05: a night of
+ *  journaled rotations showed NORMAL chop in these pools runs 2-6%/hr and the
+ *  real knives print 25-44%/hr, so 1.5 kept ordinary re-quotes in slow-deep
+ *  knife mode and starved the book of near-spot bids. */
+const DUMP_DRIFT_PCT_PER_HR = 8;
 
 // --- Price velocity: the data behind positioning ahead of the market --------
 // Every rotor tick records each pool's tick; drift over the trailing hour is
@@ -641,7 +644,13 @@ async function maybeConcentrate(bands: MemeBand[], ethUsd: number): Promise<void
 // of never being stuck. In-range mixed bands are WORKING inventory (an active
 // two-sided quote) and are deliberately exempt; only out-of-range token bands
 // and loose wallet balances count as stuck.
+// Liquidity-aware patience: every timeout-stop in the journal fired between
+// 02:50 and 06:15 UTC, when thin flow gives a maker exit little chance to
+// fill in 30 minutes and the desk paid taker fees to leave positions the
+// morning flow would have filled. Overnight gets triple the patience.
 const TOKEN_MAX_HOLD_MS = 30 * 60 * 1000;
+const TOKEN_MAX_HOLD_THIN_MS = 90 * 60 * 1000;
+const thinHours = () => { const h = new Date().getUTCHours(); return h >= 0 && h < 8; };
 const TOKEN_STOP_DRAWDOWN_PCT = 4;
 const STOP_CHUNK_USD = 200;
 const STOP_MAX_CHUNKS_PER_PASS = 3;
@@ -672,7 +681,7 @@ async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<voi
     const age = now - (tokenHeldSince.get(pid) ?? now);
     const ref = tokenRefPriceEth.get(pid) ?? px;
     const drawdownPct = ref > 0 ? (1 - px / ref) * 100 : 0;
-    const aged = age > TOKEN_MAX_HOLD_MS;
+    const aged = age > (thinHours() ? TOKEN_MAX_HOLD_THIN_MS : TOKEN_MAX_HOLD_MS);
     const cut = drawdownPct > TOKEN_STOP_DRAWDOWN_PCT;
     if (!aged && !cut) continue;
 
