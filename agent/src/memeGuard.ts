@@ -313,6 +313,19 @@ const swapEventAbi = parseAbiItem(
 );
 
 const hotTick = new Map<string, number>();
+// Live pulse per watched pool: swap timestamps from the fast watcher, kept
+// one hour. A pool with a great 24h resume can still be DEAD right now
+// (BOURSE entered 2026-08-05 with zero swaps/hr; its band was 21% off spot
+// within minutes because a dead pool's spot teleports). Entries require a
+// pulse, not just a vetting pass.
+const swapPulse = new Map<string, number[]>();
+const watcherStartedAt = Date.now();
+export function poolPulse(pid: string): number {
+  const now = Date.now();
+  const arr = (swapPulse.get(pid) ?? []).filter((t) => now - t < 3600_000);
+  swapPulse.set(pid, arr);
+  return arr.length;
+}
 const pendingFastFlip = new Map<string, number>();
 const lastFastMove = new Map<string, number>();
 let fastInFlight = false;
@@ -325,6 +338,7 @@ export function fastFlipCondition(band: MemeBand, tick: number): boolean {
 
 function onSwap(pid: string, tick: number): void {
   hotTick.set(pid, tick);
+  (swapPulse.get(pid) ?? swapPulse.set(pid, []).get(pid)!).push(Date.now());
   // Fine-grained velocity: the same history the slow rotor's knife gate reads.
   const h = poolTickHistory.get(pid) ?? [];
   const now = Date.now();
@@ -839,9 +853,20 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   //   3. only then a fresh analyst candidate
   // A venue that is not printing gets nothing here; its exit is maybeMigrate's.
   const quoted = new Set(bands.map((b) => b.poolId.toLowerCase()));
+  // Liveness gate: an unquoted pinned venue needs a pulse (5+ swaps in the
+  // trailing hour, once the watcher has been up long enough to know) before
+  // it may consume an entry slot. History is vetting; pulse is timing.
+  const pulseKnown = Date.now() - watcherStartedAt > 20 * 60 * 1000;
   let target: EthPool | null = bestEarner(bands)?.pool ?? null;
   let adopted: CandidateVenue | null = null;
-  if (!target) target = [...venueByToken.values()].find((p) => !quoted.has(poolId(p).toLowerCase())) ?? null;
+  if (!target)
+    target =
+      [...venueByToken.values()].find((p) => {
+        const pid = poolId(p).toLowerCase();
+        if (quoted.has(pid)) return false;
+        if (pulseKnown && poolPulse(pid) < 5) return false;
+        return true;
+      }) ?? null;
   if (!target && Date.now() - candidates.at <= CANDIDATE_TTL_MS) {
     adopted = candidates.list.find((c) => !quoted.has(c.poolId.toLowerCase()) && !venueByToken.has(c.token.toLowerCase())) ?? null;
     if (adopted) {
