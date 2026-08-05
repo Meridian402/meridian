@@ -14,7 +14,7 @@ import { startLpGuard, openInPool } from "./lpGuard.js";
 import { startMemeFastWatch } from "./memeGuard.js";
 import { assetScorecard } from "./assetScorecard.js";
 import { listSkills } from "./skills/registry.js";
-import { assessTokenForMM } from "./skills/marketMaking.js";
+import { assessTokenForMM, prepareMMBand } from "./skills/marketMaking.js";
 import { lpPositionsWithValue } from "./venues/lpPositions.js";
 import { market, decisionLog, universe } from "./state.js";
 import { executeIndexTrade } from "./actions/executeIndexTrade.js";
@@ -590,6 +590,28 @@ app.get("/api/skills", (_req: Request, res: Response) => {
 
 // Market-making skill, front door: can the desk quote this token, at what
 // price. Read-only; no funds move.
+// Prepare a signable market-making band for a creator's own wallet
+// (self-custody; Meridian signs nothing). Returns the unsigned tx.
+app.get("/api/skills/mm/prepare", async (req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const token = String(req.query.token ?? "");
+  const creator = String(req.query.creator ?? "");
+  const eth = Number(req.query.eth ?? 0);
+  if (!/^0x[0-9a-fA-F]{40}$/.test(token) || !/^0x[0-9a-fA-F]{40}$/.test(creator)) {
+    res.status(400).json({ error: "token and creator must be 0x-prefixed 40-hex addresses" });
+    return;
+  }
+  if (!(eth > 0) || eth > 100) {
+    res.status(400).json({ error: "eth must be a positive amount under 100" });
+    return;
+  }
+  try {
+    res.json(await prepareMMBand(token as `0x${string}`, creator as `0x${string}`, eth));
+  } catch (err) {
+    res.status(422).json({ error: err instanceof Error ? err.message : "cannot prepare a band for this token" });
+  }
+});
+
 app.get("/api/skills/mm/assess", async (req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const token = String(req.query.token ?? "");
