@@ -347,6 +347,7 @@ function onSwap(pid: string, tick: number): void {
     while (h.length && now - h[0].t > 2 * 60 * 60 * 1000) h.shift();
     poolTickHistory.set(pid, h);
   }
+  maybeFastStop(pid, tick);
 
   const flip = lastBandsSnapshot.some((b) => b.poolId.toLowerCase() === pid && fastFlipCondition(b, tick));
   if (!flip) {
@@ -421,6 +422,7 @@ export function startMemeFastWatch(): () => void {
     });
   let unwatch = subscribe();
   const resub = setInterval(() => {
+    saveRotorState(); // the fast watcher accumulates tick history between rotor passes
     if (venueByToken.size !== watchedCount) {
       watchedCount = venueByToken.size;
       unwatch();
@@ -610,6 +612,7 @@ export async function memeRotorTick(): Promise<void> {
   await maybeConcentrate(bands, ethUsd);
   await maybeExpand(bands, ethUsd);
   await maybeMigrate(bands, ethUsd);
+  saveRotorState();
 }
 
 // --- Concentration: working capital follows the per-dollar leader ------------
@@ -643,6 +646,13 @@ async function maybeConcentrate(bands: MemeBand[], ethUsd: number): Promise<void
     const laggardEarn = poolEarnWindow.get(b.poolId)?.usd ?? 0;
     const leaderEarn = poolEarnWindow.get(leader.poolId)?.usd ?? 0;
     if (!shouldConcentrate(leaderEarn, laggardEarn)) continue;
+    // The cap must hold AFTER the move: bestEarner checks the leader's share
+    // before the migrated float is added, which is exactly how two
+    // concentration moves walked one venue to 96% of the book on 2026-08-05
+    // and a single token's dump became the whole desk's drawdown.
+    const totalBook = bands.reduce((s, x) => s + x.valueUsd, 0);
+    const leaderUsd = bands.filter((x) => x.poolId === leader.poolId).reduce((s, x) => s + x.valueUsd, 0);
+    if (totalBook > 0 && (leaderUsd + b.valueUsd) / totalBook > MAX_VENUE_SHARE) continue;
 
     try {
       const srcReg = venueByToken.get(b.token.toLowerCase());
@@ -688,6 +698,49 @@ const STOP_MIN_USD = 15;
 
 const tokenHeldSince = new Map<string, number>();
 const tokenRefPriceEth = new Map<string, number>();
+
+// --- Fast stop: the drawdown line checked at swap speed ----------------------
+// The slow rotor evaluates the 4% inventory stop on its own cadence, which is
+// how a 4% rule executed at 6.1% on 2026-08-05 (STONKBROKER dump; the extra
+// 2.1% was pure evaluation latency). The fast watcher already hears every
+// swap, and price is implied by the tick in the same convention the band read
+// uses (1.0001^-tick), so the breach can be detected in seconds. A short
+// confirm keeps a single wick from paying taker fees; the pass itself is the
+// NORMAL stop (authoritative re-read, same chunked exit), just started early.
+const FAST_STOP_CONFIRM_MS = 15 * 1000;
+const FAST_STOP_COOLDOWN_MS = 5 * 60 * 1000;
+const pendingFastStop = new Map<string, number>();
+const lastFastStop = new Map<string, number>();
+
+function maybeFastStop(pid: string, tick: number): void {
+  const ref = tokenRefPriceEth.get(pid);
+  if (!ref || !tokenHeldSince.has(pid)) {
+    pendingFastStop.delete(pid);
+    return;
+  }
+  const drawdownPct = (1 - Math.pow(1.0001, -tick) / ref) * 100;
+  if (drawdownPct <= TOKEN_STOP_DRAWDOWN_PCT) {
+    pendingFastStop.delete(pid);
+    return;
+  }
+  const now = Date.now();
+  const since = pendingFastStop.get(pid) ?? (pendingFastStop.set(pid, now), now);
+  if (now - since < FAST_STOP_CONFIRM_MS) return;
+  if (now - (lastFastStop.get(pid) ?? 0) < FAST_STOP_COOLDOWN_MS) return;
+  if (fastInFlight) return;
+  fastInFlight = true;
+  pendingFastStop.delete(pid);
+  lastFastStop.set(pid, now);
+  withHouseWalletLock("memeFastStop", async () => {
+    if (!getAgentSigner()) return;
+    const [bands, ethUsd] = await Promise.all([memeBandsLive(), fetchEthUsd()]);
+    await inventoryStopLoss(bands, ethUsd);
+  })
+    .catch((err) => console.error(`[memeFastStop] pass failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`))
+    .finally(() => {
+      fastInFlight = false;
+    });
+}
 
 async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<void> {
   const byPool = new Map<string, MemeBand[]>();
@@ -1258,3 +1311,55 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
   appendFileSync(ROTATION_JOURNAL, `${JSON.stringify(entry)}\n`);
   console.log(`[memeRotor] rotated ${reg.symbol} #${b.tokenId} -> ${newIds.join(",") || "(dust held)"} at spot ${tick}`);
 }
+
+// --- Risk state persistence: a deploy must not lobotomize the desk -----------
+// Every redeploy used to reset the in-memory tick histories (blinding the
+// knife and drift gates), the inventory hold clocks and reference prices
+// (delaying stops), and the earn windows (making concentration chase
+// post-boot noise like "leader $1.96 vs $0"). The state is tiny: write it
+// every rotor pass and once a minute from the fast watcher, reload on boot,
+// and a restart costs at most a minute of memory. Stale state is worse than
+// none (a reference price from hours ago would fire stops on old news), so
+// anything older than 30 minutes is ignored and the desk starts cold.
+const ROTOR_STATE_PATH = dataPath("meme-rotor-state.json");
+const ROTOR_STATE_MAX_AGE_MS = 30 * 60 * 1000;
+
+export function saveRotorState(): void {
+  try {
+    const state = {
+      tickHistory: Object.fromEntries([...poolTickHistory].map(([k, v]) => [k, v.slice(-500)])),
+      heldSince: Object.fromEntries(tokenHeldSince),
+      refPrice: Object.fromEntries(tokenRefPriceEth),
+      earnWindow: Object.fromEntries(poolEarnWindow),
+      feesPrev: Object.fromEntries(bandFeesPrev),
+      savedAt: Date.now(),
+    };
+    writeFileSync(ROTOR_STATE_PATH, JSON.stringify(state));
+  } catch {
+    /* state is a cache; never let it break a trading pass */
+  }
+}
+
+function loadRotorState(): void {
+  try {
+    if (!existsSync(ROTOR_STATE_PATH)) return;
+    const s = JSON.parse(readFileSync(ROTOR_STATE_PATH, "utf8")) as {
+      tickHistory?: Record<string, { t: number; tick: number }[]>;
+      heldSince?: Record<string, number>;
+      refPrice?: Record<string, number>;
+      earnWindow?: Record<string, { usd: number; start: number }>;
+      feesPrev?: Record<string, number>;
+      savedAt?: number;
+    };
+    if (!s.savedAt || Date.now() - s.savedAt > ROTOR_STATE_MAX_AGE_MS) return;
+    for (const [k, v] of Object.entries(s.tickHistory ?? {})) poolTickHistory.set(k, v);
+    for (const [k, v] of Object.entries(s.heldSince ?? {})) tokenHeldSince.set(k, v);
+    for (const [k, v] of Object.entries(s.refPrice ?? {})) tokenRefPriceEth.set(k, v);
+    for (const [k, v] of Object.entries(s.earnWindow ?? {})) poolEarnWindow.set(k, v);
+    for (const [k, v] of Object.entries(s.feesPrev ?? {})) bandFeesPrev.set(k, v);
+    console.log(`[memeRotor] risk state restored (${Object.keys(s.tickHistory ?? {}).length} pools of tick history)`);
+  } catch {
+    /* corrupted state file: start cold, exactly like before it existed */
+  }
+}
+loadRotorState();
