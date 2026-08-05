@@ -13,7 +13,7 @@ import { appendLedger } from "./ledger.js";
 import { dataPath } from "./dataDir.js";
 import { getPublicClient, getAgentSigner } from "./venues/signer.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
-import { memeBandsLive } from "./memeGuard.js";
+import { memeBandsLive, looseInventoryUsd, noteBookMark } from "./memeGuard.js";
 import { TREASURY_WALLET } from "./merd/wallets.js";
 
 const EXECUTION: Address = "0xDFF0Cf4f18dA55f931ae2A5a0770BaAD1e45D7fe";
@@ -52,7 +52,10 @@ export async function computeBookNow(): Promise<BookPoint | null> {
     if (!ethUsd) return null;
     const banked = ((Number(tEth) + Number(xEth) + Number(tWeth) + Number(xWeth)) / 1e18) * ethUsd;
     const accruing = bands.reduce((s, b) => s + b.feesUsd, 0);
-    const working = bands.reduce((s, b) => s + b.valueUsd, 0) + accruing;
+    // Loose venue tokens count too: a sweep remainder is still the book's
+    // money, and forgetting it made 2026-08-05's marks read $290 low.
+    const loose = await looseInventoryUsd(ethUsd);
+    const working = bands.reduce((s, b) => s + b.valueUsd, 0) + accruing + loose;
     // Cumulative fee income = prior cumulative + the positive change in
     // accrual since the last snapshot. A drop in accrual (a collect/sweep
     // moving it to the bank) adds nothing and subtracts nothing: that income
@@ -68,7 +71,10 @@ export async function computeBookNow(): Promise<BookPoint | null> {
       accruingUsd: r2(accruing),
       feesUsd: r2(feesUsd),
     };
-  } catch {
+  } catch (err) {
+    // Silent nulls hid a dead snapshotter for hours on 2026-08-05; a failed
+    // mark is loud now, and still never recorded.
+    console.error(`[bookSnap] mark failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
     return null;
   }
 }
@@ -102,8 +108,14 @@ export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPo
 export function startBookSnapshotter(): NodeJS.Timeout | undefined {
   if (!getAgentSigner()) return undefined;
   const snap = async () => {
-    const p = await computeBookNow();
-    if (p) appendLedger("book-snapshots.jsonl", p);
+    try {
+      const p = await computeBookNow();
+      if (!p) return;
+      appendLedger("book-snapshots.jsonl", p);
+      noteBookMark(p.book); // the circuit breaker rides every good mark
+    } catch (err) {
+      console.error(`[bookSnap] write failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
+    }
   };
   const timer = setInterval(() => void snap(), 2 * 60 * 1000);
   timer.unref?.();

@@ -380,7 +380,7 @@ function onSwap(pid: string, tick: number): void {
 
 async function fastFlipPass(pid: string): Promise<void> {
   const signer = getAgentSigner();
-  if (!signer) return;
+  if (!signer || deskHalted()) return;
   const [bands, ethUsd] = await Promise.all([memeBandsLive(), fetchEthUsd()]);
   for (const b of bands) {
     if (b.poolId.toLowerCase() !== pid) continue;
@@ -578,6 +578,14 @@ export async function memeRotorTick(): Promise<void> {
 
   updateEarnTracking(bands);
   recordTicks(bands);
+
+  // Halted by the circuit breaker: exits and sweeps stay armed (safety always
+  // runs), everything that ADDS risk waits for tomorrow.
+  if (deskHalted()) {
+    await inventoryStopLoss(bands, ethUsd);
+    saveRotorState();
+    return;
+  }
 
   for (const b of bands) {
     if (b.inRange || b.side === "mixed") {
@@ -869,6 +877,97 @@ async function sellInChunks(
     }
   }
   return { sold, remaining, ethRealized, txs };
+}
+
+/** Dollar value of loose venue tokens sitting in the wallet (inventory
+ *  between sweep passes). The book is not allowed to forget them: on
+ *  2026-08-05 a $428 remainder made the snapshot read $290 low and every
+ *  hand-derived total after it wrong. */
+export async function looseInventoryUsd(ethUsd: number): Promise<number> {
+  const signer = getAgentSigner();
+  if (!signer || !ethUsd) return 0;
+  const client = getPublicClient();
+  let usd = 0;
+  for (const reg of venueByToken.values()) {
+    try {
+      const bal = await client.readContract({
+        address: reg.token,
+        abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
+        functionName: "balanceOf",
+        args: [signer.address],
+      });
+      if (bal === 0n) continue;
+      const { sqrtP } = await ethPoolSlot0(reg);
+      if (sqrtP === 0) continue;
+      usd += (Number(bal) / 1e18) * (1 / (sqrtP / 2 ** 96) ** 2) * ethUsd;
+    } catch {
+      /* one unreadable token must not sink the mark */
+    }
+  }
+  return usd;
+}
+
+// --- The daily loss circuit breaker ------------------------------------------
+// The one honest implementation of "never again": a hard dollar line under
+// the day's high-water mark. Two consecutive book marks below it and the desk
+// flattens everything through the normal exit ladder and refuses to trade
+// until the next UTC day. Entry logic bounds each loss; this bounds the day.
+const DAILY_LOSS_LIMIT_USD = Number(process.env.MERIDIAN_DAILY_LOSS_LIMIT_USD ?? 75);
+let bookHwm = 0;
+let bookHwmDay = "";
+let breachStreak = 0;
+let haltDay = "";
+
+export function deskHalted(): boolean {
+  return haltDay !== "" && haltDay === new Date().toISOString().slice(0, 10);
+}
+
+/** Fed by the book snapshotter with every good mark. Marks only; a failed
+ *  read never reaches here, so a phantom dip cannot trip the breaker, and the
+ *  two-mark streak means even one bad-but-plausible sample cannot either. */
+export function noteBookMark(book: number): void {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== bookHwmDay) {
+    bookHwmDay = today;
+    bookHwm = book;
+    breachStreak = 0;
+  }
+  if (book > bookHwm) {
+    bookHwm = book;
+    breachStreak = 0;
+    return;
+  }
+  if (bookHwm - book < DAILY_LOSS_LIMIT_USD) {
+    breachStreak = 0;
+    return;
+  }
+  breachStreak += 1;
+  if (breachStreak < 2 || deskHalted()) return;
+  haltDay = today;
+  saveRotorState();
+  const reason = `book $${book.toFixed(0)} is $${(bookHwm - book).toFixed(0)} below today's high $${bookHwm.toFixed(0)} (limit $${DAILY_LOSS_LIMIT_USD}); flattening, standing down until tomorrow`;
+  appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "circuit-breaker", reason })}\n`);
+  console.error(`[memeRotor] CIRCUIT BREAKER: ${reason}`);
+  void withHouseWalletLock("circuitBreaker", flattenAll).catch((err) =>
+    console.error(`[memeRotor] circuit-breaker flatten failed (stop ladder still active): ${err instanceof Error ? err.message.slice(0, 160) : err}`),
+  );
+}
+
+async function flattenAll(): Promise<void> {
+  const signer = getAgentSigner();
+  if (!signer) return;
+  const [bands, ethUsd] = await Promise.all([memeBandsLive(), fetchEthUsd()]);
+  const byToken = new Map<string, MemeBand[]>();
+  for (const b of bands) (byToken.get(b.token.toLowerCase()) ?? byToken.set(b.token.toLowerCase(), []).get(b.token.toLowerCase())!).push(b);
+  for (const [tok, group] of byToken) {
+    const reg = venueByToken.get(tok);
+    if (!reg) continue;
+    try {
+      await liquidateInventory(reg, group, ethUsd, "daily loss circuit breaker");
+    } catch (err) {
+      console.error(`[memeRotor] breaker liquidation of ${reg.symbol} failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
+    }
+  }
 }
 
 async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: number, reason: string): Promise<void> {
@@ -1416,6 +1515,7 @@ export function saveRotorState(): void {
       earnWindow: Object.fromEntries(poolEarnWindow),
       feesPrev: Object.fromEntries(bandFeesPrev),
       pulse: Object.fromEntries([...swapPulse].map(([k, v]) => [k, v.slice(-200)])),
+      breaker: { bookHwm, bookHwmDay, haltDay },
       counters: {
         movesDay, moves: movesToday,
         expandDay, expands: expandsToday,
@@ -1440,6 +1540,7 @@ function loadRotorState(): void {
       earnWindow?: Record<string, { usd: number; start: number }>;
       feesPrev?: Record<string, number>;
       pulse?: Record<string, number[]>;
+      breaker?: { bookHwm?: number; bookHwmDay?: string; haltDay?: string };
       counters?: { movesDay?: string; moves?: number; expandDay?: string; expands?: number; concDay?: string; conc?: number; migDay?: string; migs?: number };
       savedAt?: number;
     };
@@ -1452,6 +1553,8 @@ function loadRotorState(): void {
     for (const [k, v] of Object.entries(s.pulse ?? {})) swapPulse.set(k, v);
     // The daily budgets survive a redeploy too: resetting them mid-crash is
     // how 18 expansions happened on a 6-per-day budget (2026-08-05).
+    const br = s.breaker ?? {};
+    if (br.bookHwmDay) { bookHwmDay = br.bookHwmDay; bookHwm = br.bookHwm ?? 0; haltDay = br.haltDay ?? ""; }
     const c = s.counters ?? {};
     if (c.movesDay) { movesDay = c.movesDay; movesToday = c.moves ?? 0; }
     if (c.expandDay) { expandDay = c.expandDay; expandsToday = c.expands ?? 0; }
