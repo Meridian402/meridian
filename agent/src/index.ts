@@ -13,6 +13,8 @@ import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
 import { startMemeFastWatch } from "./memeGuard.js";
 import { assetScorecard } from "./assetScorecard.js";
+import { listSkills } from "./skills/registry.js";
+import { assessTokenForMM } from "./skills/marketMaking.js";
 import { lpPositionsWithValue } from "./venues/lpPositions.js";
 import { market, decisionLog, universe } from "./state.js";
 import { executeIndexTrade } from "./actions/executeIndexTrade.js";
@@ -579,6 +581,29 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // Per-asset performance across multiple metric points: market side (price,
 // measured drift, liquidity, holders) and the desk's own results (collects,
 // stops, rotations from the journal). Public, like every number here.
+// The agent skills catalog: what a creator's agent can turn on, with honest
+// state and custody. Public and read-only.
+app.get("/api/skills", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({ skills: listSkills() });
+});
+
+// Market-making skill, front door: can the desk quote this token, at what
+// price. Read-only; no funds move.
+app.get("/api/skills/mm/assess", async (req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const token = String(req.query.token ?? "");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(token)) {
+    res.status(400).json({ error: "token must be a 0x-prefixed 40-hex address" });
+    return;
+  }
+  try {
+    res.json(await assessTokenForMM(token as `0x${string}`));
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "assessment unavailable" });
+  }
+});
+
 app.get("/api/asset-scorecard", async (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {

@@ -92,6 +92,19 @@ export async function updatePoolIndex(): Promise<{ known: number; added: number 
   return { known: Object.keys(idx.pools).length, added };
 }
 
+/**
+ * Every ETH-quoted hookless v4 pool the index knows for a given token. The
+ * front door of the market-making skill: a creator hands us a token address,
+ * this says which pools the desk could quote, before any funds move.
+ */
+export function poolsForToken(token: Address): { poolId: string; fee: number; tickSpacing: number }[] {
+  const idx = loadIndex();
+  const t = token.toLowerCase();
+  return Object.entries(idx.pools)
+    .filter(([, p]) => p.token.toLowerCase() === t)
+    .map(([poolId, p]) => ({ poolId, fee: p.fee, tickSpacing: p.tickSpacing }));
+}
+
 export interface AnalystRow {
   poolId: string;
   token: Address;
