@@ -966,6 +966,18 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   // exactly how BOURSE re-entered while dead. The pulse map persists with the
   // rest of the risk state, so a warm restart loses nothing.
   let target: EthPool | null = bestEarner(bands)?.pool ?? null;
+  // The earn window ranks by fees RECENTLY EARNED, which peaks exactly when a
+  // pump is topping: on 2026-08-05 CASHCAT collapsed 88% off its spike while
+  // still ranked leader, and expansion kept feeding fresh probes into the
+  // falling market. Entries obey the same knife rule as bids: a pool dumping
+  // faster than the threshold gets no new capital, full stop.
+  if (target) {
+    const drift = tickDriftPctPerHour(poolTickHistory.get(poolId(target).toLowerCase()) ?? [], Date.now());
+    if (drift != null && drift > DUMP_DRIFT_PCT_PER_HR) {
+      console.error(`[memeRotor] expansion into ${target.symbol} refused: dumping ${drift.toFixed(1)}%/hr`);
+      target = null;
+    }
+  }
   let adopted: CandidateVenue | null = null;
   if (!target) {
     const probe =
@@ -1404,6 +1416,12 @@ export function saveRotorState(): void {
       earnWindow: Object.fromEntries(poolEarnWindow),
       feesPrev: Object.fromEntries(bandFeesPrev),
       pulse: Object.fromEntries([...swapPulse].map(([k, v]) => [k, v.slice(-200)])),
+      counters: {
+        movesDay, moves: movesToday,
+        expandDay, expands: expandsToday,
+        concDay, conc: concToday,
+        migDay: migrationsDay, migs: migrationsToday,
+      },
       savedAt: Date.now(),
     };
     writeFileSync(ROTOR_STATE_PATH, JSON.stringify(state));
@@ -1422,6 +1440,7 @@ function loadRotorState(): void {
       earnWindow?: Record<string, { usd: number; start: number }>;
       feesPrev?: Record<string, number>;
       pulse?: Record<string, number[]>;
+      counters?: { movesDay?: string; moves?: number; expandDay?: string; expands?: number; concDay?: string; conc?: number; migDay?: string; migs?: number };
       savedAt?: number;
     };
     if (!s.savedAt || Date.now() - s.savedAt > ROTOR_STATE_MAX_AGE_MS) return;
@@ -1431,6 +1450,13 @@ function loadRotorState(): void {
     for (const [k, v] of Object.entries(s.earnWindow ?? {})) poolEarnWindow.set(k, v);
     for (const [k, v] of Object.entries(s.feesPrev ?? {})) bandFeesPrev.set(k, v);
     for (const [k, v] of Object.entries(s.pulse ?? {})) swapPulse.set(k, v);
+    // The daily budgets survive a redeploy too: resetting them mid-crash is
+    // how 18 expansions happened on a 6-per-day budget (2026-08-05).
+    const c = s.counters ?? {};
+    if (c.movesDay) { movesDay = c.movesDay; movesToday = c.moves ?? 0; }
+    if (c.expandDay) { expandDay = c.expandDay; expandsToday = c.expands ?? 0; }
+    if (c.concDay) { concDay = c.concDay; concToday = c.conc ?? 0; }
+    if (c.migDay) { migrationsDay = c.migDay; migrationsToday = c.migs ?? 0; }
     console.log(`[memeRotor] risk state restored (${Object.keys(s.tickHistory ?? {}).length} pools of tick history)`);
   } catch {
     /* corrupted state file: start cold, exactly like before it existed */
