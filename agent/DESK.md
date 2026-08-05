@@ -173,6 +173,20 @@ visitor's own browser reads from the chain.
 
 ## Incident log (selected)
 
+- 2026-08-05 late, the CASHCAT round trip (~$320 off the book peak). A
+  +100%+ blow-off top collapsed 88% in hours. Position-level rails all
+  worked (fast stop cut fills at 4%, nothing ended stuck), but three
+  systemic holes stacked bounded losses: (1) the wallet sweep sold whole
+  balances in one swap and wedged on the slippage floor while $428 sat
+  exposed, fixed with sellInChunks (halve on revert); (2) expansion had no
+  knife gate, so the earn window kept ranking the collapsing pool as
+  leader and fed it fresh probes, fixed by refusing entries into a pool
+  dumping past the drift threshold; (3) deploys reset the daily budgets,
+  so 18 expansions ran on a 6-per-day budget, fixed by persisting the
+  counters with the risk state. The honest residual: a desk that quotes
+  memecoins through an 88% collapse pays many small bounded costs; the
+  rails bound each one and now also bound how many can stack.
+
 - 2026-08-05, the $30 STONKBROKER stop. STONK dumped ~6% in minutes; the
   drawdown stop fired at 6.1% instead of 4 (slow-rotor evaluation latency)
   and the book was 96% STONK when it hit, because two concentration moves
