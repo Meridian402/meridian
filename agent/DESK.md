@@ -202,6 +202,7 @@ visitor's own browser reads from the chain.
 ## Reading the desk
 
 - Live: meridian402.xyz (positions, fees accruing, profit split).
+- Merd's own memory architecture and self-commit loop: MERD-MEMORY.md.
 - Decisions: `/api/desk-journal`, or `railway logs` for `[memeRotor]` /
   `[memeFast]` lines.
 - Positions: Blockscout, PositionManager `0x58daec31...`, wallet
