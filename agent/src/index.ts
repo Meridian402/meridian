@@ -55,6 +55,7 @@ import { startEquitySnapshotter } from "./performance.js";
 import { startBookSnapshotter, readBookHistory } from "./bookSnapshot.js";
 import { earningsTimeline } from "./earningsHistory.js";
 import { recall } from "./learn/recall.js";
+import { consistencyBoard } from "./consistency.js";
 import { marketMakingProof } from "./marketMakingPnl.js";
 import { scanOpportunities, startLpAllocator } from "./lpAllocator.js";
 import { startBasisLogger } from "./research/basisLogger.js";
@@ -596,6 +597,13 @@ app.post("/api/sync-state", (req: Request, res: Response) => {
 // every point a real on-chain arrival. Public, cached 5 minutes.
 // Merd's operating memory: the most similar recorded past moments for a
 // situation. Read-only over the journal and incident log; it cannot invent.
+// The desk's daily record: fee income, drawdown, stops, per UTC day, all
+// derived from the recorded marks and journal. The consistency claim, checkable.
+app.get("/api/consistency", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json(consistencyBoard());
+});
+
 app.get("/api/learn/recall", (req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const q = {
