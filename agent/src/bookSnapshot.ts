@@ -86,7 +86,7 @@ export async function computeBookNow(): Promise<BookPoint | null> {
  *  to ~20:42: the snapshotter did not count loose wallet tokens and printed
  *  a $290-deep crater that never happened. The raw lines stay in the ledger
  *  (we do not rewrite history); they are just never served as truth. */
-const QUARANTINED: [number, number][] = [[1785972000000, 1785973400000]];
+export const QUARANTINED: [number, number][] = [[1785972000000, 1785973400000]];
 
 export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPoint[] {
   if (!existsSync(BOOK_PATH)) return [];

@@ -5,6 +5,7 @@
 // and every number is checkable.
 import { existsSync, readFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
+import { QUARANTINED } from "./bookSnapshot.js";
 
 const BOOK_PATH = dataPath("book-snapshots.jsonl");
 const JOURNAL_PATH = dataPath("meme-rotations.jsonl");
@@ -34,6 +35,9 @@ export function consistencyBoard() {
       try {
         const p = JSON.parse(line) as { ts: number; book: number; feesUsd?: number };
         if (!Number.isFinite(p.book)) continue;
+        // The same quarantine the chart honors: marks from a known-broken
+        // gauge must not resurface here as a phantom record drawdown.
+        if (QUARANTINED.some(([a, b]) => p.ts >= a && p.ts <= b)) continue;
         const d = new Date(p.ts).toISOString().slice(0, 10);
         const rec = byDay.get(d) ?? byDay.set(d, { fees: [], books: [] }).get(d)!;
         if (Number.isFinite(p.feesUsd)) rec.fees.push(p.feesUsd!);
