@@ -1103,6 +1103,7 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     }
   }
   let adopted: CandidateVenue | null = null;
+  let capUsd = PROBATION_CAP_USD;
   if (!target) {
     const probes = [...venueByToken.values()].filter((p) => {
       const pid = poolId(p).toLowerCase();
@@ -1122,6 +1123,20 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
           const vet = row ? vetRow(row) : { ok: false, reason: "no analyst row (too quiet to scan)" };
           if (vet.ok) {
             target = probe;
+            break;
+          }
+          // "Freshly pumped" measures the WINDOW, not the tape: after a big
+          // recovery a pool can sit in settled two-way chop (the desk's best
+          // regime) while the window still reads as a pump. 2026-08-06:
+          // CASHCAT at 548 swaps/hr, drift 1.6%/hr, refused all morning.
+          // When the live tape is calm and heavy, enter anyway, one offset
+          // deeper and at half probation: the window's warning still prices
+          // the entry, it just cannot veto the tape outright.
+          const probeDrift = tickDriftPctPerHour(poolTickHistory.get(poolId(probe).toLowerCase()) ?? [], Date.now());
+          if (vet.reason.startsWith("freshly pumped") && volumeMode(poolPulse(poolId(probe).toLowerCase()), probeDrift)) {
+            target = { ...probe, offsetAbove: probe.offsetAbove + 1 };
+            capUsd = PROBATION_CAP_USD / 2;
+            console.error(`[memeRotor] ${probe.symbol} chop override: window pumped, tape calm and heavy; entering deep at half probation`);
             break;
           }
           console.error(`[memeRotor] pinned probe ${probe.symbol} refused: ${vet.reason}`);
@@ -1153,7 +1168,7 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     const bal = await client.getBalance({ address: signer.address });
     const available = bal - EXPAND_GAS_FLOOR_WEI;
     if (available < EXPAND_MIN_ENTRY_WEI) return;
-    const capWei = BigInt(Math.round((PROBATION_CAP_USD / ethUsd) * 1e18));
+    const capWei = BigInt(Math.round((capUsd / ethUsd) * 1e18));
     const mintWei = available > capWei ? capWei : available;
 
     const { tick, sqrtP } = await ethPoolSlot0(target);
