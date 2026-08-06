@@ -81,6 +81,13 @@ export async function computeBookNow(): Promise<BookPoint | null> {
 
 /** The book series over a window, oldest-first, lightly downsampled so the
  *  chart never has to render thousands of points. */
+/** Marks recorded by a KNOWN-BROKEN gauge, quarantined at read time so no
+ *  chart or consumer ever renders them as market events. 2026-08-05 ~20:21
+ *  to ~20:42: the snapshotter did not count loose wallet tokens and printed
+ *  a $290-deep crater that never happened. The raw lines stay in the ledger
+ *  (we do not rewrite history); they are just never served as truth. */
+const QUARANTINED: [number, number][] = [[1785972000000, 1785973400000]];
+
 export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPoint[] {
   if (!existsSync(BOOK_PATH)) return [];
   const cutoff = Date.now() - windowMs;
@@ -89,7 +96,7 @@ export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPo
     if (!line.trim()) continue;
     try {
       const p = JSON.parse(line) as BookPoint;
-      if (p.ts >= cutoff && Number.isFinite(p.book)) pts.push(p);
+      if (p.ts >= cutoff && Number.isFinite(p.book) && !QUARANTINED.some(([a, b]) => p.ts >= a && p.ts <= b)) pts.push(p);
     } catch {
       /* skip a bad line */
     }
