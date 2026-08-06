@@ -518,8 +518,12 @@ function updateEarnTracking(bands: MemeBand[]): void {
 
 /** The quoted venue currently earning the most, if it is genuinely printing
  *  and not already at the concentration cap. */
-function bestEarner(bands: MemeBand[]): { pool: EthPool; poolId: string } | null {
-  const totalBook = bands.reduce((s, b) => s + b.valueUsd, 0);
+function bestEarner(bands: MemeBand[], idleCapitalUsd = 0): { pool: EthPool; poolId: string } | null {
+  // The share cap protects THE DESK, and the desk is bands plus bankroll:
+  // measured against bands alone, a lone printing band reads as 100% and the
+  // compounder blocks itself forever while capital idles (2026-08-06, $510
+  // sat out a 548-swap/hr tape). Callers that move only band capital pass 0.
+  const totalBook = bands.reduce((s, b) => s + b.valueUsd, 0) + idleCapitalUsd;
   let best: { pool: EthPool; poolId: string; usd: number } | null = null;
   for (const [pid, w] of poolEarnWindow) {
     if (w.usd < MIN_PRINTING_USD) continue;
@@ -1089,7 +1093,12 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   // know" now blocks instead of waving through; the 20 minute boot grace was
   // exactly how BOURSE re-entered while dead. The pulse map persists with the
   // rest of the risk state, so a warm restart loses nothing.
-  let target: EthPool | null = bestEarner(bands)?.pool ?? null;
+  const client = getPublicClient();
+  const bal = await client.getBalance({ address: signer.address });
+  const available = bal - EXPAND_GAS_FLOOR_WEI;
+  if (available < EXPAND_MIN_ENTRY_WEI) return;
+  const idleUsd = (Number(available) / 1e18) * ethUsd;
+  let target: EthPool | null = bestEarner(bands, idleUsd)?.pool ?? null;
   // The earn window ranks by fees RECENTLY EARNED, which peaks exactly when a
   // pump is topping: on 2026-08-05 CASHCAT collapsed 88% off its spike while
   // still ranked leader, and expansion kept feeding fresh probes into the
@@ -1163,11 +1172,7 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   if (!target) return;
 
   try {
-    const client = getPublicClient();
     const wallet = getWalletClient();
-    const bal = await client.getBalance({ address: signer.address });
-    const available = bal - EXPAND_GAS_FLOOR_WEI;
-    if (available < EXPAND_MIN_ENTRY_WEI) return;
     const capWei = BigInt(Math.round((capUsd / ethUsd) * 1e18));
     const mintWei = available > capWei ? capWei : available;
 
