@@ -1104,24 +1104,28 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   }
   let adopted: CandidateVenue | null = null;
   if (!target) {
-    const probe =
-      [...venueByToken.values()].find((p) => {
-        const pid = poolId(p).toLowerCase();
-        if (quoted.has(pid)) return false;
-        if (poolPulse(pid) < 5) return false;
-        return true;
-      }) ?? null;
-    // Pinned means a human vetted it at pin time, not immunity forever: a
+    const probes = [...venueByToken.values()].filter((p) => {
+      const pid = poolId(p).toLowerCase();
+      return !quoted.has(pid) && poolPulse(pid) >= 5;
+    });
+    // Pinned means a human vetted it at pin time, not immunity forever: each
     // probe re-passes the analyst's entry gates on the spot, the same bar an
-    // unknown candidate clears. A failed scan means no probe this pass, not a
-    // free pass.
-    if (probe) {
+    // unknown candidate clears, and a refused venue must not block the next
+    // one (2026-08-06: a freshly-pumped CASHCAT stood in front of a perfectly
+    // entrable STONKBROKER all morning). A failed scan means no probe this
+    // pass, not a free pass.
+    if (probes.length) {
       try {
         const scan = await analyzeEthPools();
-        const row = scan.rows.find((r) => r.poolId.toLowerCase() === poolId(probe).toLowerCase());
-        const vet = row ? vetRow(row) : { ok: false, reason: "no analyst row (too quiet to scan)" };
-        if (vet.ok) target = probe;
-        else console.error(`[memeRotor] pinned probe ${probe.symbol} refused: ${vet.reason}`);
+        for (const probe of probes) {
+          const row = scan.rows.find((r) => r.poolId.toLowerCase() === poolId(probe).toLowerCase());
+          const vet = row ? vetRow(row) : { ok: false, reason: "no analyst row (too quiet to scan)" };
+          if (vet.ok) {
+            target = probe;
+            break;
+          }
+          console.error(`[memeRotor] pinned probe ${probe.symbol} refused: ${vet.reason}`);
+        }
       } catch (err) {
         console.error(`[memeRotor] pinned probe scan failed, no entry this pass: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
       }
