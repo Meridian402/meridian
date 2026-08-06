@@ -84,7 +84,10 @@ const PUMP_CHASE_POOL_COOLDOWN_MS = 5 * 60 * 1000;
 // 24 -> 36 with the pump-chase clock (2026-08-05): the cap is a runaway
 // brake, not a pacing tool, and at 24 a trending day would freeze the desk
 // out of range by evening, which is the exact failure the chase clock fixes.
-const DAILY_MOVE_CAP = 36;
+// 36 -> 60 on 2026-08-06: a whipsaw night under the chase and volume clocks
+// legitimately spends ~30 moves; at 36 the desk stalls by morning. The cap
+// is a runaway brake, and the breaker now bounds the money, not the moves.
+const DAILY_MOVE_CAP = 60;
 const MIN_BAND_USD = 25;
 const MIN_LEG_USD = 20;
 const ERROR_BACKOFF_MS = 60 * 60 * 1000;
@@ -1057,7 +1060,7 @@ const EXPAND_GAS_FLOOR_WEI = 4_000_000_000_000_000n; // 0.004 ETH always stays f
 // 03:00 and the desk sat rule-bound in cash through the morning rally. Six
 // probation-capped probes bounds re-entry exposure at ~$1500/day worst case
 // while making all-day cash paralysis impossible.
-const EXPANSIONS_PER_DAY = 6;
+const EXPANSIONS_PER_DAY = 9;
 
 let expandDay = "";
 let expandsToday = 0;
