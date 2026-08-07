@@ -569,7 +569,7 @@ async function ensureTokenApprovals(p: EthPool, amountWei: bigint): Promise<void
   if (erc20 < amountWei) {
     const data = encodeFunctionData({ abi: [parseAbiItem("function approve(address, uint256) returns (bool)")], functionName: "approve", args: [PERMIT2, maxUint256] });
     const h = await wallet.sendTransaction({ to: p.token, data });
-    await client.waitForTransactionReceipt({ hash: h });
+    await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
   }
   const [p2] = await client.readContract({
     address: PERMIT2,
@@ -584,7 +584,7 @@ async function ensureTokenApprovals(p: EthPool, amountWei: bigint): Promise<void
       args: [p.token, POSITION_MANAGER, maxUint160, 2 ** 48 - 1],
     });
     const h = await wallet.sendTransaction({ to: PERMIT2, data });
-    await client.waitForTransactionReceipt({ hash: h });
+    await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
   }
 }
 
@@ -805,7 +805,7 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
       const mint = buildNativeOnlyMint(deep, tick, mintWei, signer.address, depth);
       await client.call({ account: signer.address, to: mint.to, data: mint.data, value: mint.value });
       const h = await wallet.sendTransaction({ to: mint.to, data: mint.data, value: mint.value });
-      const r = await client.waitForTransactionReceipt({ hash: h });
+      const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
       if (r.status !== "success") throw new Error(`catcher mint reverted ${h}`);
       catchesToday += 1;
       movesToday += 1;
@@ -1208,7 +1208,7 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
     const wd = buildNativeWithdraw(reg, BigInt(b.tokenId), liq, signer.address);
     await client.call({ account: signer.address, to: wd.to, data: wd.data });
     const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
-    const r = await client.waitForTransactionReceipt({ hash: h });
+    const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`stop-loss withdraw reverted ${h}`);
     txs.push(h);
   }
@@ -1400,7 +1400,7 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     const mint = buildNativeOnlyMint(target, tick, mintWei, signer.address, target.offsetAbove);
     await client.call({ account: signer.address, to: mint.to, data: mint.data, value: mint.value });
     const h = await wallet.sendTransaction({ to: mint.to, data: mint.data, value: mint.value });
-    const r = await client.waitForTransactionReceipt({ hash: h });
+    const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`expansion mint reverted ${h}`);
     const newId = mintedIdFrom(r.logs);
 
@@ -1469,7 +1469,7 @@ async function collectAndSkim(bands: MemeBand[], ethUsd: number): Promise<void> 
       const sweep = buildNativeWithdraw(reg, BigInt(b.tokenId), 0n, signer.address);
       await client.call({ account: signer.address, to: sweep.to, data: sweep.data });
       const h = await wallet.sendTransaction({ to: sweep.to, data: sweep.data });
-      const r = await client.waitForTransactionReceipt({ hash: h });
+      const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
       if (r.status !== "success") throw new Error(`fee collect reverted ${h}`);
       const ethGain = (await client.getBalance({ address: signer.address })) - before;
 
@@ -1481,7 +1481,7 @@ async function collectAndSkim(bands: MemeBand[], ethUsd: number): Promise<void> 
       if (skim >= MIN_SKIM_WEI) {
         try {
           skimTx = await wallet.sendTransaction({ to: TREASURY_WALLET, value: skim });
-          await client.waitForTransactionReceipt({ hash: skimTx });
+          await client.waitForTransactionReceipt({ hash: skimTx, timeout: 90_000 });
         } catch (err) {
           skimTx = null;
           console.error(`[memeRotor] treasury skim failed (fees stay in float): ${err instanceof Error ? err.message.slice(0, 120) : err}`);
@@ -1640,7 +1640,7 @@ async function migrate(
     const wd = buildNativeWithdraw(srcReg, BigInt(b.tokenId), liq, signer.address);
     await client.call({ account: signer.address, to: wd.to, data: wd.data });
     const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
-    const r = await client.waitForTransactionReceipt({ hash: h });
+    const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`migration withdraw reverted ${h}`);
     withdrawnTxs.push(h);
   }
@@ -1655,7 +1655,7 @@ async function migrate(
   const mint = buildNativeOnlyMint(destPool, tick, mintWei, signer.address, destPool.offsetAbove);
   await client.call({ account: signer.address, to: mint.to, data: mint.data, value: mint.value });
   const h = await wallet.sendTransaction({ to: mint.to, data: mint.data, value: mint.value });
-  const r = await client.waitForTransactionReceipt({ hash: h });
+  const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
   if (r.status !== "success") throw new Error(`migration mint reverted ${h}`);
   const newId = mintedIdFrom(r.logs);
 
@@ -1712,7 +1712,7 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
   const wd = buildNativeWithdraw(reg, BigInt(b.tokenId), liquidity, signer.address);
   await client.call({ account: signer.address, to: wd.to, data: wd.data });
   const wdHash = await wallet.sendTransaction({ to: wd.to, data: wd.data });
-  const wdRcpt = await client.waitForTransactionReceipt({ hash: wdHash });
+  const wdRcpt = await client.waitForTransactionReceipt({ hash: wdHash, timeout: 90_000 });
   if (wdRcpt.status !== "success") throw new Error(`withdraw reverted ${wdHash}`);
   const [ethAfter, tokAfter] = await Promise.all([client.getBalance({ address: signer.address }), tokenBal()]);
   const ethDelta = ethAfter - ethBefore;
@@ -1727,7 +1727,7 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
     const mint = buildNativeOnlyMint(reg, tick, ethDelta, signer.address, offsetAbove);
     await client.call({ account: signer.address, to: mint.to, data: mint.data, value: mint.value });
     const h = await wallet.sendTransaction({ to: mint.to, data: mint.data, value: mint.value });
-    const r = await client.waitForTransactionReceipt({ hash: h });
+    const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`eth mint reverted ${h}`);
     txs.push(h);
     const id = mintedIdFrom(r.logs);
@@ -1738,7 +1738,7 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
     const mint = buildTokenOnlyMint(reg, tick, tokDelta, signer.address, 1);
     await client.call({ account: signer.address, to: mint.to, data: mint.data });
     const h = await wallet.sendTransaction({ to: mint.to, data: mint.data });
-    const r = await client.waitForTransactionReceipt({ hash: h });
+    const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`token mint reverted ${h}`);
     txs.push(h);
     const id = mintedIdFrom(r.logs);

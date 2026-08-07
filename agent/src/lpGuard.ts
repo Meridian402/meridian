@@ -386,12 +386,23 @@ export function startLpGuard(): NodeJS.Timeout {
   // outlast the 5-min tick under congestion. Without this lock two ticks could
   // act on the same position concurrently — a real double-spend risk on money.
   let checking = false;
+  let checkingSince = 0;
   const check = async () => {
     if (checking) {
-      console.error("[lpGuard] previous tick still in flight — skipping this one");
+      const ageMin = Math.round((Date.now() - checkingSince) / 60000);
+      console.error(`[lpGuard] previous tick still in flight (${ageMin}m) — skipping this one`);
+      // A tick that has been "in flight" for half an hour is not in flight,
+      // it is HUNG (2026-08-07: a stalled await froze the desk for 4 hours
+      // behind this exact flag). Clear the dedup so fresh ticks can queue;
+      // the house lock still serializes against the zombie if it ever wakes.
+      if (ageMin >= 30) {
+        console.error("[lpGuard] WATCHDOG: clearing the in-flight flag; investigate the hung await");
+        checking = false;
+      }
       return;
     }
     checking = true;
+    checkingSince = Date.now();
     try {
       // Hold the global house-wallet lock for the whole tick so an operator
       // endpoint (lp-open/lp-close/index-trade) can't interleave a tx with a
