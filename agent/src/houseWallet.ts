@@ -18,6 +18,16 @@ import { AsyncLocalStorage } from "node:async_hooks";
 const inLock = new AsyncLocalStorage<string>();
 let tail: Promise<unknown> = Promise.resolve();
 let holder: string | null = null;
+let heldSince = 0;
+
+// The stuck-holder watchdog: when the desk freezes behind this lock, the one
+// fact that matters is WHO is holding it. Names the holder and its age every
+// minute once it passes five, loudly.
+setInterval(() => {
+  if (holder && Date.now() - heldSince > 5 * 60 * 1000) {
+    console.error(`[houseLock] STUCK: "${holder}" has held the house lock for ${Math.round((Date.now() - heldSince) / 60000)}m`);
+  }
+}, 60 * 1000).unref?.();
 
 export function withHouseWalletLock<T>(label: string, fn: () => Promise<T>): Promise<T> {
   const outer = inLock.getStore();
@@ -33,6 +43,7 @@ export function withHouseWalletLock<T>(label: string, fn: () => Promise<T>): Pro
   const run = tail.then(() =>
     inLock.run(label, async () => {
       holder = label;
+      heldSince = Date.now();
       try {
         return await fn();
       } finally {

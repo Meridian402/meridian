@@ -488,6 +488,8 @@ export function startMemeFastWatch(): () => void {
 
 const outOfRangeSince = new Map<string, number>();
 const errorBackoffUntil = new Map<string, number>();
+let lastPassLogAt = 0;
+let lastExpandVerdictAt = 0;
 let lastMoveAt = 0;
 const poolMoveAt = new Map<string, number>();
 let movesDay = "";
@@ -618,6 +620,11 @@ export async function memeRotorTick(): Promise<void> {
     movesToday = 0;
   }
 
+  // Heartbeat, throttled: silence must be distinguishable from death.
+  if (Date.now() - lastPassLogAt > 5 * 60 * 1000) {
+    lastPassLogAt = Date.now();
+    console.log(`[memeRotor] pass: ${bands.length} band(s), \$${bands.reduce((x, b) => x + b.valueUsd, 0).toFixed(0)} working`);
+  }
   updateEarnTracking(bands);
   recordTicks(bands);
   trackFillsAndToxicity(bands, new Map(bands.map((b) => [b.poolId.toLowerCase(), b.feePct ?? 1])));
@@ -1388,7 +1395,13 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
       };
     }
   }
-  if (!target) return;
+  if (!target) {
+    if (Date.now() - lastExpandVerdictAt > 5 * 60 * 1000) {
+      lastExpandVerdictAt = Date.now();
+      console.log(`[memeRotor] expansion verdict: no venue qualified this pass (idle \$${idleUsd.toFixed(0)})`);
+    }
+    return;
+  }
 
   try {
     const wallet = getWalletClient();
