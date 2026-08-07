@@ -32,3 +32,13 @@ test("capitulation depth lands the bid where the wick spikes, per spacing", () =
   assert.equal(capitulationDepthSpacings(800), 2); // coarse grids clamp to a real minimum depth
   assert.ok(capitulationDepthSpacings(200, 12) > capitulationDepthSpacings(200, 9));
 });
+
+import { stopLinePct } from "../src/memeGuard.js";
+
+test("the stop line jitters within 3.6-4.8 and is stable within a day", () => {
+  const a = stopLinePct("0xabc", "2026-08-07");
+  assert.ok(a >= 3.6 && a <= 4.81);
+  assert.equal(a, stopLinePct("0xabc", "2026-08-07")); // deterministic, no flapping
+  assert.notEqual(a, stopLinePct("0xabc", "2026-08-08")); // moves day to day
+  assert.notEqual(a, stopLinePct("0xdef", "2026-08-07")); // and pool to pool
+});

@@ -620,6 +620,7 @@ export async function memeRotorTick(): Promise<void> {
 
   updateEarnTracking(bands);
   recordTicks(bands);
+  trackFillsAndToxicity(bands, new Map(bands.map((b) => [b.poolId.toLowerCase(), b.feePct ?? 1])));
 
   // Halted by the circuit breaker: exits and sweeps stay armed (safety always
   // runs), everything that ADDS risk waits for tomorrow.
@@ -691,6 +692,65 @@ export async function memeRotorTick(): Promise<void> {
   saveRotorState();
 }
 
+// --- Fill-markout surveillance: are we someone's exit liquidity? -------------
+// A venue can pass every volume gate and still farm us: informed flow fills
+// our bids right before the move continues, and our fills are systematically
+// underwater beyond what fees repay. Every observed bid fill is marked out
+// 10 minutes later against the pool tick; a venue whose recent fills average
+// worse than fees-plus-a-buffer is FARMING us and is blocked from receiving
+// entries for hours. Measurement first, accusation second: three fills
+// minimum before any verdict.
+const MARKOUT_EVAL_MS = 10 * 60 * 1000;
+const MARKOUT_MIN_FILLS = 3;
+const TOXIC_BLOCK_MS = 4 * 60 * 60 * 1000;
+const prevSideByToken = new Map<string, string>();
+const pendingFillEvals: { pid: string; symbol: string; fillTick: number; at: number }[] = [];
+const fillMarkout = new Map<string, { n: number; sumPct: number }>();
+const poolToxicUntil = new Map<string, number>();
+
+export function poolBlockedForToxicity(pid: string): boolean {
+  return (poolToxicUntil.get(pid) ?? 0) > Date.now();
+}
+
+function trackFillsAndToxicity(bands: MemeBand[], feePctByPid: Map<string, number>): void {
+  const now = Date.now();
+  for (const b of bands) {
+    const prev = prevSideByToken.get(b.tokenId);
+    // A bid that now holds tokens FILLED: record where, judge later.
+    if (prev === "eth" && (b.side === "token" || b.side === "mixed")) {
+      pendingFillEvals.push({ pid: b.poolId.toLowerCase(), symbol: b.token, fillTick: b.currentTick, at: now });
+    }
+    prevSideByToken.set(b.tokenId, b.side);
+  }
+  for (let i = pendingFillEvals.length - 1; i >= 0; i--) {
+    const f = pendingFillEvals[i];
+    if (now - f.at < MARKOUT_EVAL_MS) continue;
+    pendingFillEvals.splice(i, 1);
+    const hist = poolTickHistory.get(f.pid);
+    const tickNow = hist?.length ? hist[hist.length - 1].tick : null;
+    if (tickNow == null) continue;
+    // Bought at fillTick; price change since = 1.0001^(fillTick - tickNow) - 1
+    // (tick up = cheaper, so a further rise is a NEGATIVE markout on a buy).
+    const pct = (Math.pow(1.0001, f.fillTick - tickNow) - 1) * 100;
+    const m = fillMarkout.get(f.pid) ?? { n: 0, sumPct: 0 };
+    m.n += 1;
+    m.sumPct += pct;
+    fillMarkout.set(f.pid, m);
+    const avg = m.sumPct / m.n;
+    const feePct = feePctByPid.get(f.pid) ?? 1;
+    if (m.n >= MARKOUT_MIN_FILLS && avg < -(feePct * 2 + 1)) {
+      poolToxicUntil.set(f.pid, now + TOXIC_BLOCK_MS);
+      fillMarkout.set(f.pid, { n: 0, sumPct: 0 }); // fresh sample after the block
+      appendFileSync(
+        ROTATION_JOURNAL,
+        `${JSON.stringify({ ts: now, kind: "toxicity-block", pool: f.symbol, avgMarkoutPct: Math.round(avg * 100) / 100, fills: MARKOUT_MIN_FILLS, blockedHours: TOXIC_BLOCK_MS / 3600e3 })}
+`,
+      );
+      console.error(`[memeRotor] TOXICITY BLOCK: fills on ${f.pid.slice(0, 10)} average ${avg.toFixed(2)}% markout; no entries for ${TOXIC_BLOCK_MS / 3600e3}h`);
+    }
+  }
+}
+
 // --- The capitulation catcher ------------------------------------------------
 // A flush used to only EXCUSE the desk (stand aside, dodge the knife). This
 // makes it pay for showing up: when a watched pool is knifing hard and we are
@@ -723,6 +783,7 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
   for (const reg of venueByToken.values()) {
     const pid = poolId(reg).toLowerCase();
     if (bands.some((b) => b.poolId.toLowerCase() === pid)) continue; // only where we stand aside
+    if (poolBlockedForToxicity(pid)) continue; // a farm's climax wick is bait
     const now = Date.now();
     if (now - (lastCatchAt.get(pid) ?? 0) < CATCH_POOL_COOLDOWN_MS) continue;
     const drift = tickDriftPctPerHour(poolTickHistory.get(pid) ?? [], now);
@@ -841,6 +902,16 @@ const TOKEN_MAX_HOLD_MS = 30 * 60 * 1000;
 const TOKEN_MAX_HOLD_THIN_MS = 90 * 60 * 1000;
 const thinHours = () => { const h = new Date().getUTCHours(); return h >= 0 && h < 8; };
 const TOKEN_STOP_DRAWDOWN_PCT = 4;
+/** Stop hunting needs a KNOWN line; this removes it. The effective drawdown
+ *  stop for a pool is 3.6-4.8%, deterministic per pool per UTC day (stable
+ *  across passes and restarts, no flapping), so an adversary reverse-reading
+ *  our journal history cannot aim at today's line. Pure, for tests. */
+export function stopLinePct(poolId: string, day: string): number {
+  let h = 0;
+  const s = poolId + day;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return 3.6 + (h % 121) / 100;
+}
 const STOP_CHUNK_USD = 200;
 const STOP_MAX_CHUNKS_PER_PASS = 3;
 const STOP_MIN_USD = 15;
@@ -897,7 +968,7 @@ function maybeFastStop(pid: string, tick: number): void {
     return;
   }
   const drawdownPct = (1 - Math.pow(1.0001, -tick) / ref) * 100;
-  if (drawdownPct <= TOKEN_STOP_DRAWDOWN_PCT) {
+  if (drawdownPct <= stopLinePct(pid, new Date().toISOString().slice(0, 10))) {
     pendingFastStop.delete(pid);
     return;
   }
@@ -943,7 +1014,7 @@ async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<voi
     const ref = tokenRefPriceEth.get(pid) ?? px;
     const drawdownPct = ref > 0 ? (1 - px / ref) * 100 : 0;
     const aged = age > (thinHours() ? TOKEN_MAX_HOLD_THIN_MS : TOKEN_MAX_HOLD_MS);
-    const cut = drawdownPct > TOKEN_STOP_DRAWDOWN_PCT;
+    const cut = drawdownPct > stopLinePct(pid, new Date().toISOString().slice(0, 10));
     if (!aged && !cut) continue;
 
     const reg = venueByToken.get(stuck[0].token.toLowerCase());
@@ -1234,6 +1305,10 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     console.error(`[memeRotor] volume rotation detected: live pulse dominates the earn-window leader; probing the hot venue first`);
     target = null;
   }
+  if (target && poolBlockedForToxicity(poolId(target).toLowerCase())) {
+    console.error(`[memeRotor] compound into ${target.symbol} refused: venue under toxicity block`);
+    target = null;
+  }
   // The earn window ranks by fees RECENTLY EARNED, which peaks exactly when a
   // pump is topping: on 2026-08-05 CASHCAT collapsed 88% off its spike while
   // still ranked leader, and expansion kept feeding fresh probes into the
@@ -1252,7 +1327,7 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     const probes = [...venueByToken.values()]
       .filter((p) => {
         const pid = poolId(p).toLowerCase();
-        return !quoted.has(pid) && poolPulse(pid) >= 5;
+        return !quoted.has(pid) && poolPulse(pid) >= 5 && !poolBlockedForToxicity(pid);
       })
       .sort((a, b) => poolPulse(poolId(b).toLowerCase()) - poolPulse(poolId(a).toLowerCase()));
     // Pinned means a human vetted it at pin time, not immunity forever: each

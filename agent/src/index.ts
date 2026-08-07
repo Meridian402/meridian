@@ -710,7 +710,13 @@ app.get("/api/desk-journal", (_req: Request, res: Response) => {
         }
       })
       .filter(Boolean);
-    res.json({ entries, count: entries.length });
+    // Delayed tape: the journal is verifiable HISTORY, not a live targeting
+    // feed for whoever wants to trade against our rules. Ten minutes is
+    // enough to kill the sniping value and nothing for the trust value.
+    const delayMs = Number(process.env.MERIDIAN_JOURNAL_DELAY_MIN ?? 10) * 60 * 1000;
+    const cutoff = Date.now() - delayMs;
+    const delayed = (entries as { ts?: number }[]).filter((e) => (e.ts ?? 0) <= cutoff);
+    res.json({ entries: delayed, count: delayed.length, delayedMinutes: delayMs / 60000 });
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : "journal unavailable" });
   }
