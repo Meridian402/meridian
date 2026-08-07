@@ -909,6 +909,24 @@ const TOKEN_MAX_HOLD_MS = 30 * 60 * 1000;
 const TOKEN_MAX_HOLD_THIN_MS = 90 * 60 * 1000;
 const thinHours = () => { const h = new Date().getUTCHours(); return h >= 0 && h < 8; };
 const TOKEN_STOP_DRAWDOWN_PCT = 4;
+/** Realized hourly volatility proxy: summed absolute price moves between
+ *  stored tick samples over the trailing hour, in percent. Pure, for tests. */
+export function hourlyVolPct(history: { t: number; tick: number }[], now: number): number {
+  const hour = history.filter((h) => now - h.t <= 60 * 60 * 1000);
+  let vol = 0;
+  for (let i = 1; i < hour.length; i++) {
+    vol += Math.abs((Math.pow(1.0001, hour[i - 1].tick - hour[i].tick) - 1) * 100);
+  }
+  return Math.min(vol, 40);
+}
+
+/** The stop line a pool actually deserves: the jittered base floor, widened
+ *  when the pool's own hourly chop exceeds it (a 4% tripwire inside 6%/hr
+ *  chop is a churn tax, 4 of our first 5 drawdown stops), hard-capped at 7.
+ *  Pure, for tests. */
+export function effectiveStopPct(base: number, volPctPerHr: number): number {
+  return Math.min(7, Math.max(base, 0.9 * volPctPerHr));
+}
 /** Stop hunting needs a KNOWN line; this removes it. The effective drawdown
  *  stop for a pool is 3.6-4.8%, deterministic per pool per UTC day (stable
  *  across passes and restarts, no flapping), so an adversary reverse-reading
@@ -922,6 +940,22 @@ export function stopLinePct(poolId: string, day: string): number {
 const STOP_CHUNK_USD = 200;
 const STOP_MAX_CHUNKS_PER_PASS = 3;
 const STOP_MIN_USD = 15;
+
+// Serial stops in one pool are the same lesson repeating: each stop halves
+// the next entry size there for the rest of the UTC day (floor 25%), and a
+// third stop benches the pool until tomorrow. Persisted with the risk state.
+const poolStopsToday = new Map<string, number>();
+let poolStopsDay = "";
+function rollStopDecayDay(): void {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== poolStopsDay) {
+    poolStopsDay = today;
+    poolStopsToday.clear();
+  }
+}
+export function entrySizeMultiplier(stops: number): number {
+  return stops >= 3 ? 0 : Math.max(0.25, Math.pow(0.5, stops));
+}
 
 const tokenHeldSince = new Map<string, number>();
 const tokenRefPriceEth = new Map<string, number>();
@@ -975,7 +1009,8 @@ function maybeFastStop(pid: string, tick: number): void {
     return;
   }
   const drawdownPct = (1 - Math.pow(1.0001, -tick) / ref) * 100;
-  if (drawdownPct <= stopLinePct(pid, new Date().toISOString().slice(0, 10))) {
+  const fsLine = effectiveStopPct(stopLinePct(pid, new Date().toISOString().slice(0, 10)), hourlyVolPct(poolTickHistory.get(pid) ?? [], Date.now()));
+  if (drawdownPct <= fsLine) {
     pendingFastStop.delete(pid);
     return;
   }
@@ -1021,13 +1056,16 @@ async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<voi
     const ref = tokenRefPriceEth.get(pid) ?? px;
     const drawdownPct = ref > 0 ? (1 - px / ref) * 100 : 0;
     const aged = age > (thinHours() ? TOKEN_MAX_HOLD_THIN_MS : TOKEN_MAX_HOLD_MS);
-    const cut = drawdownPct > stopLinePct(pid, new Date().toISOString().slice(0, 10));
+    const vol = hourlyVolPct(poolTickHistory.get(pid) ?? [], now);
+    const cut = drawdownPct > effectiveStopPct(stopLinePct(pid, new Date().toISOString().slice(0, 10)), vol);
     if (!aged && !cut) continue;
 
     const reg = venueByToken.get(stuck[0].token.toLowerCase());
     if (!reg) continue;
     try {
       await liquidateInventory(reg, stuck, ethUsd, aged ? `maker exit unfilled ${Math.round(age / 60000)}min` : `drawdown ${drawdownPct.toFixed(1)}%`);
+      rollStopDecayDay();
+      poolStopsToday.set(pid, (poolStopsToday.get(pid) ?? 0) + 1);
       tokenHeldSince.delete(pid);
       tokenRefPriceEth.delete(pid);
       lastMoveAt = Date.now();
@@ -1410,8 +1448,15 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   }
 
   try {
+    rollStopDecayDay();
+    const stopsHere = poolStopsToday.get(poolId(target).toLowerCase()) ?? 0;
+    const mult = entrySizeMultiplier(stopsHere);
+    if (mult === 0) {
+      console.log(`[memeRotor] ${target.symbol} benched for the day: ${stopsHere} stops already`);
+      return;
+    }
     const wallet = getWalletClient();
-    const capWei = BigInt(Math.round((capUsd / ethUsd) * 1e18));
+    const capWei = BigInt(Math.round(((capUsd * mult) / ethUsd) * 1e18));
     const mintWei = available > capWei ? capWei : available;
 
     const { tick, sqrtP } = await ethPoolSlot0(target);
@@ -1803,6 +1848,7 @@ export function saveRotorState(): void {
       feesPrev: Object.fromEntries(bandFeesPrev),
       pulse: Object.fromEntries([...swapPulse].map(([k, v]) => [k, v.slice(-200)])),
       breaker: { bookHwm, bookHwmDay, haltDay },
+      stopDecay: { day: poolStopsDay, counts: Object.fromEntries(poolStopsToday) },
       counters: {
         movesDay, moves: movesToday,
         expandDay, expands: expandsToday,
@@ -1828,6 +1874,7 @@ function loadRotorState(): void {
       feesPrev?: Record<string, number>;
       pulse?: Record<string, number[]>;
       breaker?: { bookHwm?: number; bookHwmDay?: string; haltDay?: string };
+      stopDecay?: { day?: string; counts?: Record<string, number> };
       counters?: { movesDay?: string; moves?: number; expandDay?: string; expands?: number; concDay?: string; conc?: number; migDay?: string; migs?: number };
       savedAt?: number;
     };
@@ -1842,6 +1889,10 @@ function loadRotorState(): void {
     // how 18 expansions happened on a 6-per-day budget (2026-08-05).
     const br = s.breaker ?? {};
     if (br.bookHwmDay) { bookHwmDay = br.bookHwmDay; bookHwm = br.bookHwm ?? 0; haltDay = br.haltDay ?? ""; }
+    if (s.stopDecay?.day) {
+      poolStopsDay = s.stopDecay.day;
+      for (const [k, v] of Object.entries(s.stopDecay.counts ?? {})) poolStopsToday.set(k, v);
+    }
     const c = s.counters ?? {};
     if (c.movesDay) { movesDay = c.movesDay; movesToday = c.moves ?? 0; }
     if (c.expandDay) { expandDay = c.expandDay; expandsToday = c.expands ?? 0; }

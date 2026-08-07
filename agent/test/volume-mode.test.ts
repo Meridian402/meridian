@@ -42,3 +42,30 @@ test("the stop line jitters within 3.6-4.8 and is stable within a day", () => {
   assert.notEqual(a, stopLinePct("0xabc", "2026-08-08")); // moves day to day
   assert.notEqual(a, stopLinePct("0xdef", "2026-08-07")); // and pool to pool
 });
+
+import { hourlyVolPct, effectiveStopPct, entrySizeMultiplier } from "../src/memeGuard.js";
+
+test("the stop line breathes with the pool's own chop, capped at 7", () => {
+  assert.equal(effectiveStopPct(4.2, 1), 4.2); // calm pool keeps the tight line
+  assert.ok(Math.abs(effectiveStopPct(4.2, 6) - 5.4) < 1e-9); // choppy pool gets room
+  assert.equal(effectiveStopPct(4.2, 20), 7); // never past the hard cap
+});
+
+test("hourly vol sums absolute moves in the trailing hour only", () => {
+  const now = 10_000_000;
+  const h = [
+    { t: now - 90 * 60 * 1000, tick: 0 }, // outside the hour, ignored
+    { t: now - 30 * 60 * 1000, tick: 0 },
+    { t: now - 20 * 60 * 1000, tick: 100 }, // ~1% move
+    { t: now - 10 * 60 * 1000, tick: 0 }, // ~1% back
+  ];
+  const v = hourlyVolPct(h, now);
+  assert.ok(v > 1.9 && v < 2.1);
+});
+
+test("entry size halves per stop and benches at three", () => {
+  assert.equal(entrySizeMultiplier(0), 1);
+  assert.equal(entrySizeMultiplier(1), 0.5);
+  assert.equal(entrySizeMultiplier(2), 0.25);
+  assert.equal(entrySizeMultiplier(3), 0);
+});
