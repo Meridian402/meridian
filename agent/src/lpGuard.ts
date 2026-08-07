@@ -482,6 +482,17 @@ export function startLpGuard(): NodeJS.Timeout {
   };
   const timer = setInterval(() => void check(), CHECK_MS);
   timer.unref?.();
+  // The meme desk decides on its own faster clock: detection is 1.5s but a
+  // decision only happened every CHECK_MS, so signals aged minutes before
+  // anything looked at them (2026-08-07: "we feel a bit slow"). 90s here; the
+  // desk's own persistence clocks and budgets still pace the ACTIONS, this
+  // only paces how often it LOOKS. The house lock serializes it with the
+  // legacy tick, and the legacy stock checks stay at CHECK_MS untouched.
+  const memeTimer = setInterval(
+    () => void withHouseWalletLock("memeRotor.fastTick", () => memeRotorTick()).catch(() => {}),
+    90 * 1000,
+  );
+  memeTimer.unref?.();
   void check();
   return timer;
 }

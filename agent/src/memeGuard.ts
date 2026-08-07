@@ -385,6 +385,7 @@ function onSwap(pid: string, tick: number): void {
     poolTickHistory.set(pid, h);
   }
   maybeFastStop(pid, tick);
+  maybeSummonRotor(pid, tick);
 
   const flip = lastBandsSnapshot.some((b) => b.poolId.toLowerCase() === pid && fastFlipCondition(b, tick));
   if (!flip) {
@@ -777,6 +778,35 @@ const FAST_STOP_CONFIRM_MS = 15 * 1000;
 const FAST_STOP_COOLDOWN_MS = 5 * 60 * 1000;
 const pendingFastStop = new Map<string, number>();
 const lastFastStop = new Map<string, number>();
+
+// A band the price just walked away from should not wait for a polling tick
+// to be noticed: the swap that strands it SUMMONS a decision pass. 30s of
+// confirmation (a wick is not a move), 2min per-pool cooldown, and the pass
+// itself is the normal rotor under the normal lock, so every persistence
+// clock and budget still applies: this collapses waiting, never discipline.
+const SUMMON_CONFIRM_MS = 30 * 1000;
+const SUMMON_COOLDOWN_MS = 2 * 60 * 1000;
+const pendingSummon = new Map<string, number>();
+const lastSummon = new Map<string, number>();
+
+function maybeSummonRotor(pid: string, tick: number): void {
+  const stranded = lastBandsSnapshot.some(
+    (b) => b.poolId.toLowerCase() === pid && !(tick >= b.tickLower && tick <= b.tickUpper),
+  );
+  if (!stranded) {
+    pendingSummon.delete(pid);
+    return;
+  }
+  const now = Date.now();
+  const since = pendingSummon.get(pid) ?? (pendingSummon.set(pid, now), now);
+  if (now - since < SUMMON_CONFIRM_MS) return;
+  if (now - (lastSummon.get(pid) ?? 0) < SUMMON_COOLDOWN_MS) return;
+  pendingSummon.delete(pid);
+  lastSummon.set(pid, now);
+  void withHouseWalletLock("memeRotor.summoned", () => memeRotorTick()).catch((err) =>
+    console.error(`[memeFast] summoned pass failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`),
+  );
+}
 
 function maybeFastStop(pid: string, tick: number): void {
   const ref = tokenRefPriceEth.get(pid);
