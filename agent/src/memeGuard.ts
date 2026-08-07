@@ -197,6 +197,14 @@ export function volumeRotated(candidatePulse: number, leaderPulse: number): bool
   return candidatePulse >= 200 && candidatePulse >= 2 * Math.max(leaderPulse, 1);
 }
 
+/** Where the capitulation wick lives, in spacings above spot-in-ticks (price
+ *  falls = tick rises): deep enough that only a climax spike fills it. Pure,
+ *  for tests. */
+export function capitulationDepthSpacings(tickSpacing: number, depthPct = 9): number {
+  const ticks = Math.log(1 / (1 - depthPct / 100)) / Math.log(1.0001);
+  return Math.max(2, Math.ceil(ticks / tickSpacing));
+}
+
 const tightened = (p: EthPool): EthPool => ({
   ...p,
   offsetAbove: 1,
@@ -679,7 +687,81 @@ export async function memeRotorTick(): Promise<void> {
   await maybeConcentrate(bands, ethUsd);
   await maybeExpand(bands, ethUsd);
   await maybeMigrate(bands, ethUsd);
+  await maybeCatchCapitulation(bands, ethUsd);
   saveRotorState();
+}
+
+// --- The capitulation catcher ------------------------------------------------
+// A flush used to only EXCUSE the desk (stand aside, dodge the knife). This
+// makes it pay for showing up: when a watched pool is knifing hard and we are
+// flat in it, place ONE deep, half-probation bid where the capitulation wick
+// spikes, and let the existing machinery do the rest: the fast flip sells the
+// rebound in minutes, the swap-speed stop bounds a knife that keeps going.
+// Small by construction: one band, half size, three catches a day, and the
+// breaker floor above it all. Kill switch: MERIDIAN_CATCHER=off.
+const CATCH_MIN_DRIFT_PCT_PER_HR = 10;
+const CATCH_MIN_PULSE = 30;
+const CATCH_WIDTH_SPACINGS = 2;
+const CATCHERS_PER_DAY = 3;
+const CATCH_POOL_COOLDOWN_MS = 30 * 60 * 1000;
+let catchDay = "";
+let catchesToday = 0;
+const lastCatchAt = new Map<string, number>();
+
+async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promise<void> {
+  if (process.env.MERIDIAN_CATCHER === "off") return;
+  const signer = getAgentSigner();
+  if (!signer || deskHalted()) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== catchDay) {
+    catchDay = today;
+    catchesToday = 0;
+  }
+  if (catchesToday >= CATCHERS_PER_DAY) return;
+  if (movesToday >= DAILY_MOVE_CAP) return;
+
+  for (const reg of venueByToken.values()) {
+    const pid = poolId(reg).toLowerCase();
+    if (bands.some((b) => b.poolId.toLowerCase() === pid)) continue; // only where we stand aside
+    const now = Date.now();
+    if (now - (lastCatchAt.get(pid) ?? 0) < CATCH_POOL_COOLDOWN_MS) continue;
+    const drift = tickDriftPctPerHour(poolTickHistory.get(pid) ?? [], now);
+    if (drift == null || drift < CATCH_MIN_DRIFT_PCT_PER_HR) continue; // knives only
+    if (poolPulse(pid) < CATCH_MIN_PULSE) continue; // a flush has volume; a dead slide does not
+
+    try {
+      const client = getPublicClient();
+      const wallet = getWalletClient();
+      const bal = await client.getBalance({ address: signer.address });
+      const available = bal - EXPAND_GAS_FLOOR_WEI;
+      if (available < EXPAND_MIN_ENTRY_WEI) return;
+      const capWei = BigInt(Math.round((PROBATION_CAP_USD / 2 / ethUsd) * 1e18));
+      const mintWei = available > capWei ? capWei : available;
+      const depth = capitulationDepthSpacings(reg.tickSpacing);
+      const deep: EthPool = { ...reg, offsetAbove: depth, widthSpacings: CATCH_WIDTH_SPACINGS };
+      const { tick, sqrtP } = await ethPoolSlot0(deep);
+      if (sqrtP === 0) return;
+      const mint = buildNativeOnlyMint(deep, tick, mintWei, signer.address, depth);
+      await client.call({ account: signer.address, to: mint.to, data: mint.data, value: mint.value });
+      const h = await wallet.sendTransaction({ to: mint.to, data: mint.data, value: mint.value });
+      const r = await client.waitForTransactionReceipt({ hash: h });
+      if (r.status !== "success") throw new Error(`catcher mint reverted ${h}`);
+      catchesToday += 1;
+      movesToday += 1;
+      lastCatchAt.set(pid, Date.now());
+      poolMoveAt.set(pid, Date.now());
+      appendFileSync(
+        ROTATION_JOURNAL,
+        `${JSON.stringify({ ts: Date.now(), kind: "capitulation-catch", venue: reg.symbol, driftPctPerHr: Math.round(drift * 100) / 100, depthSpacings: depth, ethIn: formatEther(mintWei), txs: [h] })}
+`,
+      );
+      console.log(`[memeRotor] capitulation catcher set on ${reg.symbol}: knife ${drift.toFixed(1)}%/hr, bid ${depth} spacings deep`);
+      return; // one catch per pass
+    } catch (err) {
+      console.error(`[memeRotor] catcher on ${reg.symbol} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
+      return;
+    }
+  }
 }
 
 // --- Concentration: working capital follows the per-dollar leader ------------

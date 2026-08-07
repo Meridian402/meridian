@@ -23,3 +23,12 @@ test("volume rotation needs a genuinely hot pulse that dominates the leader", ()
   assert.equal(volumeRotated(150, 20), false); // dominant but not hot enough to matter
   assert.equal(volumeRotated(250, 0), true); // dead leader: any real pulse rotates
 });
+
+import { capitulationDepthSpacings } from "../src/memeGuard.js";
+
+test("capitulation depth lands the bid where the wick spikes, per spacing", () => {
+  assert.equal(capitulationDepthSpacings(200), 5); // ~9% is ~943 ticks; CASHCAT's 200-spacing grid
+  assert.equal(capitulationDepthSpacings(60), 16); // finer grids go proportionally deeper in count
+  assert.equal(capitulationDepthSpacings(800), 2); // coarse grids clamp to a real minimum depth
+  assert.ok(capitulationDepthSpacings(200, 12) > capitulationDepthSpacings(200, 9));
+});
