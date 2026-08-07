@@ -14,3 +14,12 @@ test("knife territory can never read as volume mode", () => {
   assert.equal(volumeMode(200, 10.5), false);
   assert.equal(volumeMode(200, -12), false);
 });
+
+import { volumeRotated } from "../src/memeGuard.js";
+
+test("volume rotation needs a genuinely hot pulse that dominates the leader", () => {
+  assert.equal(volumeRotated(551, 172), true); // the STONK/CASHCAT case that motivated this
+  assert.equal(volumeRotated(551, 400), false); // hot but not dominant: leader keeps compounding
+  assert.equal(volumeRotated(150, 20), false); // dominant but not hot enough to matter
+  assert.equal(volumeRotated(250, 0), true); // dead leader: any real pulse rotates
+});

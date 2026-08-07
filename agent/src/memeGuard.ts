@@ -188,6 +188,15 @@ export function targetRange(p: EthPool, tick: number, side: "eth" | "token", off
 export function volumeMode(pulseSwapsPerHour: number, driftPctPerHr: number | null): boolean {
   return pulseSwapsPerHour >= 50 && driftPctPerHr != null && Math.abs(driftPctPerHr) < 4;
 }
+/** Volume ROTATION: the earn window crowns yesterday's winner, but liquidity
+ *  moves venues in minutes (2026-08-07: STONK at 551 swaps/hr while the desk
+ *  kept compounding into CASHCAT's fading window). A live pulse this dominant
+ *  over the current leader's preempts the compound and sends the next probe
+ *  where the volume actually IS. Pure, for tests. */
+export function volumeRotated(candidatePulse: number, leaderPulse: number): boolean {
+  return candidatePulse >= 200 && candidatePulse >= 2 * Math.max(leaderPulse, 1);
+}
+
 const tightened = (p: EthPool): EthPool => ({
   ...p,
   offsetAbove: 1,
@@ -1098,7 +1107,21 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   const available = bal - EXPAND_GAS_FLOOR_WEI;
   if (available < EXPAND_MIN_ENTRY_WEI) return;
   const idleUsd = (Number(available) / 1e18) * ethUsd;
-  let target: EthPool | null = bestEarner(bands, idleUsd)?.pool ?? null;
+  const leader = bestEarner(bands, idleUsd);
+  let target: EthPool | null = leader?.pool ?? null;
+  // Rotation preemption: an unquoted venue whose LIVE pulse dominates the
+  // leader's gets first claim on this pass's capital, through the same probe
+  // vetting as everything else. The compound resumes next pass if the probe
+  // is refused; attention follows the volume either way.
+  const leaderPulse = leader ? poolPulse(leader.poolId.toLowerCase()) : 0;
+  const rotated = [...venueByToken.values()].some((p) => {
+    const pid = poolId(p).toLowerCase();
+    return !quoted.has(pid) && volumeRotated(poolPulse(pid), leaderPulse);
+  });
+  if (rotated && target) {
+    console.error(`[memeRotor] volume rotation detected: live pulse dominates the earn-window leader; probing the hot venue first`);
+    target = null;
+  }
   // The earn window ranks by fees RECENTLY EARNED, which peaks exactly when a
   // pump is topping: on 2026-08-05 CASHCAT collapsed 88% off its spike while
   // still ranked leader, and expansion kept feeding fresh probes into the
@@ -1114,10 +1137,12 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   let adopted: CandidateVenue | null = null;
   let capUsd = PROBATION_CAP_USD;
   if (!target) {
-    const probes = [...venueByToken.values()].filter((p) => {
-      const pid = poolId(p).toLowerCase();
-      return !quoted.has(pid) && poolPulse(pid) >= 5;
-    });
+    const probes = [...venueByToken.values()]
+      .filter((p) => {
+        const pid = poolId(p).toLowerCase();
+        return !quoted.has(pid) && poolPulse(pid) >= 5;
+      })
+      .sort((a, b) => poolPulse(poolId(b).toLowerCase()) - poolPulse(poolId(a).toLowerCase()));
     // Pinned means a human vetted it at pin time, not immunity forever: each
     // probe re-passes the analyst's entry gates on the spot, the same bar an
     // unknown candidate clears, and a refused venue must not block the next
