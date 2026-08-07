@@ -347,16 +347,30 @@ interface ChainPosition {
  * failed read is never mistaken for "no positions" — the caller decides whether
  * to degrade or retry.
  */
+// Incremental discovery cursor: the from-genesis scan's response outgrew the
+// HTTP client as the chain aged (2026-08-07: intermittent "response body
+// exceeded the size limit" every few marks). Per wallet we remember the
+// ownership set and the last block scanned; each call reads only the NEW
+// blocks, a response measured in bytes forever. In-memory only: a restart
+// pays one full scan and is incremental again from the second call.
+const scanCursor = new Map<string, { lastBlock: bigint; owned: Map<string, bigint> }>();
+
 export async function discoverOwnedPositions(wallet: Address): Promise<ChainPosition[]> {
   const client = getPublicClient();
   const head = await client.getBlockNumber();
+  const key = wallet.toLowerCase();
+  const cur = scanCursor.get(key);
+  // Overlap one block on resume so a same-block race can never drop an event;
+  // the Map semantics make replays harmless.
+  const fromBlock = cur ? (cur.lastBlock > 0n ? cur.lastBlock : 0n) : 0n;
   const [received, sent] = await Promise.all([
-    client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { to: wallet }, fromBlock: 0n, toBlock: head }),
-    client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { from: wallet }, fromBlock: 0n, toBlock: head }),
+    client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { to: wallet }, fromBlock, toBlock: head }),
+    client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { from: wallet }, fromBlock, toBlock: head }),
   ]);
-  const owned = new Map<string, bigint>();
+  const owned = cur ? cur.owned : new Map<string, bigint>();
   for (const l of received) owned.set((l.args as { tokenId: bigint }).tokenId.toString(), (l.args as { tokenId: bigint }).tokenId);
   for (const l of sent) owned.delete((l.args as { tokenId: bigint }).tokenId.toString());
+  scanCursor.set(key, { lastBlock: head, owned });
   if (owned.size === 0) return [];
 
   return Promise.all(
