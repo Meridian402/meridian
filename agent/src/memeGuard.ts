@@ -1197,10 +1197,17 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
           // deeper and at half probation: the window's warning still prices
           // the entry, it just cannot veto the tape outright.
           const probeDrift = tickDriftPctPerHour(poolTickHistory.get(poolId(probe).toLowerCase()) ?? [], Date.now());
-          if (vet.reason.startsWith("freshly pumped") && volumeMode(poolPulse(poolId(probe).toLowerCase()), probeDrift)) {
+          // Both directions of the same illusion: the WINDOW remembers the
+          // move ("freshly pumped" / "dumping on arrival") long after the
+          // TAPE has settled into calm, heavy chop, the desk's best regime.
+          // 2026-08-06 it kept us out of a 548-swap pump-side tape;
+          // 2026-08-07 out of a 132-swap post-dip chop. Either refusal
+          // yields to a live volume-mode tape, deep and at half size.
+          const windowIllusion = vet.reason.startsWith("freshly pumped") || vet.reason.startsWith("dumping on arrival");
+          if (windowIllusion && volumeMode(poolPulse(poolId(probe).toLowerCase()), probeDrift)) {
             target = { ...probe, offsetAbove: probe.offsetAbove + 1 };
             capUsd = PROBATION_CAP_USD / 2;
-            console.error(`[memeRotor] ${probe.symbol} chop override: window pumped, tape calm and heavy; entering deep at half probation`);
+            console.error(`[memeRotor] ${probe.symbol} chop override: window remembers a move, tape is calm and heavy; entering deep at half probation`);
             break;
           }
           console.error(`[memeRotor] pinned probe ${probe.symbol} refused: ${vet.reason}`);
