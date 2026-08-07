@@ -1263,7 +1263,7 @@ const EXPAND_GAS_FLOOR_WEI = 4_000_000_000_000_000n; // 0.004 ETH always stays f
 // 03:00 and the desk sat rule-bound in cash through the morning rally. Six
 // probation-capped probes bounds re-entry exposure at ~$1500/day worst case
 // while making all-day cash paralysis impossible.
-const EXPANSIONS_PER_DAY = 9;
+const EXPANSIONS_PER_DAY = 12;
 
 let expandDay = "";
 let expandsToday = 0;
@@ -1276,7 +1276,13 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     expandDay = today;
     expandsToday = 0;
   }
-  if (expandsToday >= EXPANSIONS_PER_DAY) return;
+  if (expandsToday >= EXPANSIONS_PER_DAY) {
+    if (Date.now() - lastExpandVerdictAt > 10 * 60 * 1000) {
+      lastExpandVerdictAt = Date.now();
+      console.log(`[memeRotor] expansion budget spent (${expandsToday}/${EXPANSIONS_PER_DAY}); entries resume at UTC midnight`);
+    }
+    return;
+  }
   if (Date.now() - lastMoveAt < GLOBAL_COOLDOWN_MS) return;
 
   // Priority order is the operator's allocation policy (flipped 2026-08-05,
