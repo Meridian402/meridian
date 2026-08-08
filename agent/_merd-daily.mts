@@ -101,6 +101,21 @@ try {
   deskLog = deskLogLines(await j("/api/desk-journal"));
 } catch { /* narration degrades, never blocks */ }
 
+// The DAILY RECORD: fee income, drawdown and stops per day, the same table
+// the site publishes. This is what lets Merd write a real performance update
+// ("today against the other days") instead of a vibe, and every figure in it
+// is one a reader can check on the site.
+let recordLines: string[] = [];
+try {
+  const c: any = await j("/api/consistency");
+  recordLines = (c?.days ?? []).slice(-5).map(
+    (d: any) =>
+      `${d.date}: $${d.lpFeesUsd.toFixed(2)} lp fees, book $${d.bookOpen.toFixed(0)} to $${d.bookClose.toFixed(0)}, worst intraday dip $${d.maxDrawdownUsd.toFixed(2)}, ${d.stops} stop(s)`,
+  );
+  const s2 = c?.summary;
+  if (s2) recordLines.push(`totals: ${s2.daysLive} days live, $${s2.totalLpFeesUsd} lp fees earned, best day $${s2.bestFeeDayUsd}, hard daily loss floor $${s2.dailyLossLimitUsd}`);
+} catch { /* the record is a bonus, never a blocker */ }
+
 // Operating memory: for the most consequential recent event (a stop beats a
 // collect beats a rotation), pull the desk's most similar PAST moments so the
 // narration can say "last time this happened" with real receipts. Best-effort;
@@ -182,7 +197,7 @@ async function generatePlan(day: string): Promise<PlanItem[]> {
 Today's live state:
 ${marketSummary || "(market feed quiet)"}
 
-${memoryLines.length ? "Your operating MEMORY, similar past moments pulled from your own journal (real; you may reference them as experience):\n" + memoryLines.map((s) => "- " + s).join("\n") + "\n" : ""}${deskLog.length ? "Your desk's OWN decisions in the last 24h (real, journaled, on-chain; the times are UTC):\n" + deskLog.map((s) => "- " + s).join("\n") + "\n" : ""}${shipped.length ? "Recently true for users (build-in-public material):\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (the roadmap you may point at, no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${recentTexts.length ? "Already said recently. Do not repeat the CLAIM, not just the wording: rephrasing one of these into new sentences still reads as a repeat and lands worse than saying nothing.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
+${memoryLines.length ? "Your operating MEMORY, similar past moments pulled from your own journal (real; you may reference them as experience):\n" + memoryLines.map((s) => "- " + s).join("\n") + "\n" : ""}${recordLines.length ? "Your DAILY RECORD, the same table the site publishes (use it for performance updates; compare days honestly, never round a loss away):\n" + recordLines.map((s) => "- " + s).join("\n") + "\n" : ""}${deskLog.length ? "Your desk's OWN decisions in the last 24h (real, journaled, on-chain; the times are UTC):\n" + deskLog.map((s) => "- " + s).join("\n") + "\n" : ""}${shipped.length ? "Recently true for users (build-in-public material):\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (the roadmap you may point at, no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${recentTexts.length ? "Already said recently. Do not repeat the CLAIM, not just the wording: rephrasing one of these into new sentences still reads as a repeat and lands worse than saying nothing.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
 Produce 3 to 5 to-dos for today. This is a project manager's feed, so it is MOSTLY the project: what shipped, what is in progress, what is next, the state of things. Each to-do is ONE specific post. Choose from:
 - PROGRESS: where the project stands right now, an honest status update, no counts or metrics
 - NEXT: what is coming, from the roadmap above, plainly, no date and no hard promise
@@ -270,7 +285,7 @@ LENGTH FOR THIS POST: ${todo.length ?? "MEDIUM"}. SHORT means under fifteen word
 Today's live state (only cite a number that appears here; never invent one):
 ${marketSummary || "(quiet)"}
 
-${memoryLines.length ? "Your operating MEMORY, similar past moments pulled from your own journal (real; you may reference them as experience):\n" + memoryLines.map((s) => "- " + s).join("\n") + "\n" : ""}${deskLog.length ? "Your desk's own journaled decisions in the last 24h (for a DESK to-do; cite only these, never an invented one):\n" + deskLog.map((s) => "- " + s).join("\n") + "\n" : ""}${shipped.length ? "Things now true for users you may mention:\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (for a NEXT to-do; no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${performance}${journal ? "Your recent notes:\n" + journal + "\n" : ""}${recentTexts.length ? "You already said these. Say something new, and note that a repeat means the same CLAIM, not the same wording: putting one of these in fresh sentences is still a repeat.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
+${memoryLines.length ? "Your operating MEMORY, similar past moments pulled from your own journal (real; you may reference them as experience):\n" + memoryLines.map((s) => "- " + s).join("\n") + "\n" : ""}${recordLines.length ? "Your DAILY RECORD, the same table the site publishes (use it for performance updates; compare days honestly, never round a loss away):\n" + recordLines.map((s) => "- " + s).join("\n") + "\n" : ""}${deskLog.length ? "Your desk's own journaled decisions in the last 24h (for a DESK to-do; cite only these, never an invented one):\n" + deskLog.map((s) => "- " + s).join("\n") + "\n" : ""}${shipped.length ? "Things now true for users you may mention:\n" + shipped.map((s) => "- " + s).join("\n") + "\n" : ""}${next.length ? "What is coming (for a NEXT to-do; no dates, no hard promises):\n" + next.map((s) => "- " + s).join("\n") + "\n" : ""}${performance}${journal ? "Your recent notes:\n" + journal + "\n" : ""}${recentTexts.length ? "You already said these. Say something new, and note that a repeat means the same CLAIM, not the same wording: putting one of these in fresh sentences is still a repeat.\n" + recentTexts.map((r) => "- " + r).join("\n") + "\n" : ""}
 Voice: you are a person who runs this thing, posting from your own account. Not a company account, not an analyst, not a changelog. Lowercase by default, first person, plain. Say "i" when it is you.
 
 LENGTH IS THE THING THAT GIVES YOU AWAY. Your posts have been landing between 276 and 296 characters over and over, which is a machine hitting a target, and no human writes like that. Decide the length from the thought, then commit to it:
