@@ -654,7 +654,8 @@ export async function memeRotorTick(): Promise<void> {
   trackFillsAndToxicity(bands, new Map(bands.map((b) => [b.poolId.toLowerCase(), b.feePct ?? 1])));
 
   // Halted by the circuit breaker: exits and sweeps stay armed (safety always
-  // runs), everything that ADDS risk waits for tomorrow.
+  // runs), everything that ADDS risk waits for tomorrow. Same principle as the
+  // daily cap below: a limit on new quotes is never a limit on getting out.
   if (deskHalted()) {
     await inventoryStopLoss(bands, ethUsd);
     saveRotorState();
@@ -698,9 +699,13 @@ export async function memeRotorTick(): Promise<void> {
     if (movesToday >= DAILY_MOVE_CAP && !chaseReserved) {
       if (Date.now() - lastCapLogAt > 10 * 60 * 1000) {
         lastCapLogAt = Date.now();
-        console.error(`[memeRotor] daily cap ${DAILY_MOVE_CAP} reached (chase reserve ${chaseExtraToday}/${CHASE_RESERVE_MOVES}); holding until UTC midnight`);
+        console.error(`[memeRotor] daily cap ${DAILY_MOVE_CAP} reached (chase reserve ${chaseExtraToday}/${CHASE_RESERVE_MOVES}); holding new quotes until UTC midnight, exits stay armed`);
       }
-      return;
+      // BREAK, never return: the cap governs risk-ADDING moves only. The
+      // stop ladder, the wallet sweep and the fee collect run below and must
+      // never be skipped, or a capped desk would hold inventory overnight
+      // with its exits switched off (found 2026-08-08).
+      break;
     }
     const offsetAbove = knife ? reg.offsetAbove + 2 : eff.offsetAbove;
     const target = targetRange(eff, b.currentTick, b.side, offsetAbove);
