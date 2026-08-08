@@ -28,10 +28,29 @@ const router = parseAbi([
   "function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)",
 ]);
 
+const POOL: Address = "0xBFaC28D6B6A258f442639CF20864f655116D57a6"; // MERD/WETH, token0 = WETH
+const CHUNKS = 3; // our own buy walks a thin market; split it
+const SLIPPAGE_BPS = 300; // 3% floor per chunk
+
 const client = getPublicClient();
 const wethBal = await client.readContract({ address: WETH, abi: erc20, functionName: "balanceOf", args: [TREASURY] });
 const slice = (wethBal * BigInt(SHARE_BPS)) / 10000n;
 const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800);
+
+// Slippage floor from the live pool price. A market order with no minimum is
+// an invitation to a sandwich bot, and this pool is thin enough to care.
+const slot0 = await client.readContract({
+  address: POOL,
+  abi: parseAbi(["function slot0() view returns (uint160,int24,uint16,uint16,uint16,uint8,bool)"]),
+  functionName: "slot0",
+});
+const sqrtP = Number(slot0[0]) / 2 ** 96;
+const merdPerWeth = sqrtP * sqrtP; // token1 per token0
+const chunkIn = slice / BigInt(CHUNKS);
+const expectedOutPerChunk = (Number(chunkIn) / 1e18) * merdPerWeth * (1 - POOL_FEE / 1_000_000);
+const minOutPerChunk = BigInt(Math.floor(expectedOutPerChunk * (1 - SLIPPAGE_BPS / 10000) * 1e18));
+console.log(`pool price: 1 WETH = ${merdPerWeth.toLocaleString(undefined, { maximumFractionDigits: 0 })} MERD`);
+console.log(`buy split into ${CHUNKS} chunks of ${formatEther(chunkIn)} WETH, floor ${(Number(minOutPerChunk) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 0 })} MERD each\n`);
 
 const steps = [
   {
@@ -52,8 +71,8 @@ const steps = [
     data: encodeFunctionData({ abi: erc20, functionName: "approve", args: [ROUTER, slice] }),
     value: "0",
   },
-  {
-    what: `buy MERD with ${formatEther(slice)} WETH (1% pool, recipient = treasury)`,
+  ...Array.from({ length: CHUNKS }, (_, i) => ({
+    what: `buy MERD, chunk ${i + 1}/${CHUNKS}: ${formatEther(chunkIn)} WETH in, at least ${(Number(minOutPerChunk) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 0 })} MERD out`,
     to: ROUTER,
     data: encodeFunctionData({
       abi: router,
@@ -65,14 +84,14 @@ const steps = [
           fee: POOL_FEE,
           recipient: TREASURY,
           deadline,
-          amountIn: slice,
-          amountOutMinimum: 0n,
+          amountIn: chunkIn,
+          amountOutMinimum: minOutPerChunk,
           sqrtPriceLimitX96: 0n,
         },
       ],
     }),
     value: "0",
-  },
+  })),
   {
     what: "burn: transfer the MERD just bought to the dead address (fill in the exact amount received from step 4)",
     to: MERD,
