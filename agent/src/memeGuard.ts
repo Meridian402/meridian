@@ -92,8 +92,13 @@ const DAILY_MOVE_CAP = 60;
  *  move (an out-of-range band only needs one: it earns nothing where it is). */
 const MIN_REQUOTE_SPACINGS = 2;
 /** Chase re-quotes beyond the daily cap: a stranded bid always gets to follow
- *  the price, capped so this can never become an unbounded second budget. */
-const CHASE_RESERVE_MOVES = 15;
+ *  the price, capped so this can never become an unbounded second budget.
+ *  15 -> 40 on 2026-08-08: the reserve was sized before the min-improvement
+ *  gate existed, and it ran dry with three bands stranded 5-7% under a rising
+ *  market and 70 minutes left in the day. A chase now has to be worth two
+ *  spacings to spend anything, so a larger reserve cannot be burned on
+ *  micro-churn, only on genuinely following the price. */
+const CHASE_RESERVE_MOVES = 40;
 const MIN_BAND_USD = 25;
 const MIN_LEG_USD = 20;
 const ERROR_BACKOFF_MS = 60 * 60 * 1000;
