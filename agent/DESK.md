@@ -171,6 +171,34 @@ visitor's own browser reads from the chain.
   (it leaked into two live posts once). `merd-watchlist.json` carries an
   `avoid` list of accounts Merd never interacts with, even their mentions.
 
+## Revenue allocation (operator policy, 2026-08-08)
+
+Every cycle is ONE event with two public transactions on the same day: the
+marketing payout and the buyback-and-burn. Pairing them means a reader
+checks one date and sees both sides of the promise kept.
+
+- **25%** marketing team.
+- **25%** buyback and burn, executed the same day as the marketing payout.
+- **~40%** retained: desk capital and treasury growth. Venue count before
+  position size (the v3 adapter unlocks MERD's own pool and every PONS
+  pool, which beats another $500 into the same thin venue).
+- **~10%** operating reserve: gas, LLM, infrastructure.
+
+Mechanism: buyback and burn, NOT a staking claim. It reaches every holder
+without staking, locking or a claim contract; it is a treasury operation
+rather than a proportional payout of profits (a materially cleaner legal
+shape); and it is verifiable on-chain. The dormant staking-claim contract
+in the repo stays dormant.
+
+Honest math, so nobody oversells the loop: a $100 buyback in the 1% MERD
+pool generates ~$1 of pool fees, of which our creator share returns ~$0.20.
+The flywheel is a 0.2% rebate, not a machine.
+
+Execution discipline: buy in bounded chunks (our own buying moves a thin
+market, the same lesson the desk's exits learned), publish every cycle
+next to the revenue chart, never pre-announce a specific buy, and announce
+a cycle only after both transactions have landed.
+
 ## Incident log (selected)
 
 - 2026-08-05 late, the CASHCAT round trip (~$320 off the book peak). A
