@@ -88,6 +88,12 @@ const PUMP_CHASE_POOL_COOLDOWN_MS = 5 * 60 * 1000;
 // legitimately spends ~30 moves; at 36 the desk stalls by morning. The cap
 // is a runaway brake, and the breaker now bounds the money, not the moves.
 const DAILY_MOVE_CAP = 60;
+/** A re-quote must shift the band at least this many spacings to be worth a
+ *  move (an out-of-range band only needs one: it earns nothing where it is). */
+const MIN_REQUOTE_SPACINGS = 2;
+/** Chase re-quotes beyond the daily cap: a stranded bid always gets to follow
+ *  the price, capped so this can never become an unbounded second budget. */
+const CHASE_RESERVE_MOVES = 15;
 const MIN_BAND_USD = 25;
 const MIN_LEG_USD = 20;
 const ERROR_BACKOFF_MS = 60 * 60 * 1000;
@@ -203,6 +209,21 @@ export function volumeRotated(candidatePulse: number, leaderPulse: number): bool
 export function capitulationDepthSpacings(tickSpacing: number, depthPct = 9): number {
   const ticks = Math.log(1 / (1 - depthPct / 100)) / Math.log(1.0001);
   return Math.max(2, Math.ceil(ticks / tickSpacing));
+}
+
+/** Is moving this quote worth spending a move? A re-quote that shifts the
+ *  band by less than a couple of spacings buys almost no fill probability and
+ *  costs two transactions plus a slot in the daily budget: 28 CASHCAT
+ *  rotations in five hours (2026-08-08) ate the whole cap by breakfast and
+ *  benched the desk for sixteen hours. Pure, for tests. */
+export function worthRequoting(
+  current: { tickLower: number; tickUpper: number },
+  target: { tickLower: number; tickUpper: number },
+  tickSpacing: number,
+  minSpacings = 2,
+): boolean {
+  const shift = Math.max(Math.abs(target.tickLower - current.tickLower), Math.abs(target.tickUpper - current.tickUpper));
+  return shift >= minSpacings * tickSpacing;
 }
 
 const tightened = (p: EthPool): EthPool => ({
@@ -490,6 +511,8 @@ const outOfRangeSince = new Map<string, number>();
 const errorBackoffUntil = new Map<string, number>();
 let lastPassLogAt = 0;
 let lastExpandVerdictAt = 0;
+let lastCapLogAt = 0;
+let chaseExtraToday = 0;
 let lastMoveAt = 0;
 const poolMoveAt = new Map<string, number>();
 let movesDay = "";
@@ -618,6 +641,7 @@ export async function memeRotorTick(): Promise<void> {
   if (today !== movesDay) {
     movesDay = today;
     movesToday = 0;
+    chaseExtraToday = 0;
   }
 
   // Heartbeat, throttled: silence must be distinguishable from death.
@@ -667,13 +691,23 @@ export async function memeRotorTick(): Promise<void> {
     if (pumpChase
       ? now - (poolMoveAt.get(b.poolId) ?? 0) < PUMP_CHASE_POOL_COOLDOWN_MS
       : now - lastMoveAt < GLOBAL_COOLDOWN_MS) continue;
-    if (movesToday >= DAILY_MOVE_CAP) {
-      console.error(`[memeRotor] daily cap ${DAILY_MOVE_CAP} reached; holding remaining quotes until tomorrow`);
+    // The cap is a runaway brake, but a band the price walked away from must
+    // always be able to follow it: chase re-quotes draw on a reserve beyond
+    // the cap so a stranded bid is never stuck out of range all day.
+    const chaseReserved = pumpChase && chaseExtraToday < CHASE_RESERVE_MOVES;
+    if (movesToday >= DAILY_MOVE_CAP && !chaseReserved) {
+      if (Date.now() - lastCapLogAt > 10 * 60 * 1000) {
+        lastCapLogAt = Date.now();
+        console.error(`[memeRotor] daily cap ${DAILY_MOVE_CAP} reached (chase reserve ${chaseExtraToday}/${CHASE_RESERVE_MOVES}); holding until UTC midnight`);
+      }
       return;
     }
     const offsetAbove = knife ? reg.offsetAbove + 2 : eff.offsetAbove;
     const target = targetRange(eff, b.currentTick, b.side, offsetAbove);
-    if (target.tickLower === b.tickLower && target.tickUpper === b.tickUpper) continue; // already where we'd quote
+    // Only spend a move when the quote is materially better, unless the band
+    // is stranded OUT of range (then any improvement is worth having).
+    const stranded = !b.inRange;
+    if (!worthRequoting({ tickLower: b.tickLower, tickUpper: b.tickUpper }, target, reg.tickSpacing, stranded ? 1 : MIN_REQUOTE_SPACINGS)) continue;
 
     try {
       await rotate(eff, b, ethUsd, offsetAbove, drift);
@@ -682,6 +716,7 @@ export async function memeRotorTick(): Promise<void> {
       // making other venues wait because one pool is trending would recreate
       // the contention the pool-local cooldown exists to remove.
       if (!pumpChase) lastMoveAt = Date.now();
+      if (movesToday >= DAILY_MOVE_CAP) chaseExtraToday += 1;
       movesToday += 1;
       outOfRangeSince.delete(b.tokenId);
     } catch (err) {
@@ -1850,7 +1885,7 @@ export function saveRotorState(): void {
       breaker: { bookHwm, bookHwmDay, haltDay },
       stopDecay: { day: poolStopsDay, counts: Object.fromEntries(poolStopsToday) },
       counters: {
-        movesDay, moves: movesToday,
+        movesDay, moves: movesToday, chaseExtra: chaseExtraToday,
         expandDay, expands: expandsToday,
         concDay, conc: concToday,
         migDay: migrationsDay, migs: migrationsToday,
@@ -1875,7 +1910,7 @@ function loadRotorState(): void {
       pulse?: Record<string, number[]>;
       breaker?: { bookHwm?: number; bookHwmDay?: string; haltDay?: string };
       stopDecay?: { day?: string; counts?: Record<string, number> };
-      counters?: { movesDay?: string; moves?: number; expandDay?: string; expands?: number; concDay?: string; conc?: number; migDay?: string; migs?: number };
+      counters?: { movesDay?: string; moves?: number; chaseExtra?: number; expandDay?: string; expands?: number; concDay?: string; conc?: number; migDay?: string; migs?: number };
       savedAt?: number;
     };
     if (!s.savedAt || Date.now() - s.savedAt > ROTOR_STATE_MAX_AGE_MS) return;
@@ -1894,7 +1929,7 @@ function loadRotorState(): void {
       for (const [k, v] of Object.entries(s.stopDecay.counts ?? {})) poolStopsToday.set(k, v);
     }
     const c = s.counters ?? {};
-    if (c.movesDay) { movesDay = c.movesDay; movesToday = c.moves ?? 0; }
+    if (c.movesDay) { movesDay = c.movesDay; movesToday = c.moves ?? 0; chaseExtraToday = c.chaseExtra ?? 0; }
     if (c.expandDay) { expandDay = c.expandDay; expandsToday = c.expands ?? 0; }
     if (c.concDay) { concDay = c.concDay; concToday = c.conc ?? 0; }
     if (c.migDay) { migrationsDay = c.migDay; migrationsToday = c.migs ?? 0; }

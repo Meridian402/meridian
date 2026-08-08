@@ -69,3 +69,17 @@ test("entry size halves per stop and benches at three", () => {
   assert.equal(entrySizeMultiplier(2), 0.25);
   assert.equal(entrySizeMultiplier(3), 0);
 });
+
+import { worthRequoting } from "../src/memeGuard.js";
+
+test("a re-quote must move the band materially to be worth a move", () => {
+  const cur = { tickLower: 118000, tickUpper: 118800 };
+  // one spacing of drift: the micro-churn that ate a whole daily budget
+  assert.equal(worthRequoting(cur, { tickLower: 118200, tickUpper: 119000 }, 200), false);
+  // two spacings: worth the two transactions
+  assert.equal(worthRequoting(cur, { tickLower: 118400, tickUpper: 119200 }, 200), true);
+  // a stranded band takes any real improvement (minSpacings 1)
+  assert.equal(worthRequoting(cur, { tickLower: 118200, tickUpper: 119000 }, 200, 1), true);
+  // identical ranges are never worth a move
+  assert.equal(worthRequoting(cur, cur, 200), false);
+});
