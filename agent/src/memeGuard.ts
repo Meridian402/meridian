@@ -1371,6 +1371,31 @@ const EXPAND_GAS_FLOOR_WEI = 4_000_000_000_000_000n; // 0.004 ETH always stays f
 // while making all-day cash paralysis impossible.
 const EXPANSIONS_PER_DAY = 12;
 
+// A BUDGET MAY THROTTLE ADDING RISK. IT MAY NEVER LEAVE THE DESK WITH NONE.
+//
+// The cap above has been raised twice, 3 -> 6 -> 12, each time after the desk
+// spent it early and sat in cash through a rally, and each time the comment
+// claimed the new number made "all-day cash paralysis impossible". It did not,
+// because a bigger constant does not fix a structural mistake. Measured
+// 2026-08-09: 12/12 spent, every band stopped out at 08:00Z, and the rotor then
+// logged `expansion budget spent; entries resume at UTC midnight` every pass
+// for the next SIXTEEN HOURS with $1,817 idle and $0 working.
+//
+// This is the same bug as the daily move cap returning instead of breaking. A
+// throttle on ADDING exposure was silently also a throttle on HAVING any. You
+// cannot add to a position you do not hold, so when the book is flat the cap is
+// not governing risk, it is just an outage with a rule number attached.
+//
+// So a flat book gets a reserve to climb back in on. It is small and it is
+// bounded, and the per-pool stop bench (three stops and a venue is done for the
+// day) remains the real backstop against churning in and out of a bad tape.
+const FLAT_REENTRY_RESERVE = 4;
+
+export function expansionAllowed(expandsToday: number, openBands: number): boolean {
+  if (openBands > 0) return expandsToday < EXPANSIONS_PER_DAY;
+  return expandsToday < EXPANSIONS_PER_DAY + FLAT_REENTRY_RESERVE;
+}
+
 let expandDay = "";
 let expandsToday = 0;
 
@@ -1382,10 +1407,11 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     expandDay = today;
     expandsToday = 0;
   }
-  if (expandsToday >= EXPANSIONS_PER_DAY) {
+  if (!expansionAllowed(expandsToday, bands.length)) {
     if (Date.now() - lastExpandVerdictAt > 10 * 60 * 1000) {
       lastExpandVerdictAt = Date.now();
-      console.log(`[memeRotor] expansion budget spent (${expandsToday}/${EXPANSIONS_PER_DAY}); entries resume at UTC midnight`);
+      const cap = bands.length > 0 ? EXPANSIONS_PER_DAY : EXPANSIONS_PER_DAY + FLAT_REENTRY_RESERVE;
+      console.log(`[memeRotor] expansion budget spent (${expandsToday}/${cap}, ${bands.length} band(s) open); entries resume at UTC midnight`);
     }
     return;
   }
