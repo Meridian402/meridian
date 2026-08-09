@@ -227,7 +227,7 @@ contract MerdSeatRegistryTest is Test {
     function test_the_holder_records_the_entry_and_it_is_enumerable() public {
         assertEq(seat.registeredCount(), 0);
         vm.prank(alice);
-        seat.recordLaunch(1, TOKEN, TREASURY);
+        seat.register(1, TREASURY, TOKEN);
         (address token, address treasury, uint64 at) = seat.entryOf(1);
         assertEq(token, TOKEN);
         assertEq(treasury, TREASURY);
@@ -240,26 +240,37 @@ contract MerdSeatRegistryTest is Test {
     /// steps, so an entry is written once and then frozen, even for the holder.
     function test_an_entry_can_never_be_rewritten() public {
         vm.startPrank(alice);
-        seat.recordLaunch(1, TOKEN, TREASURY);
+        seat.register(1, TREASURY, TOKEN);
         vm.expectRevert(MerdSeat.AlreadyRegistered.selector);
-        seat.recordLaunch(1, address(0xDEAD), address(0xDEAD));
+        seat.register(1, address(0xDEAD), address(0xDEAD));
         vm.stopPrank();
     }
 
     /// Not even the contract owner can write or overwrite someone's entry.
     function test_only_the_holder_can_record_not_even_us() public {
         vm.expectRevert(MerdSeat.NotHolder.selector);
-        seat.recordLaunch(1, TOKEN, TREASURY); // deployer/owner
+        seat.register(1, TREASURY, TOKEN); // deployer/owner
         vm.prank(bob);
         vm.expectRevert(MerdSeat.NotHolder.selector);
-        seat.recordLaunch(1, TOKEN, TREASURY);
+        seat.register(1, TREASURY, TOKEN);
     }
 
     /// Selling the entry sells what it records: the new holder inherits the
     /// history rather than starting a fresh one.
+    /// A launchpad is optional: an entry with a treasury and no token is valid.
+    /// If this ever reverts, some launchpad has become mandatory by accident.
+    function test_a_treasury_with_no_token_is_a_valid_entry() public {
+        vm.prank(alice);
+        seat.register(1, TREASURY, address(0));
+        (address token, address treasury,) = seat.entryOf(1);
+        assertEq(token, address(0), "no token is a legitimate entry");
+        assertEq(treasury, TREASURY);
+        assertEq(seat.registeredCount(), 1);
+    }
+
     function test_the_entry_survives_a_sale_unchanged() public {
         vm.prank(alice);
-        seat.recordLaunch(1, TOKEN, TREASURY);
+        seat.register(1, TREASURY, TOKEN);
         vm.prank(alice);
         seat.transferFrom(alice, bob, 1);
         (address token, address treasury,) = seat.entryOf(1);
@@ -267,6 +278,6 @@ contract MerdSeatRegistryTest is Test {
         assertEq(treasury, TREASURY);
         vm.prank(bob);
         vm.expectRevert(MerdSeat.AlreadyRegistered.selector);
-        seat.recordLaunch(1, address(0xBEEF), address(0xBEEF));
+        seat.register(1, address(0xBEEF), address(0xBEEF));
     }
 }

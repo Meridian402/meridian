@@ -6,11 +6,14 @@ pragma solidity ^0.8.26;
 //
 // DRAFT · UNAUDITED · NOT DEPLOYED.
 //
-// A seat is not a share of Merd's desk and pays no dividend. It is a SEAT: its
-// token-bound account owns an AgentTreasury of its own, an agent works that
-// treasury under capped, revocable authority, and the seat holder is that
-// treasury's owner. Merd pays seats for work delivered, the way his desk
-// already pays scout bounties today.
+// An entry is not a share of Merd's desk and pays no dividend. Its token-bound
+// account owns an AgentTreasury of its own, an agent works that treasury under
+// capped, revocable authority, and the holder is that treasury's owner.
+//
+// What fills the treasury is deliberately NOT this contract's business. A PONS
+// launch pointing its fee wallet here is one way; a token launched elsewhere,
+// or capital the holder simply deposits, work just as well. Making one
+// launchpad mandatory would be a dependency dressed up as a feature.
 //
 // Selling the seat sells the desk under it, atomically, because the treasury's
 // owner is the seat's token-bound account and that account's owner is read
@@ -39,15 +42,20 @@ contract MerdSeat {
     /// What this entry is for, set at mint and immutable after.
     mapping(uint256 => string) public roleOf;
 
-    /// THE REGISTRY. Each entry records the PONS-launched token it governs and
-    /// the treasury its fees flow to. Written ONCE, by the holder, after the
-    /// launch exists; never rewritable, including by us. Enumerable from chain
-    /// alone, so Meridian being the frontend is a convenience, not a dependency.
+    /// THE REGISTRY. Each entry records a treasury an agent works, and
+    /// OPTIONALLY a token whose fees flow into it. Written ONCE, by the holder;
+    /// never rewritable, including by us. Enumerable from chain alone, so
+    /// Meridian being the frontend is a convenience, not a dependency.
     ///
-    /// An entry is a CLAIM whose truth is independently checkable: the launched
-    /// token's fee wallet must be the treasury recorded here, and anyone can
-    /// read both without asking us. We do not verify it on-chain because that
-    /// would weld this contract to one launchpad's interface forever.
+    /// LAUNCHPAD-AGNOSTIC BY DESIGN. The token field takes any address, or none
+    /// at all. Launching through PONS is one way to fill a treasury, not a
+    /// requirement: a holder may bring a token that launched elsewhere, or run
+    /// a treasury with no token behind it. Welding this registry to one
+    /// launchpad's interface would date it the moment a better one exists.
+    ///
+    /// An entry is a CLAIM whose truth is independently checkable: where a
+    /// token is named, its fee wallet should be the treasury recorded here, and
+    /// anyone can read both without asking us.
     struct Entry {
         address token;
         address treasury;
@@ -62,7 +70,7 @@ contract MerdSeat {
     event Approval(address indexed owner, address indexed spender, uint256 indexed id);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
     event SeatMinted(uint256 indexed id, address indexed to, string role);
-    event LaunchRegistered(uint256 indexed id, address indexed token, address indexed treasury, address holder);
+    event Registered(uint256 indexed id, address indexed treasury, address indexed token, address holder);
     event MaxSupplyLowered(uint256 from, uint256 to);
     event BaseURISet(string uri);
     event OwnershipTransferred(address indexed from, address indexed to);
@@ -164,17 +172,22 @@ contract MerdSeat {
         emit SeatMinted(id, to, role);
     }
 
-    /// Record what this entry governs: the token that launched and the treasury
-    /// its fees flow to. Callable once, by the holder, and then frozen forever.
-    /// Write-once is the whole point: a registry whose history can be edited is
-    /// a marketing page with extra steps.
-    function recordLaunch(uint256 id, address token, address treasury) external {
+    /// Record what this entry governs: the treasury an agent works, and
+    /// optionally a token whose fees flow into it. Callable once, by the
+    /// holder, and frozen forever after. Write-once is the whole point: a
+    /// registry whose history can be edited is a marketing page with extra
+    /// steps.
+    ///
+    /// `token` may be the zero address. A treasury with no token is a perfectly
+    /// good entry, and requiring one would make a launchpad mandatory by the
+    /// back door.
+    function register(uint256 id, address treasury, address token) external {
         if (msg.sender != _ownerOf[id]) revert NotHolder();
-        if (token == address(0) || treasury == address(0)) revert ToZero();
-        if (entryOf[id].token != address(0)) revert AlreadyRegistered();
+        if (treasury == address(0)) revert ToZero();
+        if (entryOf[id].treasury != address(0)) revert AlreadyRegistered();
         entryOf[id] = Entry({token: token, treasury: treasury, registeredAt: uint64(block.timestamp)});
         registeredIds.push(id);
-        emit LaunchRegistered(id, token, treasury, msg.sender);
+        emit Registered(id, treasury, token, msg.sender);
     }
 
     /// How many launches this registry knows about.
