@@ -561,6 +561,41 @@ export function shouldConcentrate(leaderWindowUsd: number, laggardWindowUsd: num
   return leaderWindowUsd >= MIN_PRINTING_USD && leaderWindowUsd >= 3 * laggardWindowUsd;
 }
 
+// COMPOUNDING NEEDS A PULSE, NOT A MEMORY.
+//
+// poolEarnWindow is a 24-HOUR cumulative, and MIN_PRINTING_USD is $1, so
+// "genuinely printing" has meant "earned a dollar at some point since this time
+// yesterday". A venue that stopped earning an hour ago still reads as the best
+// earner in the book, and the compounder keeps feeding it.
+//
+// Measured 2026-08-09, live:
+//
+//   15:22Z  working $30   accruing $0.15   fees $393.01
+//   15:30Z  working $92   accruing $0.15   fees $393.01
+//   15:36Z  working $153  accruing $0.00   fees $393.01
+//   15:44Z  working $214  accruing $0.00   fees $393.01
+//
+// Four expansions into STONKBROKER in twenty minutes while it fell 6.82%/hr.
+// Accrual went to zero and the fee counter never moved again. The desk was
+// buying a falling token with single-sided ETH bids that the price ran straight
+// through, leaving every band out of range, and then reading its own 24-hour
+// memory as proof the venue was still worth adding to.
+//
+// This is the same window illusion the probe path already names and guards
+// against ("window remembers a move, tape is calm and heavy"). The compound path
+// had no equivalent. So the last time a pool actually earned is now recorded,
+// and compounding requires it to be RECENT. The 24-hour window keeps its other
+// jobs (migration's "barely earned" test, the laggard comparison) where a long
+// memory is the right instrument.
+const COMPOUND_FRESH_MS = 45 * 60 * 1000;
+const poolLastEarnedAt = new Map<string, number>();
+
+/** True when a pool has earned recently enough to deserve more capital. */
+export function earningNow(lastEarnedAt: number | undefined, now: number, freshMs = COMPOUND_FRESH_MS): boolean {
+  if (lastEarnedAt == null) return false; // never seen earning: not a compound target
+  return now - lastEarnedAt <= freshMs;
+}
+
 function updateEarnTracking(bands: MemeBand[]): void {
   const now = Date.now();
   for (const b of bands) {
@@ -573,6 +608,9 @@ function updateEarnTracking(bands: MemeBand[]): void {
       }
       w.usd += b.feesUsd - prev;
       poolEarnWindow.set(b.poolId, w);
+      // The moment of earning, kept separately from the cumulative. This is the
+      // only place a pool is observed actually paying us.
+      poolLastEarnedAt.set(b.poolId, now);
     }
     bandFeesPrev.set(b.tokenId, b.feesUsd);
   }
@@ -587,8 +625,13 @@ function bestEarner(bands: MemeBand[], idleCapitalUsd = 0): { pool: EthPool; poo
   // sat out a 548-swap/hr tape). Callers that move only band capital pass 0.
   const totalBook = bands.reduce((s, b) => s + b.valueUsd, 0) + idleCapitalUsd;
   let best: { pool: EthPool; poolId: string; usd: number } | null = null;
+  const now = Date.now();
   for (const [pid, w] of poolEarnWindow) {
     if (w.usd < MIN_PRINTING_USD) continue;
+    // Cumulative says it HAS earned; this says it IS earning. Both, or no
+    // capital: a venue that stopped paying an hour ago is not a compound
+    // target no matter what the 24-hour window remembers.
+    if (!earningNow(poolLastEarnedAt.get(pid), now)) continue;
     const poolBands = bands.filter((b) => b.poolId === pid);
     if (poolBands.length === 0) continue;
     const share = poolBands.reduce((s, b) => s + b.valueUsd, 0) / (totalBook || 1);
@@ -2012,6 +2055,7 @@ export function saveRotorState(): void {
       heldSince: Object.fromEntries(tokenHeldSince),
       refPrice: Object.fromEntries(tokenRefPriceEth),
       earnWindow: Object.fromEntries(poolEarnWindow),
+      lastEarnedAt: Object.fromEntries(poolLastEarnedAt),
       feesPrev: Object.fromEntries(bandFeesPrev),
       pulse: Object.fromEntries([...swapPulse].map(([k, v]) => [k, v.slice(-200)])),
       breaker: { bookHwm, bookHwmDay, haltDay },
@@ -2038,6 +2082,7 @@ function loadRotorState(): void {
       heldSince?: Record<string, number>;
       refPrice?: Record<string, number>;
       earnWindow?: Record<string, { usd: number; start: number }>;
+      lastEarnedAt?: Record<string, number>;
       feesPrev?: Record<string, number>;
       pulse?: Record<string, number[]>;
       breaker?: { bookHwm?: number; bookHwmDay?: string; haltDay?: string };
@@ -2050,6 +2095,9 @@ function loadRotorState(): void {
     for (const [k, v] of Object.entries(s.heldSince ?? {})) tokenHeldSince.set(k, v);
     for (const [k, v] of Object.entries(s.refPrice ?? {})) tokenRefPriceEth.set(k, v);
     for (const [k, v] of Object.entries(s.earnWindow ?? {})) poolEarnWindow.set(k, v);
+    // Absent on an older state file: an empty map fails CLOSED (no compounding
+    // until a pool is observed earning again), which is the safe direction.
+    for (const [k, v] of Object.entries(s.lastEarnedAt ?? {})) poolLastEarnedAt.set(k, v as number);
     for (const [k, v] of Object.entries(s.feesPrev ?? {})) bandFeesPrev.set(k, v);
     for (const [k, v] of Object.entries(s.pulse ?? {})) swapPulse.set(k, v);
     // The daily budgets survive a redeploy too: resetting them mid-crash is
