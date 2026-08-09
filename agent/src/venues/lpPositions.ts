@@ -354,6 +354,11 @@ interface ChainPosition {
 // blocks, a response measured in bytes forever. In-memory only: a restart
 // pays one full scan and is incremental again from the second call.
 const scanCursor = new Map<string, { lastBlock: bigint; owned: Map<string, bigint> }>();
+// The cold scan is chunked so its RESPONSE is bounded, which is what actually
+// outgrew the client. Making the range incremental fixed the steady state and
+// left the restart path scanning from genesis in one call, which is exactly the
+// call that truncated on 2026-08-09 and cost the desk 7 of its 9 bands.
+const SCAN_CHUNK_BLOCKS = 2_000_000n;
 
 export async function discoverOwnedPositions(wallet: Address): Promise<ChainPosition[]> {
   const client = getPublicClient();
@@ -363,13 +368,50 @@ export async function discoverOwnedPositions(wallet: Address): Promise<ChainPosi
   // Overlap one block on resume so a same-block race can never drop an event;
   // the Map semantics make replays harmless.
   const fromBlock = cur ? (cur.lastBlock > 0n ? cur.lastBlock : 0n) : 0n;
-  const [received, sent] = await Promise.all([
-    client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { to: wallet }, fromBlock, toBlock: head }),
-    client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { from: wallet }, fromBlock, toBlock: head }),
-  ]);
-  const owned = cur ? cur.owned : new Map<string, bigint>();
-  for (const l of received) owned.set((l.args as { tokenId: bigint }).tokenId.toString(), (l.args as { tokenId: bigint }).tokenId);
-  for (const l of sent) owned.delete((l.args as { tokenId: bigint }).tokenId.toString());
+
+  // Build into a COPY. A scan that turns out to be incomplete must not leave
+  // the cursor's ownership set half-mutated, or the damage outlives the call.
+  const owned = cur ? new Map(cur.owned) : new Map<string, bigint>();
+  for (let from = fromBlock; from <= head; from += SCAN_CHUNK_BLOCKS + 1n) {
+    const to = from + SCAN_CHUNK_BLOCKS > head ? head : from + SCAN_CHUNK_BLOCKS;
+    const [received, sent] = await Promise.all([
+      client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { to: wallet }, fromBlock: from, toBlock: to }),
+      client.getLogs({ address: POSITION_MANAGER, event: xferEvent, args: { from: wallet }, fromBlock: from, toBlock: to }),
+    ]);
+    for (const l of received) owned.set((l.args as { tokenId: bigint }).tokenId.toString(), (l.args as { tokenId: bigint }).tokenId);
+    for (const l of sent) owned.delete((l.args as { tokenId: bigint }).tokenId.toString());
+  }
+
+  // THE CHAIN IS THE INVARIANT, AND IT IS CHECKED EVERY TIME.
+  //
+  // A log scan can soft-fail: answer with FEWER events than exist and no error.
+  // The old code committed the cursor unconditionally, so a truncated scan was
+  // written down as the truth and every later call started after the gap. The
+  // loss was permanent for the life of the process, and silent.
+  //
+  // Measured 2026-08-09: a deploy at 16:58Z cleared the in-memory cursor, the
+  // resulting from-genesis scan truncated, and the desk went from 9 bands to 2.
+  // The other 7 were still owned on-chain and still had liquidity in them, but
+  // nothing could see them, so nothing re-quoted them, collected their fees, or
+  // stopped them out. About $385 of the book was orphaned by a display path.
+  //
+  // balanceOf is the answer the chain gives directly and cannot truncate. If we
+  // discovered fewer positions than the wallet holds, the scan is garbage: do
+  // not commit it, do not return it, and leave the previous cursor intact so a
+  // good picture is not replaced by a bad one. Callers already treat a throw as
+  // "keep the last good view" rather than "the book is empty".
+  const heldOnChain = await client.readContract({
+    address: POSITION_MANAGER,
+    abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
+    functionName: "balanceOf",
+    args: [wallet],
+  });
+  if (BigInt(owned.size) < heldOnChain) {
+    throw new Error(
+      `position discovery found ${owned.size} but the wallet holds ${heldOnChain} position NFTs: partial log response, refusing to commit a truncated ownership set`,
+    );
+  }
+
   scanCursor.set(key, { lastBlock: head, owned });
   if (owned.size === 0) return [];
 
