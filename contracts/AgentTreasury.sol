@@ -206,10 +206,16 @@ contract AgentTreasury {
         return ret;
     }
 
-    /// Uncapped on purpose: burning destroys value rather than moving it, so a
-    /// stolen agent key gains nothing by calling this. The destination is a
-    /// constant for the same reason.
+    /// Uncapped on purpose: burning a token destroys value rather than moving
+    /// it, so a stolen agent key gains nothing by calling this, and the
+    /// destination is a constant for the same reason.
+    ///
+    /// NATIVE IS REFUSED. Burning ETH is never a thing a treasury wants: you
+    /// buy the token back and burn THAT. Allowing it would hand a compromised
+    /// agent a way to destroy the whole balance for no profit, and "cannot be
+    /// stolen" is not the same promise as "cannot be destroyed".
     function agentBurn(address token, uint256 amount) external onlyAgent nonReentrant {
+        if (token == NATIVE) revert NotAllowed();
         _send(token, BURN, amount);
         emit AgentBurned(token, amount);
     }

@@ -184,6 +184,16 @@ contract AgentTreasuryTest is Test {
         assertEq(t.remainingThisEpoch(address(tok)), 100 ether, "burning must not consume the pay cap");
     }
 
+    /// Griefing, not theft: a compromised agent must not be able to destroy the
+    /// treasury's liquid balance for no gain. Burning ETH is never desirable
+    /// (you buy the token back and burn that), so it is refused outright.
+    function test_agent_cannot_burn_native() public {
+        vm.prank(agent);
+        vm.expectRevert(AgentTreasury.NotAllowed.selector);
+        t.agentBurn(NATIVE, 50 ether);
+        assertEq(address(t).balance, 100 ether, "the balance must be untouched");
+    }
+
     // ── 4. the owner ─────────────────────────────────────────────────────────
 
     function test_owner_is_never_rate_limited() public {
