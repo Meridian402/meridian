@@ -80,7 +80,13 @@ const GLOBAL_COOLDOWN_MS = 7 * 60 * 1000;
 // every other band globally. Tuned 2026-08-05: CASHCAT trended +5%/hr and
 // chop-tuned clocks left every bid 1.7-7% stale, earning nothing.
 const PUMP_CHASE_MIN_MS = 3 * 60 * 1000;
-const PUMP_CHASE_POOL_COOLDOWN_MS = 5 * 60 * 1000;
+// 5min -> 90s on 2026-08-09. The cooldown existed to stop a price wiggle
+// thrashing every band in a pool, but a re-quote must now be worth two
+// spacings to spend anything, so churn is already blocked at the source.
+// What the cooldown was actually buying was delay: four stranded bids in one
+// pool recovered one at a time, leaving the whole venue earning nothing for
+// fifteen minutes or more while the market traded without us.
+const PUMP_CHASE_POOL_COOLDOWN_MS = 90 * 1000;
 // 24 -> 36 with the pump-chase clock (2026-08-05): the cap is a runaway
 // brake, not a pacing tool, and at 24 a trending day would freeze the desk
 // out of range by evening, which is the exact failure the chase clock fixes.
