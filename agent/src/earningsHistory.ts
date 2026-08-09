@@ -27,6 +27,8 @@ export interface EarningsPoint {
   eth: number;
   /** Which source paid this event. */
   src: "merd-fees" | "desk-skim";
+  /** The on-chain receipt: every point is one real transaction. */
+  tx: string;
 }
 
 let cache: { at: number; points: EarningsPoint[] } | null = null;
@@ -73,7 +75,7 @@ export async function earningsTimeline(): Promise<EarningsPoint[]> {
     pages(`${BS}/addresses/${TREASURY_WALLET}/transactions`),
   ]);
 
-  const events: { ts: number; eth: number; src: EarningsPoint["src"] }[] = [];
+  const events: { ts: number; eth: number; src: EarningsPoint["src"]; tx: string }[] = [];
   for (const t of tokenXfers) {
     const tok = (t as { token?: { address_hash?: string; address?: string } }).token ?? {};
     const addr = String(tok.address_hash ?? tok.address ?? "").toLowerCase();
@@ -82,7 +84,8 @@ export async function earningsTimeline(): Promise<EarningsPoint[]> {
     if (to !== T || addr !== WETH || from !== locker) continue;
     const v = Number((t as { total?: { value?: string } }).total?.value ?? 0) / 1e18;
     const ts = Date.parse(String((t as { timestamp?: string }).timestamp ?? ""));
-    if (v > 0 && Number.isFinite(ts)) events.push({ ts, eth: v, src: "merd-fees" });
+    const tx = String((t as { transaction_hash?: string; tx_hash?: string }).transaction_hash ?? (t as { tx_hash?: string }).tx_hash ?? "");
+    if (v > 0 && Number.isFinite(ts)) events.push({ ts, eth: v, src: "merd-fees", tx });
   }
   for (const t of txs) {
     const to = String((t as { to?: { hash?: string } }).to?.hash ?? "").toLowerCase();
@@ -91,14 +94,15 @@ export async function earningsTimeline(): Promise<EarningsPoint[]> {
     if ((t as { status?: string }).status !== "ok") continue;
     const v = Number((t as { value?: string }).value ?? 0) / 1e18;
     const ts = Date.parse(String((t as { timestamp?: string }).timestamp ?? ""));
-    if (v > 0 && Number.isFinite(ts)) events.push({ ts, eth: v, src: "desk-skim" });
+    const tx = String((t as { hash?: string }).hash ?? "");
+    if (v > 0 && Number.isFinite(ts)) events.push({ ts, eth: v, src: "desk-skim", tx });
   }
 
   events.sort((a, b) => a.ts - b.ts);
   let cum = 0;
   const points: EarningsPoint[] = events.map((e) => {
     cum += e.eth;
-    return { ts: e.ts, eth: Math.round(cum * 1e6) / 1e6, src: e.src };
+    return { ts: e.ts, eth: Math.round(cum * 1e6) / 1e6, src: e.src, tx: e.tx };
   });
   cache = { at: Date.now(), points };
   return points;
