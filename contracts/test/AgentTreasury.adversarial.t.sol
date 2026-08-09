@@ -110,6 +110,7 @@ contract RejectingPayee {
 }
 
 contract AgentTreasuryAdversarialTest is Test {
+    address constant MERD_TREASURY = 0x475C1fe4d1e7A703eaca6141978b04010e410Bf4;
     AgentTreasury t;
     GoodToken tok;
     address owner = address(0xA11CE);
@@ -120,7 +121,7 @@ contract AgentTreasuryAdversarialTest is Test {
     uint256 constant CAP = 1 ether;
 
     function setUp() public {
-        t = new AgentTreasury(owner, agent, EPOCH);
+        t = new AgentTreasury(owner, agent, EPOCH, 100, MERD_TREASURY);
         NATIVE = t.NATIVE();
         tok = new GoodToken();
         vm.deal(address(t), 100 ether);

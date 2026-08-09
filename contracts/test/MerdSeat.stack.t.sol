@@ -42,6 +42,7 @@ contract MockRegistry {
 }
 
 contract MerdSeatStackTest is Test {
+    address constant MERD_TREASURY = 0x475C1fe4d1e7A703eaca6141978b04010e410Bf4;
     MerdSeat seat;
     SeatAccount account;
     AgentTreasury treasury;
@@ -66,7 +67,7 @@ contract MerdSeatStackTest is Test {
         account = SeatAccount(payable(new MockRegistry().createAccount(address(new SeatAccount()), block.chainid, address(seat), SEAT_ID)));
 
         // The seat's account owns the treasury. Nobody else does, including us.
-        treasury = new AgentTreasury(address(account), agent, EPOCH);
+        treasury = new AgentTreasury(address(account), agent, EPOCH, 100, MERD_TREASURY);
         NATIVE = treasury.NATIVE();
         vm.deal(address(treasury), 10 ether);
     }

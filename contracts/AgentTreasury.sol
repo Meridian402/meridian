@@ -53,6 +53,16 @@ contract AgentTreasury {
     address public constant BURN = 0x000000000000000000000000000000000000dEaD;
     /// Ceiling on epoch length, so an owner cannot be tricked into a cap that never resets.
     uint256 public constant MAX_EPOCH = 30 days;
+    /// Hard ceiling on the protocol fee, enforced in the constructor. A fee
+    /// that could be raised later is exactly the promise a seat holder cannot
+    /// verify, so the ceiling is in the bytecode and there is no setter.
+    uint256 public constant MAX_PROTOCOL_FEE_BPS = 100; // 1.00%
+
+    /// Merd's cut of what this treasury EARNS, in basis points, and where it
+    /// goes. Both immutable: set once at deployment, readable by anyone,
+    /// changeable by no one, including us.
+    uint256 public immutable protocolFeeBps;
+    address public immutable protocolRecipient;
 
     address public owner;
     address public pendingOwner;
@@ -85,6 +95,7 @@ contract AgentTreasury {
     event AgentBurned(address indexed token, uint256 amount);
     event AgentCalled(address indexed adapter, uint256 value, bytes4 selector);
     event OwnerWithdrew(address indexed token, address indexed to, uint256 amount);
+    event FeesCollected(address indexed token, uint256 gross, uint256 protocolFee);
 
     error NotOwner();
     error NotAgent();
@@ -94,6 +105,7 @@ contract AgentTreasury {
     error Reentrancy();
     error ZeroAddress();
     error EpochTooLong();
+    error FeeTooHigh();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -115,9 +127,19 @@ contract AgentTreasury {
         locked = false;
     }
 
-    constructor(address owner_, address agent_, uint256 epochLength_) {
+    constructor(
+        address owner_,
+        address agent_,
+        uint256 epochLength_,
+        uint256 protocolFeeBps_,
+        address protocolRecipient_
+    ) {
         if (owner_ == address(0)) revert ZeroAddress();
         if (epochLength_ == 0 || epochLength_ > MAX_EPOCH) revert EpochTooLong();
+        if (protocolFeeBps_ > MAX_PROTOCOL_FEE_BPS) revert FeeTooHigh();
+        if (protocolFeeBps_ > 0 && protocolRecipient_ == address(0)) revert ZeroAddress();
+        protocolFeeBps = protocolFeeBps_;
+        protocolRecipient = protocolRecipient_;
         owner = owner_;
         agent = agent_;
         epochLength = epochLength_;
@@ -206,6 +228,35 @@ contract AgentTreasury {
         return ret;
     }
 
+    /// Collect earnings through an allowlisted adapter and pay Merd's cut of
+    /// exactly what arrived. The fee is measured from the BALANCE DELTA, so the
+    /// agent cannot understate it and the owner cannot be overcharged: whatever
+    /// the adapter actually returned is what gets taxed, and only the increase.
+    ///
+    /// This is the entry point Merd's engine uses to harvest LP fees. Principal
+    /// coming back through agentCall is untouched, because principal is not
+    /// earnings.
+    function agentCollectFees(address adapter, uint256 value, bytes calldata data, address token)
+        external
+        onlyAgent
+        nonReentrant
+        returns (uint256 gross, uint256 fee)
+    {
+        if (!adapterAllowed[adapter]) revert NotAllowed();
+        uint256 before = _balanceOfSelf(token);
+        (bool ok, bytes memory ret) = adapter.call{value: value}(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+        uint256 after_ = _balanceOfSelf(token);
+        gross = after_ > before ? after_ - before : 0;
+        fee = (gross * protocolFeeBps) / 10_000;
+        if (fee > 0) _send(token, protocolRecipient, fee);
+        emit FeesCollected(token, gross, fee);
+    }
+
     /// Uncapped on purpose: burning a token destroys value rather than moving
     /// it, so a stolen agent key gains nothing by calling this, and the
     /// destination is a constant for the same reason.
@@ -261,6 +312,10 @@ contract AgentTreasury {
     }
 
     // ── internals ────────────────────────────────────────────────────────────
+
+    function _balanceOfSelf(address token) private view returns (uint256) {
+        return token == NATIVE ? address(this).balance : IERC20(token).balanceOf(address(this));
+    }
 
     function _send(address token, address to, uint256 amount) private {
         if (token == NATIVE) {

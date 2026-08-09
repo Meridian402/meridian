@@ -46,6 +46,7 @@ interface IERC6551Registry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 contract MerdSeatForkTest is Test {
+    address constant MERD_TREASURY = 0x475C1fe4d1e7A703eaca6141978b04010e410Bf4;
     IERC6551Registry constant REGISTRY = IERC6551Registry(0x000000006551c19487814612e58FE06813775758);
 
     MerdSeat seat;
@@ -109,7 +110,7 @@ contract MerdSeatForkTest is Test {
     ///    and selling the seat hands the whole desk to the buyer.
     function test_full_stack_against_the_live_registry() public onFork {
         address acct = REGISTRY.createAccount(address(implementation), bytes32(0), block.chainid, address(seat), SEAT_ID);
-        AgentTreasury treasury = new AgentTreasury(acct, agent, 7 days);
+        AgentTreasury treasury = new AgentTreasury(acct, agent, 7 days, 100, MERD_TREASURY);
         address NATIVE = treasury.NATIVE();
         vm.deal(address(treasury), 5 ether);
 

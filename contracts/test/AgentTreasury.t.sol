@@ -45,6 +45,7 @@ contract ThievingAdapter {
 }
 
 contract AgentTreasuryTest is Test {
+    address constant MERD_TREASURY = 0x475C1fe4d1e7A703eaca6141978b04010e410Bf4;
     AgentTreasury t;
     MockToken tok;
     address owner = address(0xA11CE);
@@ -58,7 +59,7 @@ contract AgentTreasuryTest is Test {
     address BURN;
 
     function setUp() public {
-        t = new AgentTreasury(owner, agent, EPOCH);
+        t = new AgentTreasury(owner, agent, EPOCH, 100, MERD_TREASURY);
         NATIVE = t.NATIVE();
         BURN = t.BURN();
         tok = new MockToken();
@@ -260,5 +261,90 @@ contract AgentTreasuryTest is Test {
         (bool ok,) = address(t).call{value: 3 ether}("");
         assertTrue(ok);
         assertEq(address(t).balance, 103 ether);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The protocol fee: 1% of what a seat's agent EARNS goes to Merd's treasury.
+// Enforced in the contract rather than in our engine, so a seat holder can
+// verify the rate and verify that we cannot change it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Pays the treasury as if it were harvesting LP fees.
+contract EarningAdapter {
+    function harvest(uint256 amount) external payable {
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok, "pay");
+    }
+}
+
+contract AgentTreasuryFeeTest is Test {
+    address constant MERD_TREASURY = 0x475C1fe4d1e7A703eaca6141978b04010e410Bf4;
+    AgentTreasury t;
+    EarningAdapter adapter;
+    address owner = address(0xA11CE);
+    address agent = address(0xBEEF);
+    address NATIVE;
+
+    function setUp() public {
+        t = new AgentTreasury(owner, agent, 7 days, 100, MERD_TREASURY);
+        NATIVE = t.NATIVE();
+        adapter = new EarningAdapter();
+        vm.deal(address(adapter), 100 ether);
+        vm.prank(owner);
+        t.setAdapter(address(adapter), true);
+    }
+
+    function test_merd_takes_one_percent_of_what_arrives() public {
+        uint256 before = MERD_TREASURY.balance;
+        vm.prank(agent);
+        (uint256 gross, uint256 fee) =
+            t.agentCollectFees(address(adapter), 0, abi.encodeCall(EarningAdapter.harvest, (10 ether)), NATIVE);
+        assertEq(gross, 10 ether, "the fee is measured from what actually arrived");
+        assertEq(fee, 0.1 ether, "1% of it");
+        assertEq(MERD_TREASURY.balance - before, 0.1 ether, "and it reaches Merd");
+        assertEq(address(t).balance, 9.9 ether, "the seat keeps the other 99%");
+    }
+
+    /// The rate is immutable. There is no setter, and the constructor refuses
+    /// anything above 1%, so nobody can raise it after a seat is sold.
+    function test_the_fee_can_never_be_raised() public {
+        assertEq(t.protocolFeeBps(), 100);
+        vm.expectRevert(AgentTreasury.FeeTooHigh.selector);
+        new AgentTreasury(owner, agent, 7 days, 101, MERD_TREASURY);
+        // and the compiler is the proof there is no setter: any call reverts
+        (bool ok,) = address(t).call(abi.encodeWithSignature("setProtocolFee(uint256)", 500));
+        assertFalse(ok, "no path exists to change it");
+    }
+
+    function test_no_earnings_means_no_fee() public {
+        uint256 before = MERD_TREASURY.balance;
+        vm.prank(agent);
+        (uint256 gross, uint256 fee) =
+            t.agentCollectFees(address(adapter), 0, abi.encodeCall(EarningAdapter.harvest, (0)), NATIVE);
+        assertEq(gross, 0);
+        assertEq(fee, 0);
+        assertEq(MERD_TREASURY.balance, before, "a barren week costs the seat nothing");
+    }
+
+    /// Principal already sitting in the treasury is not earnings and must never
+    /// be taxed: only the increase this call produced.
+    function test_existing_balance_is_never_taxed() public {
+        vm.deal(address(t), 50 ether); // the seat's own capital
+        uint256 before = MERD_TREASURY.balance;
+        vm.prank(agent);
+        t.agentCollectFees(address(adapter), 0, abi.encodeCall(EarningAdapter.harvest, (4 ether)), NATIVE);
+        assertEq(MERD_TREASURY.balance - before, 0.04 ether, "taxed on the 4, not the 54");
+    }
+
+    function test_only_the_agent_can_collect_and_only_via_allowlisted_adapters() public {
+        vm.prank(owner);
+        vm.expectRevert(AgentTreasury.NotAgent.selector);
+        t.agentCollectFees(address(adapter), 0, abi.encodeCall(EarningAdapter.harvest, (1 ether)), NATIVE);
+
+        EarningAdapter rogue = new EarningAdapter();
+        vm.prank(agent);
+        vm.expectRevert(AgentTreasury.NotAllowed.selector);
+        t.agentCollectFees(address(rogue), 0, abi.encodeCall(EarningAdapter.harvest, (1 ether)), NATIVE);
     }
 }
