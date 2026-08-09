@@ -59,7 +59,7 @@ contract MerdSeatForkTest is Test {
     function setUp() public {
         // Skip cleanly when run without a fork, so the default suite stays green.
         if (address(REGISTRY).code.length == 0) return;
-        seat = new MerdSeat(12, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
+        seat = new MerdSeat(333, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
         seat.mint(alice, SEAT_ID, "venue-maker");
         implementation = new SeatAccount();
     }

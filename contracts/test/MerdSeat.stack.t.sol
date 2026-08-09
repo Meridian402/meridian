@@ -57,7 +57,7 @@ contract MerdSeatStackTest is Test {
     address NATIVE;
 
     function setUp() public {
-        seat = new MerdSeat(12, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
+        seat = new MerdSeat(333, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
         seat.mint(alice, SEAT_ID, "venue-maker");
 
         // The canonical registry deploys the implementation as a proxy that
@@ -178,6 +178,20 @@ contract MerdSeatStackTest is Test {
 
     // ── supply honesty ───────────────────────────────────────────────────────
 
+    /// 333 is the batch-one cap and the contract offers no way to exceed it.
+    /// A second batch, if there ever is one, is a separate contract: that is
+    /// what lets a holder verify their cap from bytecode instead of a promise.
+    function test_batch_one_is_capped_at_333_forever() public {
+        assertEq(seat.maxSupply(), 333);
+        vm.expectRevert(MerdSeat.CannotRaiseSupply.selector);
+        seat.lowerMaxSupply(334);
+        vm.expectRevert(MerdSeat.CannotRaiseSupply.selector);
+        seat.lowerMaxSupply(1000);
+        // and no other path exists to change it
+        (bool ok,) = address(seat).call(abi.encodeWithSignature("setMaxSupply(uint256)", 1000));
+        assertFalse(ok, "there is no raise function to find");
+    }
+
     function test_supply_can_shrink_but_never_grow() public {
         seat.lowerMaxSupply(3);
         assertEq(seat.maxSupply(), 3);
@@ -220,7 +234,7 @@ contract MerdSeatRegistryTest is Test {
     address constant TREASURY = address(0x7EA5);
 
     function setUp() public {
-        seat = new MerdSeat(12, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
+        seat = new MerdSeat(333, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
         seat.mint(alice, 1, "launch");
     }
 
@@ -310,7 +324,7 @@ contract MerdSeatActivationTest is Test {
 
     function setUp() public {
         merd = new MockMerd();
-        seat = new MerdSeat(12, "https://meridian402.xyz/seat/", address(merd), FEE);
+        seat = new MerdSeat(333, "https://meridian402.xyz/seat/", address(merd), FEE);
         seat.mint(alice, 1, "desk");
         merd.mint(alice, 5_000_000e18);
         merd.mint(bob, 5_000_000e18);

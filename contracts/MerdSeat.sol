@@ -19,11 +19,15 @@ pragma solidity ^0.8.26;
 // owner is the seat's token-bound account and that account's owner is read
 // through to whoever holds this NFT.
 //
-// SUPPLY IS DELIBERATELY SMALL AND HONEST. The strategy saturates: a hundred
-// seats all quoting the same thin pool would compete for one fee stream and
-// earn each other less. Seats are minted against work that actually exists, so
-// maxSupply is set to the number of distinct roles the desk can genuinely use
-// and is LOWERABLE but never raisable.
+// SUPPLY IS DELIBERATELY SMALL AND HONEST, AND CAN ONLY EVER SHRINK. The
+// strategy saturates: entries all quoting the same thin pool would compete for
+// one fee stream and earn each other less.
+//
+// A LATER BATCH IS A DIFFERENT CONTRACT, NOT MORE OF THIS ONE. That is the
+// point of having no way to raise maxSupply. A holder here can verify, from
+// bytecode rather than from a promise, that their collection's cap is final.
+// Shipping a v2 with different mechanics stays perfectly possible; diluting v1
+// to do it does not.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface IERC20 {
