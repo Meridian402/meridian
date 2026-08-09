@@ -26,6 +26,10 @@ pragma solidity ^0.8.26;
 // and is LOWERABLE but never raisable.
 // ─────────────────────────────────────────────────────────────────────────────
 
+interface IERC20 {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+
 contract MerdSeat {
     string public constant name = "Merd Desk Seat";
     string public constant symbol = "SEAT";
@@ -63,6 +67,20 @@ contract MerdSeat {
     }
 
     mapping(uint256 => Entry) public entryOf;
+
+    /// ACTIVATION. An entry only gets the engine while it is active, and
+    /// activation is bought by BURNING MERD. Transferring clears it, so every
+    /// secondary sale burns again: trading the asset shrinks the token supply
+    /// rather than merely moving the asset around.
+    ///
+    /// This is a fee for a service, not a subscription to a yield. An inactive
+    /// entry still owns its treasury outright and can withdraw everything at
+    /// any time; what it loses is Merd's engine working the position.
+    IERC20 public immutable merd;
+    address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
+    uint256 public activationFee;
+    mapping(uint256 => uint64) public activatedAt;
+    uint256 public totalBurnedForActivation;
     /// Every id that has been registered, in order, so the registry can be walked.
     uint256[] public registeredIds;
 
@@ -71,6 +89,9 @@ contract MerdSeat {
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
     event SeatMinted(uint256 indexed id, address indexed to, string role);
     event Registered(uint256 indexed id, address indexed treasury, address indexed token, address holder);
+    event Activated(uint256 indexed id, address indexed holder, uint256 merdBurned);
+    event DeactivatedByTransfer(uint256 indexed id, address indexed from, address indexed to);
+    event ActivationFeeSet(uint256 fee);
     event MaxSupplyLowered(uint256 from, uint256 to);
     event BaseURISet(string uri);
     event OwnershipTransferred(address indexed from, address indexed to);
@@ -85,16 +106,21 @@ contract MerdSeat {
     error UnsafeRecipient();
     error AlreadyRegistered();
     error NotHolder();
+    error AlreadyActive();
+    error BurnFailed();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
         _;
     }
 
-    constructor(uint256 maxSupply_, string memory baseURI_) {
+    constructor(uint256 maxSupply_, string memory baseURI_, address merd_, uint256 activationFee_) {
         owner = msg.sender;
         maxSupply = maxSupply_;
         baseURI = baseURI_;
+        merd = IERC20(merd_);
+        activationFee = activationFee_;
+        emit ActivationFeeSet(activationFee_);
         emit OwnershipTransferred(address(0), msg.sender);
     }
 
@@ -139,6 +165,11 @@ contract MerdSeat {
         }
         _ownerOf[id] = to;
         delete getApproved[id];
+        // Activation does not travel. The buyer re-activates, and burns again.
+        if (activatedAt[id] != 0) {
+            activatedAt[id] = 0;
+            emit DeactivatedByTransfer(id, from, to);
+        }
         emit Transfer(from, to, id);
     }
 
@@ -188,6 +219,31 @@ contract MerdSeat {
         entryOf[id] = Entry({token: token, treasury: treasury, registeredAt: uint64(block.timestamp)});
         registeredIds.push(id);
         emit Registered(id, treasury, token, msg.sender);
+    }
+
+    /// Burn MERD to put this entry back to work. The fee is pulled from the
+    /// caller and sent to the dead address in the same transaction, so the burn
+    /// is a fact of the activation rather than a promise about it.
+    function activate(uint256 id) external {
+        if (msg.sender != _ownerOf[id]) revert NotHolder();
+        if (activatedAt[id] != 0) revert AlreadyActive();
+        uint256 fee = activationFee;
+        if (fee > 0) {
+            if (!merd.transferFrom(msg.sender, BURN_ADDRESS, fee)) revert BurnFailed();
+            totalBurnedForActivation += fee;
+        }
+        activatedAt[id] = uint64(block.timestamp);
+        emit Activated(id, msg.sender, fee);
+    }
+
+    /// What Merd's engine reads to decide whether to work an entry's treasury.
+    function isActive(uint256 id) external view returns (bool) {
+        return activatedAt[id] != 0;
+    }
+
+    function setActivationFee(uint256 fee) external onlyOwner {
+        activationFee = fee;
+        emit ActivationFeeSet(fee);
     }
 
     /// How many launches this registry knows about.

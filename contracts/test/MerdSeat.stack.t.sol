@@ -57,7 +57,7 @@ contract MerdSeatStackTest is Test {
     address NATIVE;
 
     function setUp() public {
-        seat = new MerdSeat(12, "https://meridian402.xyz/seat/");
+        seat = new MerdSeat(12, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
         seat.mint(alice, SEAT_ID, "venue-maker");
 
         // The canonical registry deploys the implementation as a proxy that
@@ -220,7 +220,7 @@ contract MerdSeatRegistryTest is Test {
     address constant TREASURY = address(0x7EA5);
 
     function setUp() public {
-        seat = new MerdSeat(12, "https://meridian402.xyz/seat/");
+        seat = new MerdSeat(12, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
         seat.mint(alice, 1, "launch");
     }
 
@@ -279,5 +279,99 @@ contract MerdSeatRegistryTest is Test {
         vm.prank(bob);
         vm.expectRevert(MerdSeat.AlreadyRegistered.selector);
         seat.register(1, address(0xBEEF), address(0xBEEF));
+    }
+}
+
+/// A MERD stand-in that behaves like the real thing for burn accounting.
+contract MockMerd {
+    mapping(address => uint256) public balanceOf;
+    function mint(address to, uint256 a) external { balanceOf[to] += a; }
+    function transferFrom(address from, address to, uint256 a) external returns (bool) {
+        require(balanceOf[from] >= a, "balance");
+        balanceOf[from] -= a;
+        balanceOf[to] += a;
+        return true;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Activation: the entry only gets the engine while it is active, activation
+// burns MERD, and transferring clears it. The point of the last part is that
+// every secondary sale burns AGAIN, so trading the asset shrinks the token
+// supply rather than just moving the asset around.
+// ─────────────────────────────────────────────────────────────────────────────
+contract MerdSeatActivationTest is Test {
+    MerdSeat seat;
+    MockMerd merd;
+    address alice = address(0xA11CE);
+    address bob = address(0xB0B);
+    address constant DEAD = 0x000000000000000000000000000000000000dEaD;
+    uint256 constant FEE = 1_000_000e18;
+
+    function setUp() public {
+        merd = new MockMerd();
+        seat = new MerdSeat(12, "https://meridian402.xyz/seat/", address(merd), FEE);
+        seat.mint(alice, 1, "desk");
+        merd.mint(alice, 5_000_000e18);
+        merd.mint(bob, 5_000_000e18);
+    }
+
+    function test_activation_burns_merd_and_turns_the_engine_on() public {
+        assertFalse(seat.isActive(1));
+        vm.prank(alice);
+        seat.activate(1);
+        assertTrue(seat.isActive(1), "the engine reads this");
+        assertEq(merd.balanceOf(DEAD), FEE, "the burn is a fact of the activation");
+        assertEq(seat.totalBurnedForActivation(), FEE);
+    }
+
+    /// The mechanic worth having: a sale forces a second burn.
+    function test_every_sale_forces_another_burn() public {
+        vm.prank(alice);
+        seat.activate(1);
+        vm.prank(alice);
+        seat.transferFrom(alice, bob, 1);
+        assertFalse(seat.isActive(1), "activation does not travel with the asset");
+
+        vm.prank(bob);
+        seat.activate(1);
+        assertEq(merd.balanceOf(DEAD), 2 * FEE, "the buyer burns again");
+        assertEq(seat.totalBurnedForActivation(), 2 * FEE);
+    }
+
+    function test_cannot_double_activate_to_burn_less_later() public {
+        vm.startPrank(alice);
+        seat.activate(1);
+        vm.expectRevert(MerdSeat.AlreadyActive.selector);
+        seat.activate(1);
+        vm.stopPrank();
+    }
+
+    function test_only_the_holder_can_activate() public {
+        vm.prank(bob);
+        vm.expectRevert(MerdSeat.NotHolder.selector);
+        seat.activate(1);
+    }
+
+    /// Inactive is not confiscation. The holder still owns the entry and can
+    /// still record it; what lapses is the service, not the asset.
+    function test_going_inactive_costs_the_service_not_the_asset() public {
+        vm.prank(alice);
+        seat.activate(1);
+        vm.prank(alice);
+        seat.transferFrom(alice, bob, 1);
+        assertEq(seat.ownerOf(1), bob, "the asset is still fully owned");
+        vm.prank(bob);
+        seat.register(1, address(0x7EA5), address(0));
+        (, address treasury,) = seat.entryOf(1);
+        assertEq(treasury, address(0x7EA5), "an inactive entry is still a real entry");
+    }
+
+    function test_a_zero_fee_still_activates() public {
+        seat.setActivationFee(0);
+        vm.prank(alice);
+        seat.activate(1);
+        assertTrue(seat.isActive(1));
+        assertEq(merd.balanceOf(DEAD), 0);
     }
 }
