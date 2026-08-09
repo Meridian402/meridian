@@ -79,9 +79,39 @@ const FILES = [
   // x-posts.jsonl is the record of what actually published, which is also the
   // dedupe source that stops it repeating itself, and merd-decisions.jsonl is its
   // own log of post-versus-hold calls.
-  "copywriter-journal.jsonl",
-  "x-posts.jsonl",
+  //
+  // copywriter-journal.jsonl and x-posts.jsonl are listed once, further up under
+  // agent continuity. They were listed twice here as well, which snapshotted
+  // each of them twice on every run and made the list harder to read than to
+  // trust. The duplicate test below is what surfaced it.
   "merd-decisions.jsonl",
+  // meme-rotations.jsonl was in NEITHER list, and it is the desk's own record of
+  // what it did: every re-quote, stop, sweep, collect, expansion and migration.
+  // Four separate readers depend on it. consistency.ts derives the daily record
+  // (stops, collects, drawdown) from this file and nothing else, learn/recall.ts
+  // retrieves past moments from it so Merd can reason about what happened last
+  // time, assetScorecard reports our own per-venue history out of it, and
+  // /api/desk-journal serves it publicly as the proof that the desk is real.
+  //
+  // Losing it does not lose money, it loses the ability to show or check that
+  // anything happened. The weekend diagnosis on 2026-08-09 was made from the
+  // daily record this file feeds, and cross-checked against on-chain skims: the
+  // collect counts matched exactly, every day. That check is only possible while
+  // the file survives. A volume reset would have silently taken the evidence
+  // with it and left the record looking like a desk that never traded.
+  "meme-rotations.jsonl",
+  // Found by auditing the two lists against each other rather than by losing
+  // anything, which is the only cheap way this class of gap ever surfaces.
+  // Both were in LEDGER_FILES and not here, the precise failure the comment
+  // above describes: mirrored row by row, and unrestorable, so the dashboard
+  // says "backed up" right until the day it matters.
+  //
+  // book-snapshots.jsonl is the equity curve. /api/book-history reads it, the
+  // earnings chart draws it, and consistency.ts takes bookOpen, bookClose and
+  // maxDrawdown from it for every day in the record. It is the only evidence
+  // the desk has of its own P&L over time.
+  "book-snapshots.jsonl",
+  "turns.jsonl",
 ];
 
 const lastHash = new Map<string, string>();
