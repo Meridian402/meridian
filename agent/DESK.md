@@ -199,6 +199,33 @@ market, the same lesson the desk's exits learned), publish every cycle
 next to the revenue chart, never pre-announce a specific buy, and announce
 a cycle only after both transactions have landed.
 
+## Standing order: be where the volume is (2026-08-08)
+
+The operator's rule, stated plainly: the desk should hold quotes only where
+volume actually is, at all times. Loyalty to a venue is worth nothing; the
+tape decides.
+
+What already serves this:
+- `volumeRotated`: an unquoted venue whose live pulse is hot (200+/hr) and
+  doubles the earn-window leader's preempts the compound and gets first
+  claim on the next capital.
+- `maybeMigrate`: a venue with bands, none in range, that has earned nothing
+  for 6h (or never reached the printing floor in a mature window) has its
+  ETH-side bands moved to a live candidate.
+- Liveness gate: no entry into a pool without a real 5-swap pulse.
+
+The measured gap (2026-08-08 evening): CASHCAT fell from 548 swaps/hr to 35
+and the desk kept all four bands there, earning ~0 bps/hr for three hours,
+because migrate needs SIX HOURS of zero earnings and the bands were still
+trickling fees. Volume died long before earnings did. The rule that is
+missing is a VOLUME floor for holding, not just an earnings floor: when a
+pool's pulse collapses well below the level that justified entry and a
+better-pulsed venue exists, the ETH-side bands should leave on a clock
+measured in tens of minutes, not hours.
+
+Not built yet, deliberately: shipped after a clean measurement day, not on
+the same night as three other engine changes.
+
 ## Incident log (selected)
 
 - 2026-08-05 late, the CASHCAT round trip (~$320 off the book peak). A
