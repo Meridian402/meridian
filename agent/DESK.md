@@ -226,6 +226,48 @@ measured in tens of minutes, not hours.
 Not built yet, deliberately: shipped after a clean measurement day, not on
 the same night as three other engine changes.
 
+STILL NOT BUILT as of 2026-08-09, and for the same reason. Six changes shipped
+or landed that day, so a new migration trigger would be the seventh. The rule
+above is a decision to LEAVE a working position on a volume signal, which is
+the most dangerous shape of change on this desk: it sells things. Everything
+shipped on 08-09 either unblocked the desk or stopped it doing something
+measurably dumb, and none of it decided to exit. This does.
+
+What it needs before it is written: one clean day where nothing else changes,
+so the pulse-collapse threshold can be read off real behaviour rather than
+guessed. The half of the rule that only ever DELAYS a cut did ship that day
+(makerExitPatienceMs, patience from the tape rather than the clock), which is
+the safe half and can be observed on its own first.
+
+## The weekend, measured (2026-08-05 to 08-09)
+
+The first five-day record with a full daily series. Fees are the sleeve's, DD
+is intraday max drawdown, and the last column is the one that matters.
+
+    day   fees      d book    max DD   stops  collects   DD per $1 fee
+    Wed   $108.77   +127.24   107.09     7      5           0.98
+    Thu   $115.20    +70.80    55.02     4      2           0.48
+    Fri   $103.30   +258.67    71.63     5      4           0.69
+    Sat    $41.10   +257.96    50.18     2      0           1.22
+    Sun    $23.12    -35.65    73.06     5      0           3.16
+
+The weekend does not change our risk, only our pay. Fees fell 79% against the
+weekday average and drawdown did not fall at all, so Sunday risked $3.16 for
+every $1 earned where no weekday exceeded $0.98. Saturday's +$258 on $41 of
+fees was meme inventory going up, not making; Sunday gave it back. When the fee
+is that small it is not the reason we are there, and the book is just long beta
+with extra steps.
+
+Collects were ZERO on both weekend days, cross-checked against on-chain skims,
+which matched the daily record exactly every day of the week. Cause was a flat
+$10-per-band collect floor calibrated to weekday velocity; $23 across four
+bands never reaches it. Fixed 08-09: size is one route to collecting and age is
+the other.
+
+The open half is sizing. Deployed capital should track measured pulse, so a
+weekend book is a weekend-sized book. That is the same missing volume floor
+described above and it is the single biggest remaining leak.
+
 ## Incident log (selected)
 
 - 2026-08-05 late, the CASHCAT round trip (~$320 off the book peak). A

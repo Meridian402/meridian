@@ -18,6 +18,35 @@ container host works: Fly.io, Railway, Render, a VPS.
 - Optional: `GATEWAY_ADMIN_TOKEN` + `OPENHERMIT_GATEWAY_URL` (auto-provision
   reservations), `MERIDIAN_PUBLIC_MCP_URL` (advertised MCP URL for fleets).
 
+## Shipping to Railway: pushing to GitHub does NOT deploy
+
+The Railway service has **no GitHub source connected** (`source: null`). Deploys
+are manual, from a local working tree:
+
+    cd agent && npm run build && railway up -s meridian402-api
+
+**A `git push` changes nothing in production.** Verified 2026-08-09: two fixes
+were committed, pushed, and sat inert for hours while the desk kept running the
+previous build. `railway deployment list` is the truth about what is live; the
+git log is not.
+
+Two consequences worth holding onto:
+
+- **Production and `main` can drift silently, in both directions.** `railway up`
+  uploads the working tree, so anything uncommitted ships. That is how the `tx`
+  receipt field ran in production for an unknown length of time while
+  `origin/main` did not have it, and why the next deploy would have silently
+  removed it. Before deploying, confirm `git status` is clean and HEAD matches
+  `origin/main`, or you cannot say afterwards what is running.
+- **A deploy carries everything committed since the last one**, including work
+  that was deliberately left unshipped. Read `git log origin/main..HEAD` and the
+  diff against the live deployment before running `railway up`, and check for
+  commits whose message says NOT DEPLOYED.
+
+Connecting the repo so pushes deploy would remove this whole class of problem.
+Until then, treat `railway up` as the only thing that ships and check what it is
+about to carry.
+
 ## Persistence
 
 `reservations.jsonl`, `fleets.jsonl`, `basis-log.jsonl`, `position-state.json`
