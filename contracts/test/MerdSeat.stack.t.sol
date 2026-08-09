@@ -206,3 +206,67 @@ contract MerdSeatStackTest is Test {
         seat.mint(bob, 3, "watcher");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The registry, which is the NFT contract itself: each id is an entry recording
+// the launched token and the treasury its fees flow to. What matters is that an
+// entry is write-once and enumerable from chain alone.
+// ─────────────────────────────────────────────────────────────────────────────
+contract MerdSeatRegistryTest is Test {
+    MerdSeat seat;
+    address alice = address(0xA11CE);
+    address bob = address(0xB0B);
+    address constant TOKEN = address(0x7000);
+    address constant TREASURY = address(0x7EA5);
+
+    function setUp() public {
+        seat = new MerdSeat(12, "https://meridian402.xyz/seat/");
+        seat.mint(alice, 1, "launch");
+    }
+
+    function test_the_holder_records_the_entry_and_it_is_enumerable() public {
+        assertEq(seat.registeredCount(), 0);
+        vm.prank(alice);
+        seat.recordLaunch(1, TOKEN, TREASURY);
+        (address token, address treasury, uint64 at) = seat.entryOf(1);
+        assertEq(token, TOKEN);
+        assertEq(treasury, TREASURY);
+        assertEq(at, block.timestamp);
+        assertEq(seat.registeredCount(), 1);
+        assertEq(seat.registeredIds(0), 1, "the registry can be walked from chain alone");
+    }
+
+    /// A registry whose history can be edited is a marketing page with extra
+    /// steps, so an entry is written once and then frozen, even for the holder.
+    function test_an_entry_can_never_be_rewritten() public {
+        vm.startPrank(alice);
+        seat.recordLaunch(1, TOKEN, TREASURY);
+        vm.expectRevert(MerdSeat.AlreadyRegistered.selector);
+        seat.recordLaunch(1, address(0xDEAD), address(0xDEAD));
+        vm.stopPrank();
+    }
+
+    /// Not even the contract owner can write or overwrite someone's entry.
+    function test_only_the_holder_can_record_not_even_us() public {
+        vm.expectRevert(MerdSeat.NotHolder.selector);
+        seat.recordLaunch(1, TOKEN, TREASURY); // deployer/owner
+        vm.prank(bob);
+        vm.expectRevert(MerdSeat.NotHolder.selector);
+        seat.recordLaunch(1, TOKEN, TREASURY);
+    }
+
+    /// Selling the entry sells what it records: the new holder inherits the
+    /// history rather than starting a fresh one.
+    function test_the_entry_survives_a_sale_unchanged() public {
+        vm.prank(alice);
+        seat.recordLaunch(1, TOKEN, TREASURY);
+        vm.prank(alice);
+        seat.transferFrom(alice, bob, 1);
+        (address token, address treasury,) = seat.entryOf(1);
+        assertEq(token, TOKEN, "the record belongs to the entry, not the holder");
+        assertEq(treasury, TREASURY);
+        vm.prank(bob);
+        vm.expectRevert(MerdSeat.AlreadyRegistered.selector);
+        seat.recordLaunch(1, address(0xBEEF), address(0xBEEF));
+    }
+}

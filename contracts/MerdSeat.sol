@@ -36,14 +36,33 @@ contract MerdSeat {
     mapping(address => uint256) private _balanceOf;
     mapping(uint256 => address) public getApproved;
     mapping(address => mapping(address => bool)) public isApprovedForAll;
-    /// What this seat is for, set at mint and immutable after: "venue-maker",
-    /// "scout", "watcher". A seat's job is part of what you buy.
+    /// What this entry is for, set at mint and immutable after.
     mapping(uint256 => string) public roleOf;
+
+    /// THE REGISTRY. Each entry records the PONS-launched token it governs and
+    /// the treasury its fees flow to. Written ONCE, by the holder, after the
+    /// launch exists; never rewritable, including by us. Enumerable from chain
+    /// alone, so Meridian being the frontend is a convenience, not a dependency.
+    ///
+    /// An entry is a CLAIM whose truth is independently checkable: the launched
+    /// token's fee wallet must be the treasury recorded here, and anyone can
+    /// read both without asking us. We do not verify it on-chain because that
+    /// would weld this contract to one launchpad's interface forever.
+    struct Entry {
+        address token;
+        address treasury;
+        uint64 registeredAt;
+    }
+
+    mapping(uint256 => Entry) public entryOf;
+    /// Every id that has been registered, in order, so the registry can be walked.
+    uint256[] public registeredIds;
 
     event Transfer(address indexed from, address indexed to, uint256 indexed id);
     event Approval(address indexed owner, address indexed spender, uint256 indexed id);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
     event SeatMinted(uint256 indexed id, address indexed to, string role);
+    event LaunchRegistered(uint256 indexed id, address indexed token, address indexed treasury, address holder);
     event MaxSupplyLowered(uint256 from, uint256 to);
     event BaseURISet(string uri);
     event OwnershipTransferred(address indexed from, address indexed to);
@@ -56,6 +75,8 @@ contract MerdSeat {
     error SoldOut();
     error CannotRaiseSupply();
     error UnsafeRecipient();
+    error AlreadyRegistered();
+    error NotHolder();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -141,6 +162,24 @@ contract MerdSeat {
         roleOf[id] = role;
         emit Transfer(address(0), to, id);
         emit SeatMinted(id, to, role);
+    }
+
+    /// Record what this entry governs: the token that launched and the treasury
+    /// its fees flow to. Callable once, by the holder, and then frozen forever.
+    /// Write-once is the whole point: a registry whose history can be edited is
+    /// a marketing page with extra steps.
+    function recordLaunch(uint256 id, address token, address treasury) external {
+        if (msg.sender != _ownerOf[id]) revert NotHolder();
+        if (token == address(0) || treasury == address(0)) revert ToZero();
+        if (entryOf[id].token != address(0)) revert AlreadyRegistered();
+        entryOf[id] = Entry({token: token, treasury: treasury, registeredAt: uint64(block.timestamp)});
+        registeredIds.push(id);
+        emit LaunchRegistered(id, token, treasury, msg.sender);
+    }
+
+    /// How many launches this registry knows about.
+    function registeredCount() external view returns (uint256) {
+        return registeredIds.length;
     }
 
     /// Supply can only ever shrink. A seat's worth depends on how few of them
