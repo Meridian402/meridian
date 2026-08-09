@@ -205,6 +205,12 @@ contract MerdSeat {
         roleOf[id] = role;
         emit Transfer(address(0), to, id);
         emit SeatMinted(id, to, role);
+        // Minting is where a seat is most likely to be sent somewhere that
+        // cannot hold it, because the destination is typed once by us rather
+        // than chosen by a wallet. A contract that cannot acknowledge an ERC-721
+        // would swallow the seat with no revert and no way back, so the check
+        // belongs here as much as it does on transfer.
+        _checkReceiver(address(0), to, id, "");
     }
 
     /// Record what this entry governs: the treasury an agent works, and
@@ -283,7 +289,28 @@ contract MerdSeat {
         (bool ok, bytes memory ret) = to.call(
             abi.encodeWithSelector(0x150b7a02, msg.sender, from, id, data)
         );
-        if (!ok || ret.length < 32 || abi.decode(ret, (bytes4)) != bytes4(0x150b7a02)) revert UnsafeRecipient();
+        if (!ok) {
+            // Surface the recipient's OWN reason rather than flattening every
+            // refusal into UnsafeRecipient. A token-bound account rejecting the
+            // seat that owns it is refusing for a specific, actionable reason,
+            // and hiding that behind a generic error costs a debugging session
+            // every time it fires.
+            if (ret.length > 0) {
+                assembly {
+                    revert(add(ret, 0x20), mload(ret))
+                }
+            }
+            revert UnsafeRecipient();
+        }
+        // Compared as raw bytes rather than abi.decode: a recipient returning a
+        // malformed word should be rejected as unsafe, not panic the decoder
+        // and revert with something unrelated.
+        if (ret.length < 32) revert UnsafeRecipient();
+        bytes4 got;
+        assembly {
+            got := mload(add(ret, 0x20))
+        }
+        if (got != bytes4(0x150b7a02)) revert UnsafeRecipient();
     }
 
     function _toString(uint256 v) private pure returns (string memory) {

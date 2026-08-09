@@ -154,6 +154,48 @@ contract MerdSeatForkTest is Test {
         assertEq(address(treasury).balance, 0, "the buyer owns the desk outright");
     }
 
+    /// 5. NESTING, against the real registry. An account deployed by the live
+    ///    registry must be able to HOLD another seat, and the human at the root
+    ///    must be able to take it back without the agent's cooperation.
+    ///
+    ///    This cannot be proved by the unit suite. The cycle guard reads the NFT
+    ///    binding out of the proxy footer during a receiver callback, so it only
+    ///    behaves correctly if the real registry's bytecode layout is what we
+    ///    think it is. A footer that decodes wrongly would make the guard either
+    ///    refuse everything or protect nothing, and both look identical against
+    ///    a mock we wrote ourselves.
+    function test_nesting_works_against_the_live_registry() public onFork {
+        address agentSeat = REGISTRY.createAccount(address(implementation), bytes32(0), block.chainid, address(seat), SEAT_ID);
+
+        // A second seat is minted straight into the agent's account.
+        seat.mint(agentSeat, 2, "sub-desk");
+        assertEq(seat.ownerOf(2), agentSeat, "the account is a real custodian on live infrastructure");
+
+        // The sub-desk answers to the agent, and the agent answers to Alice.
+        address subAccount = REGISTRY.createAccount(address(implementation), bytes32(0), block.chainid, address(seat), 2);
+        assertEq(SeatAccount(payable(subAccount)).owner(), agentSeat);
+        assertEq(SeatAccount(payable(agentSeat)).owner(), alice);
+
+        // Alice takes it back, in one transaction, with no admin key and no
+        // cooperation from the agent. This is the property that makes giving an
+        // agent custody defensible at all.
+        vm.prank(alice);
+        SeatAccount(payable(agentSeat)).execute(
+            address(seat), 0, abi.encodeCall(MerdSeat.transferFrom, (agentSeat, alice, 2)), 0
+        );
+        assertEq(seat.ownerOf(2), alice, "recovery does not depend on the agent behaving");
+    }
+
+    /// 6. The cycle guard, on a registry-deployed account. If the footer read
+    ///    inside the callback is wrong, this is where it shows.
+    function test_the_cycle_guard_holds_on_a_registry_account() public onFork {
+        address acct = REGISTRY.createAccount(address(implementation), bytes32(0), block.chainid, address(seat), SEAT_ID);
+        vm.prank(alice);
+        vm.expectRevert(SeatAccount.OwnershipCycle.selector);
+        seat.safeTransferFrom(alice, acct, SEAT_ID);
+        assertEq(seat.ownerOf(SEAT_ID), alice, "the seat that owns the account can never enter it");
+    }
+
     /// A seat that has not been created yet still has a derivable address, so a
     /// buyer can inspect where a seat's money WILL live before minting.
     function test_seat_wallets_are_knowable_before_they_exist() public onFork {
