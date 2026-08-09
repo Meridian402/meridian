@@ -20,12 +20,62 @@ let tail: Promise<unknown> = Promise.resolve();
 let holder: string | null = null;
 let heldSince = 0;
 
-// The stuck-holder watchdog: when the desk freezes behind this lock, the one
-// fact that matters is WHO is holding it. Names the holder and its age every
-// minute once it passes five, loudly.
+// A HELD LOCK IS UNRECOVERABLE IN-PROCESS. THE ONLY SAFE EXIT IS TO RESTART.
+//
+// This lock is a serial promise chain: `tail = run.then(...)`. If a locked
+// operation never settles, `tail` never settles, and EVERY future wallet
+// operation queues behind it forever. That is the four-hour freeze of
+// 2026-07-27, and it is still reachable: 22 of the 34 waitForTransactionReceipt
+// calls in this codebase are unbounded, and a transaction that never mines on
+// any of them hangs its caller for good.
+//
+// The obvious fix is wrong. Racing fn() against a timeout and releasing the
+// lock does NOT cancel the hung operation, because a JS promise cannot be
+// cancelled: the original waiter is still live and may still be mid-transaction.
+// Releasing would let the next operation sign against the same nonce while the
+// first is in flight, which is the exact collision this mutex exists to prevent.
+// A timeout that swaps a freeze for a nonce race is a worse bug than the freeze.
+//
+// So the honest recovery is to stop the process and let the supervisor restart
+// it. That is safe here specifically, and worth stating why:
+//   · rotor risk state persists to meme-rotor-state.json and reloads on boot,
+//     verified live on the 2026-08-09 deploy ("risk state restored")
+//   · on restart the desk re-reads on-chain state, so whatever the pending
+//     transaction actually did is simply observed rather than assumed
+//   · the queue of stale operations built up behind the stuck lock dies with
+//     the process instead of firing all at once on hours-old prices, which is
+//     the second half of this failure mode
+//
+// The ceiling is deliberately far above any legitimate operation. The longest
+// real one is an inventory liquidation whose chunked sells could plausibly
+// stack several 90-second receipt waits, so anything under ten minutes risks
+// killing healthy work. Fifteen bounds the freeze at fifteen minutes instead of
+// four hours, without ever firing on a desk that is merely slow.
+const LOCK_WARN_MS = 5 * 60 * 1000;
+const LOCK_CEILING_MS = Number(process.env.HOUSE_LOCK_CEILING_MS ?? 15 * 60 * 1000);
+
+export type LockVerdict = "idle" | "healthy" | "stuck" | "unrecoverable";
+
+/** Pure so the escalation is testable without hanging a lock or killing a process. */
+export function lockVerdict(heldMs: number | null, ceilingMs = LOCK_CEILING_MS): LockVerdict {
+  if (heldMs == null) return "idle";
+  if (heldMs > ceilingMs) return "unrecoverable";
+  if (heldMs > LOCK_WARN_MS) return "stuck";
+  return "healthy";
+}
+
 setInterval(() => {
-  if (holder && Date.now() - heldSince > 5 * 60 * 1000) {
-    console.error(`[houseLock] STUCK: "${holder}" has held the house lock for ${Math.round((Date.now() - heldSince) / 60000)}m`);
+  const heldMs = holder ? Date.now() - heldSince : null;
+  const verdict = lockVerdict(heldMs);
+  if (verdict === "stuck") {
+    console.error(`[houseLock] STUCK: "${holder}" has held the house lock for ${Math.round(heldMs! / 60000)}m`);
+  } else if (verdict === "unrecoverable") {
+    console.error(
+      `[houseLock] UNRECOVERABLE: "${holder}" has held the house lock for ${Math.round(heldMs! / 60000)}m, past the ${Math.round(LOCK_CEILING_MS / 60000)}m ceiling. ` +
+        `The operation cannot be cancelled and the lock cannot be released safely, so every wallet operation is queued behind it. ` +
+        `Exiting so the supervisor restarts: rotor state is persisted and on-chain state is re-read on boot.`,
+    );
+    process.exit(1);
   }
 }, 60 * 1000).unref?.();
 
