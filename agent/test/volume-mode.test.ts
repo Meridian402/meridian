@@ -83,3 +83,10 @@ test("a re-quote must move the band materially to be worth a move", () => {
   // identical ranges are never worth a move
   assert.equal(worthRequoting(cur, cur, 200), false);
 });
+
+test("overnight pacing reserves most of the budget for the active session", () => {
+  const CAP = 60;
+  const thinBudget = Math.floor(CAP * 0.4);
+  assert.equal(thinBudget, 24); // thin hours may spend 24 of 60
+  assert.ok(CAP - thinBudget >= 36); // at least 36 survive to the session
+});

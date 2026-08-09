@@ -99,6 +99,14 @@ const MIN_REQUOTE_SPACINGS = 2;
  *  spacings to spend anything, so a larger reserve cannot be burned on
  *  micro-churn, only on genuinely following the price. */
 const CHASE_RESERVE_MOVES = 40;
+/** Overnight pacing. The budget resets at UTC midnight, straight into the
+ *  thinnest hours of the day, and on 2026-08-08 the desk spent all 60 moves
+ *  on overnight chop by 08:00 UTC and was benched through the entire active
+ *  session that followed. Thin hours (00-08 UTC) may spend at most this share
+ *  of the day's moves, so the budget is still there when the volume is.
+ *  Chase re-quotes and every exit path are exempt: this paces new quoting,
+ *  never following price and never getting out. */
+const THIN_HOURS_MOVE_SHARE = 0.4;
 const MIN_BAND_USD = 25;
 const MIN_LEG_USD = 20;
 const ERROR_BACKOFF_MS = 60 * 60 * 1000;
@@ -701,6 +709,15 @@ export async function memeRotorTick(): Promise<void> {
     // always be able to follow it: chase re-quotes draw on a reserve beyond
     // the cap so a stranded bid is never stuck out of range all day.
     const chaseReserved = pumpChase && chaseExtraToday < CHASE_RESERVE_MOVES;
+    // Overnight pacing: hold back most of the budget for the active session.
+    const utcHour = new Date().getUTCHours(); // inline, not the thinHours() declared far below
+    if (!chaseReserved && utcHour < 8 && movesToday >= Math.floor(DAILY_MOVE_CAP * THIN_HOURS_MOVE_SHARE)) {
+      if (Date.now() - lastCapLogAt > 10 * 60 * 1000) {
+        lastCapLogAt = Date.now();
+        console.error(`[memeRotor] overnight pacing: ${movesToday}/${Math.floor(DAILY_MOVE_CAP * THIN_HOURS_MOVE_SHARE)} thin-hours moves spent, saving the rest for the session; chases and exits stay armed`);
+      }
+      break;
+    }
     if (movesToday >= DAILY_MOVE_CAP && !chaseReserved) {
       if (Date.now() - lastCapLogAt > 10 * 60 * 1000) {
         lastCapLogAt = Date.now();
