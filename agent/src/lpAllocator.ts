@@ -189,6 +189,32 @@ export async function scanOpportunities(capitalUsd?: number, widthPct = 2): Prom
       sizedFrom = "nominal";
     }
   }
+  // WARM THE QUALIFIED SET BEFORE JUDGING DEPLOYABILITY, NOT AFTER.
+  //
+  // configuredPool() resolves the hardcoded baseline first and then the
+  // qualifier's cache, so a cold cache makes every dynamically-qualified pool
+  // look like it has no deployable config at all. The allocator's own tick used
+  // to scan first and warm second, which meant the scan always read the PREVIOUS
+  // tick's cache and, on the first tick after any restart, an empty one.
+  //
+  // Measured on the 2026-08-09 deploy, one second apart:
+  //   14:47:33  PLTR/USDG 1% scores higher at ~$28.36/day but has no
+  //             deployable pool config — not actionable
+  //   14:47:34  deployable: 13 pools qualify — beyond baseline: ... PLTR($6k)
+  //
+  // PLTR was deployable the whole time. The allocator recommended a $4.91/day
+  // baseline pool over a $28.36/day qualified one because it asked before
+  // looking, and the allocator's tick is slow, so that answer stands for a long
+  // while. Warming here rather than reordering the caller means no future call
+  // site can reintroduce it. Best-effort: qualification is read-only and gates
+  // deployment, so if it fails we fall through to the last known set exactly as
+  // before rather than failing the whole scan.
+  try {
+    await qualifyDeployablePools();
+  } catch {
+    /* keep the previous cache; a stale set is still safer than an empty one */
+  }
+
   const client = getPublicClient();
   const score = await lpScores(); // hourly-cached; the expensive part
   const scoreByPool = new Map(score.pools.map((p) => [p.pool, p]));
