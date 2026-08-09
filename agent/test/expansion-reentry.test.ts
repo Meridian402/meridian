@@ -1,81 +1,70 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expansionAllowed } from "../src/memeGuard.js";
+import * as memeGuard from "../src/memeGuard.js";
+import { entrySizeMultiplier } from "../src/memeGuard.js";
 
 /**
- * THE DAY THE DESK REFUSED TO TRADE FOR SIXTEEN HOURS.
+ * WHAT BOUNDS ENTRIES NOW THAT THE DAILY COUNT DOES NOT.
  *
- * Measured 2026-08-09 from the Railway log, once per pass, all afternoon:
+ * EXPANSIONS_PER_DAY was 3, then 6, then 12, and it was deleted on 2026-08-09.
+ * Every raise followed the same incident: the budget went early, the desk got
+ * stopped out, and then it sat in cash for the rest of the UTC day while the
+ * tape paid other people.
  *
- *   [memeRotor] pass: 0 band(s), $0 working
- *   [memeRotor] expansion budget spent (12/12); entries resume at UTC midnight
+ *   2026-08-05  budget gone by 03:00, flat through the morning rally
+ *   2026-08-09  12/12 spent, every band stopped at 08:00Z, then sixteen hours
+ *               of "entries resume at UTC midnight" with $1,817 idle
  *
- * Every band was stopped out at 08:00Z. The expansion budget was already spent,
- * so the desk sat flat with $1,817 idle and $0 working until UTC midnight, and
- * the rotor announced it every ten minutes without anything being able to act
- * on it.
+ * A reserve for a flat book was tried first and fixed the symptom only: it
+ * bought exactly one band back, $31 of an $1,825 book, and then the counter
+ * bound again. 1.7% deployed is not meaningfully different from flat.
  *
- * This had happened before. The constant was raised 3 -> 6 -> 12 across two
- * incidents, each time with a comment claiming the new number made all-day cash
- * paralysis impossible. A bigger number never fixes it, because the mistake is
- * the SHAPE of the rule: a throttle on adding exposure was also, silently, a
- * throttle on having any. You cannot add to a position you do not hold.
+ * The category was wrong. A count bounds ACTIVITY. Nothing about the number of
+ * entries says whether the desk is taking too much risk, and a cap on how much
+ * money is left on the table every day is not a risk control.
  *
- * The invariant these tests defend is one sentence, and it should outlive any
- * particular value of the cap:
- *
- *   A FLAT BOOK CAN ALWAYS GET BACK IN.
+ * These tests pin what DOES bound it, so the counter cannot quietly come back
+ * as a fourth number.
  */
 
-test("the normal case is unchanged: a working book throttles at the cap", () => {
-  assert.equal(expansionAllowed(0, 3), true);
-  assert.equal(expansionAllowed(11, 3), true, "one slot left");
-  assert.equal(expansionAllowed(12, 3), false, "spent, and the book is working");
-  assert.equal(expansionAllowed(50, 3), false);
+test("no count-based daily entry cap exists on the module", () => {
+  // Named exactly so a reintroduction under the old name fails here.
+  assert.equal(
+    (memeGuard as Record<string, unknown>).expansionAllowed,
+    undefined,
+    "a daily entry counter came back; bound harm, not activity",
+  );
 });
 
-test("the regression: a FLAT book at a spent budget can still re-enter", () => {
-  // The exact state on 2026-08-09: 12 spent, zero bands, $1,817 idle.
-  assert.equal(expansionAllowed(12, 0), true, "this returned false for sixteen hours");
-  assert.equal(expansionAllowed(13, 0), true);
-  assert.equal(expansionAllowed(15, 0), true, "last reserve slot");
+test("harm is what retires a venue: three stops and it is done for the day", () => {
+  // This is the rail that replaced the counter. It responds to evidence of
+  // losing money, not to a tally of how often we tried.
+  assert.equal(entrySizeMultiplier(0), 1, "a clean venue gets full size");
+  assert.equal(entrySizeMultiplier(1), 0.5, "one stop halves it");
+  assert.equal(entrySizeMultiplier(2), 0.25, "two stops quarter it");
+  assert.equal(entrySizeMultiplier(3), 0, "three stops and the venue is benched");
+  assert.equal(entrySizeMultiplier(9), 0, "and it stays benched");
 });
 
-test("the reserve is bounded, not a way around the budget", () => {
-  assert.equal(expansionAllowed(16, 0), false, "reserve is spent too");
-  assert.equal(expansionAllowed(99, 0), false);
-});
-
-test("one band open is enough to be 'working', so the reserve is for flat only", () => {
-  assert.equal(expansionAllowed(12, 1), false, "holding anything means the cap applies");
-  assert.equal(expansionAllowed(12, 0), true, "holding nothing does not");
-});
-
-test("the reserve cannot be reached before the ordinary budget is spent", () => {
-  // A flat book still consumes the ordinary budget first; the reserve is not
-  // extra capacity handed out from the start of the day.
-  for (let spent = 0; spent < 12; spent++) {
-    assert.equal(expansionAllowed(spent, 0), true);
-    assert.equal(expansionAllowed(spent, 2), true, "same allowance while working");
+test("the bench is monotonic: more pain never buys more size", () => {
+  let prev = Infinity;
+  for (let stops = 0; stops <= 10; stops++) {
+    const m = entrySizeMultiplier(stops);
+    assert.ok(m <= prev, `size increased at ${stops} stops`);
+    prev = m;
   }
 });
 
-test("THE INVARIANT: no spend count can strand a flat desk while the reserve holds", () => {
-  // Written as the property rather than the arithmetic, so that changing either
-  // constant cannot quietly reintroduce an all-day outage.
-  for (let spent = 0; spent <= 15; spent++) {
-    assert.equal(expansionAllowed(spent, 0), true, `flat at ${spent} spent must be able to re-enter`);
+test("size never goes negative or exceeds full", () => {
+  for (let stops = 0; stops <= 20; stops++) {
+    const m = entrySizeMultiplier(stops);
+    assert.ok(m >= 0 && m <= 1, `multiplier out of range at ${stops} stops: ${m}`);
   }
 });
 
-test("a flat desk is never more restricted than a working one", () => {
-  // The failure mode in plain form: it must never be easier to add to a book
-  // than to rebuild one from nothing.
-  for (let spent = 0; spent <= 30; spent++) {
-    for (const open of [1, 2, 4]) {
-      if (expansionAllowed(spent, open)) {
-        assert.equal(expansionAllowed(spent, 0), true, `working could act at ${spent} but flat could not`);
-      }
-    }
-  }
+test("THE INVARIANT: an unhurt desk is never stopped from working", () => {
+  // The whole point of the deletion. With no stops on a venue, nothing about
+  // how many times we have already entered today may reduce our size to zero.
+  // If this ever fails, some counter has been reintroduced somewhere.
+  assert.equal(entrySizeMultiplier(0), 1);
 });

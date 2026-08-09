@@ -1394,36 +1394,40 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
 // rails posture: capped size, capped frequency, simulated before sending.
 const EXPAND_MIN_ENTRY_WEI = 30_000_000_000_000_000n; // 0.03 ETH: below this an entry is dust
 const EXPAND_GAS_FLOOR_WEI = 4_000_000_000_000_000n; // 0.004 ETH always stays for gas
-// 3 -> 6 on 2026-08-05: overnight patience-cuts spent the whole budget by
-// 03:00 and the desk sat rule-bound in cash through the morning rally. Six
-// probation-capped probes bounds re-entry exposure at ~$1500/day worst case
-// while making all-day cash paralysis impossible.
-const EXPANSIONS_PER_DAY = 12;
-
-// A BUDGET MAY THROTTLE ADDING RISK. IT MAY NEVER LEAVE THE DESK WITH NONE.
+// THERE IS NO DAILY CAP ON ENTRIES. DELETED 2026-08-09, ON PURPOSE.
 //
-// The cap above has been raised twice, 3 -> 6 -> 12, each time after the desk
-// spent it early and sat in cash through a rally, and each time the comment
-// claimed the new number made "all-day cash paralysis impossible". It did not,
-// because a bigger constant does not fix a structural mistake. Measured
-// 2026-08-09: 12/12 spent, every band stopped out at 08:00Z, and the rotor then
-// logged `expansion budget spent; entries resume at UTC midnight` every pass
-// for the next SIXTEEN HOURS with $1,817 idle and $0 working.
+// EXPANSIONS_PER_DAY was 3, then 6, then 12. Every raise followed the same
+// incident: the desk spent the budget early, got stopped out, and then sat in
+// cash for the rest of the UTC day while the tape paid other people. Each raise
+// shipped with a comment claiming the new number made all-day paralysis
+// impossible, and each time it happened again at the new number.
 //
-// This is the same bug as the daily move cap returning instead of breaking. A
-// throttle on ADDING exposure was silently also a throttle on HAVING any. You
-// cannot add to a position you do not hold, so when the book is flat the cap is
-// not governing risk, it is just an outage with a rule number attached.
+//   2026-08-05  budget gone by 03:00, flat through the morning rally
+//   2026-08-09  12/12 spent, every band stopped at 08:00Z, then SIXTEEN HOURS
+//               of `entries resume at UTC midnight` with $1,817 idle
 //
-// So a flat book gets a reserve to climb back in on. It is small and it is
-// bounded, and the per-pool stop bench (three stops and a venue is done for the
-// day) remains the real backstop against churning in and out of a bad tape.
-const FLAT_REENTRY_RESERVE = 4;
-
-export function expansionAllowed(expandsToday: number, openBands: number): boolean {
-  if (openBands > 0) return expandsToday < EXPANSIONS_PER_DAY;
-  return expandsToday < EXPANSIONS_PER_DAY + FLAT_REENTRY_RESERVE;
-}
+// A reserve for a flat book fixed the worst symptom and not the disease: it
+// bought exactly one band back, $31 of an $1,825 book, and then the counter
+// bound again. Being 1.7% deployed is not meaningfully different from being
+// flat.
+//
+// The mistake was the category. This counter bounded ACTIVITY. Nothing about
+// the number of entries tells you whether the desk is taking too much risk, and
+// every rail that actually bounds HARM was already in place and untouched:
+//
+//   · GLOBAL_COOLDOWN_MS  7 minutes between any two moves, so frequency is
+//                         bounded whatever the count
+//   · entrySizeMultiplier halves size per stop and BENCHES a pool at three,
+//                         so a venue that keeps hurting us is retired for the
+//                         day on evidence of harm rather than on a tally
+//   · knife gate          no entry into a pool dumping past the drift bar
+//   · liveness gate       no entry without a real 5-swap pulse, fail closed
+//   · toxicity block      no entry into a venue measured fee-negative
+//   · PROBATION_CAP_USD   every entry is size-capped before any of this
+//   · circuit breaker     book high-water halt above all of it
+//
+// Those bound losses. The counter only ever bounded earnings, and a cap on how
+// much money we leave on the table every day is not a risk control.
 
 let expandDay = "";
 let expandsToday = 0;
@@ -1435,14 +1439,6 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   if (today !== expandDay) {
     expandDay = today;
     expandsToday = 0;
-  }
-  if (!expansionAllowed(expandsToday, bands.length)) {
-    if (Date.now() - lastExpandVerdictAt > 10 * 60 * 1000) {
-      lastExpandVerdictAt = Date.now();
-      const cap = bands.length > 0 ? EXPANSIONS_PER_DAY : EXPANSIONS_PER_DAY + FLAT_REENTRY_RESERVE;
-      console.log(`[memeRotor] expansion budget spent (${expandsToday}/${cap}, ${bands.length} band(s) open); entries resume at UTC midnight`);
-    }
-    return;
   }
   if (Date.now() - lastMoveAt < GLOBAL_COOLDOWN_MS) return;
 
