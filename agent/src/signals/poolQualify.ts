@@ -150,13 +150,41 @@ export async function qualifyDeployablePools(): Promise<DeployablePool[]> {
   // holdability gate only for the pools that cleared depth (bounded # of sims)
   for (const p of deep) p.holdable = await checkHoldable(p.token, p.fee, p.tickSpacing);
 
-  const qualified = deep.filter((p) => p.holdable).sort((a, b) => b.depthUsd - a.depthUsd);
+  const qualified = qualifiedFrom(deep);
   cache = { at: Date.now(), pools: qualified };
   // Push into the swap layer so acquisition can follow qualification: the
   // seed table stays the floor, this is how the ceiling lifts. Same replace-
   // not-accumulate semantics as this cache, so de-qualification propagates.
   registerQualifiedPools(qualified.map((p) => ({ symbol: p.symbol, token: p.token, fee: p.fee, tickSpacing: p.tickSpacing })));
   return qualified;
+}
+
+/**
+ * THE SCORE GATE, WHICH THIS FILE HAS CLAIMED TO HAVE SINCE THE DAY IT WAS
+ * WRITTEN AND DID NOT.
+ *
+ * The header describes three gates: depth, score (fee-positive net of markout),
+ * and holdable. Only two were ever implemented. netPerDayUsd was computed, and
+ * attached to every pool, and then never filtered on, so qualification asked
+ * "is it deep" and "can we hold it" and never "does it pay".
+ *
+ * What that admitted, measured 2026-08-09 over a 2.5-day window:
+ *
+ *   SNDK/USDG 1%   fees $1,772   markout $4,161   net -$2,389  (-$956/day)
+ *   MU/USDG 1%     fees $1,704   markout $2,476   net   -$772  (-$309/day)
+ *
+ * Both were deep, both were holdable, and both were listed as deployable while
+ * our own scorer had them handing back more than double their fees to informed
+ * flow. Depth is what makes a toxic pool inviting: the trap is not a thin pool,
+ * it is a big one full of people who know more than we do.
+ *
+ * An unscored pool is excluded too, not admitted by default. lpScore drops
+ * pools with no swaps in the window, so an absent score means no evidence of
+ * flow, and the qualifier exists to grow the deployable set beyond the trusted
+ * baseline only on evidence. Silence is not a passing grade.
+ */
+export function qualifiedFrom(deep: DeployablePool[]): DeployablePool[] {
+  return deep.filter((p) => p.holdable && p.netPerDayUsd > 0).sort((a, b) => b.depthUsd - a.depthUsd);
 }
 
 /** Deployable pool for a symbol (best-depth qualified tier), or null if none qualify. */
