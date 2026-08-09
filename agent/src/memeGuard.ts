@@ -975,6 +975,35 @@ async function maybeConcentrate(bands: MemeBand[], ethUsd: number): Promise<void
 // morning flow would have filled. Overnight gets triple the patience.
 const TOKEN_MAX_HOLD_MS = 30 * 60 * 1000;
 const TOKEN_MAX_HOLD_THIN_MS = 90 * 60 * 1000;
+
+// PATIENCE SHOULD COME FROM THE TAPE, NOT THE CLOCK.
+//
+// The rule above proxies "thin" with UTC hours because every timeout-stop in
+// the journal at the time had fired between 02:50 and 06:15. That is a fair
+// read of a weekday and wrong on a weekend, when the tape can be dead at any
+// hour.
+//
+// Measured 2026-08-09: both stops fired at 08:00Z, outside the overnight
+// window, so they got the 30-minute patience. The tape was not busy. CASHCAT's
+// pulse had collapsed from 548 swaps/hr to 35 the night before. A maker exit
+// does not fill in a pool nobody is trading, so the desk waited out a clock it
+// was never going to beat and then crossed the spread anyway, on a thin book,
+// paying taker fees to leave. Sunday took five of those stops to earn $23.
+//
+// The bar is volumeMode's, deliberately: 50 swaps/hr is already this file's
+// definition of enough flow to lean on, and having two different numbers for
+// the same idea is how they drift apart.
+//
+// Two properties worth keeping when reading this. It is never LESS patient than
+// the clock rule was, so it cannot cause a faster cut than today. And it only
+// moves the TIME stop; the drawdown stop below is untouched and stays armed, so
+// patience on a quiet tape never becomes patience with a loser.
+const THIN_PULSE_SWAPS_PER_HR = 50;
+
+export function makerExitPatienceMs(pulseSwapsPerHour: number | null, thinByClock: boolean): number {
+  const thinByTape = pulseSwapsPerHour != null && pulseSwapsPerHour < THIN_PULSE_SWAPS_PER_HR;
+  return thinByClock || thinByTape ? TOKEN_MAX_HOLD_THIN_MS : TOKEN_MAX_HOLD_MS;
+}
 const thinHours = () => { const h = new Date().getUTCHours(); return h >= 0 && h < 8; };
 const TOKEN_STOP_DRAWDOWN_PCT = 4;
 /** Realized hourly volatility proxy: summed absolute price moves between
@@ -1123,7 +1152,7 @@ async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<voi
     const age = now - (tokenHeldSince.get(pid) ?? now);
     const ref = tokenRefPriceEth.get(pid) ?? px;
     const drawdownPct = ref > 0 ? (1 - px / ref) * 100 : 0;
-    const aged = age > (thinHours() ? TOKEN_MAX_HOLD_THIN_MS : TOKEN_MAX_HOLD_MS);
+    const aged = age > makerExitPatienceMs(poolPulse(pid), thinHours());
     const vol = hourlyVolPct(poolTickHistory.get(pid) ?? [], now);
     const cut = drawdownPct > effectiveStopPct(stopLinePct(pid, new Date().toISOString().slice(0, 10)), vol);
     if (!aged && !cut) continue;
