@@ -1578,8 +1578,44 @@ const FEE_SKIM_RATIO = 0.5;
 const FEE_COLLECTS_PER_DAY = 6;
 const MIN_SKIM_WEI = 500_000_000_000_000n; // 0.0005 ETH: below this, wait for more
 
+// SIZE IS ONE ROUTE TO COLLECTING. AGE IS THE OTHER.
+//
+// A flat per-band floor is calibrated to weekday velocity, and on a quiet
+// weekend no band ever reaches it. Measured, 2026-08-08/09: $64.22 of fees
+// accrued across four bands and the desk collected ZERO times, both days, while
+// weekdays either side collected two to five times a day on ~$109.
+//
+// Uncollected fees are not lost, since closing a band takes them with it. What
+// they are is UNBANKED: they stay denominated in the meme token, the treasury
+// skim only runs on collect so nothing reaches the treasury, and the wallet
+// sweep eventually liquidates them at whatever price a stop happens to fire at.
+// The desk earned all weekend and banked none of it.
+//
+// So the risk of holding fees is time-based, not size-based, and the rule now
+// says so. A band sitting on real money for hours gets swept even when the
+// amount is small. The hard floor underneath both routes exists only so a dust
+// collect never costs more than it banks.
+const FEE_COLLECT_FLOOR_USD = 2;
+const FEE_COLLECT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+export function shouldCollect(feesUsd: number, pendingForMs: number): boolean {
+  if (feesUsd < FEE_COLLECT_FLOOR_USD) return false;
+  return feesUsd >= FEE_COLLECT_MIN_USD || pendingForMs >= FEE_COLLECT_MAX_AGE_MS;
+}
+
+/** Biggest accrual first. The daily budget is small, so iterating in whatever
+ *  order the bands happened to arrive can spend the last slot on a $2 band and
+ *  leave a $40 one uncollected until tomorrow. */
+export function collectOrder<T extends { feesUsd: number }>(bands: readonly T[]): T[] {
+  return [...bands].sort((a, b) => b.feesUsd - a.feesUsd);
+}
+
 let collectsDay = "";
 let collectsToday = 0;
+/** When each band's uncollected fees first cleared the hard floor, so slow
+ *  accrual can be banked on age instead of waiting for a size a quiet weekend
+ *  never reaches. Cleared on collect, and pruned when a band goes away. */
+const feesPendingSince = new Map<string, number>();
 
 async function collectAndSkim(bands: MemeBand[], ethUsd: number): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
@@ -1587,8 +1623,18 @@ async function collectAndSkim(bands: MemeBand[], ethUsd: number): Promise<void> 
     collectsDay = today;
     collectsToday = 0;
   }
-  for (const b of bands) {
-    if (b.feesUsd < FEE_COLLECT_MIN_USD) continue;
+  // Bands that closed since the last pass must not keep an ageing clock alive.
+  const live = new Set(bands.map((b) => b.tokenId));
+  for (const id of feesPendingSince.keys()) if (!live.has(id)) feesPendingSince.delete(id);
+
+  for (const b of collectOrder(bands)) {
+    if (b.feesUsd < FEE_COLLECT_FLOOR_USD) {
+      feesPendingSince.delete(b.tokenId);
+      continue;
+    }
+    const since = feesPendingSince.get(b.tokenId) ?? Date.now();
+    if (!feesPendingSince.has(b.tokenId)) feesPendingSince.set(b.tokenId, since);
+    if (!shouldCollect(b.feesUsd, Date.now() - since)) continue;
     if (collectsToday >= FEE_COLLECTS_PER_DAY) return;
     const reg = venueByToken.get(b.token.toLowerCase());
     if (!reg) continue;
@@ -1620,6 +1666,8 @@ async function collectAndSkim(bands: MemeBand[], ethUsd: number): Promise<void> 
         }
       }
       collectsToday += 1;
+      // The fees are home, so the ageing clock restarts from nothing.
+      feesPendingSince.delete(b.tokenId);
       appendFileSync(
         ROTATION_JOURNAL,
         `${JSON.stringify({
