@@ -87,32 +87,44 @@ const PUMP_CHASE_MIN_MS = 3 * 60 * 1000;
 // pool recovered one at a time, leaving the whole venue earning nothing for
 // fifteen minutes or more while the market traded without us.
 const PUMP_CHASE_POOL_COOLDOWN_MS = 90 * 1000;
-// 24 -> 36 with the pump-chase clock (2026-08-05): the cap is a runaway
-// brake, not a pacing tool, and at 24 a trending day would freeze the desk
-// out of range by evening, which is the exact failure the chase clock fixes.
-// 36 -> 60 on 2026-08-06: a whipsaw night under the chase and volume clocks
-// legitimately spends ~30 moves; at 36 the desk stalls by morning. The cap
-// is a runaway brake, and the breaker now bounds the money, not the moves.
-const DAILY_MOVE_CAP = 60;
+// THERE IS NO DAILY MOVE CAP. DELETED 2026-08-09, WITH THE TWO MECHANISMS
+// THAT ONLY EXISTED TO ESCAPE IT.
+//
+// DAILY_MOVE_CAP was 24, then 36, then 60. Its own comment had already
+// conceded the argument twice over: "the cap is a runaway brake, not a pacing
+// tool", and "the breaker now bounds the money, not the moves". Both true, and
+// both reasons it should not have existed. A runaway brake that fires on a
+// tally cannot tell a runaway from a good day.
+//
+//   2026-08-05  at 24, a trending day froze the desk out of range by evening
+//   2026-08-06  at 36, a whipsaw night stalled it by morning
+//   2026-08-09  at 60, hit at 16:37Z: "holding new quotes until UTC midnight"
+//               with bands in range and earning, on a venue moving 9.32%/hr
+//
+// Re-quoting is not a risk. Re-quoting is HOW A BAND EARNS: it is what keeps
+// liquidity centred on the price. Capping it means that once the tape moves
+// enough, the desk stops following it, the bands drift out of range, and the
+// book sits holding inventory until UTC midnight. The cap did not bound losses,
+// it guaranteed them, and every raise was an attempt to reach a number where
+// that stopped happening.
+//
+// CHASE_RESERVE_MOVES (a second budget beyond the cap) and THIN_HOURS_MOVE_SHARE
+// (overnight pacing of the cap) went with it. Both were workarounds for the
+// cap, raised on their own incident histories, and neither means anything once
+// there is no budget to ration.
+//
+// WHAT BOUNDS MOVES NOW, all of it merit or money rather than tally:
+//   · worthRequoting/MIN_REQUOTE_SPACINGS  a move must improve the quote by two
+//     spacings to happen at all, so churn is bounded by whether it is WORTH it.
+//     This is the real anti-churn control and always was.
+//   · GLOBAL_COOLDOWN_MS                   7 minutes between moves
+//   · PUMP_CHASE_POOL_COOLDOWN_MS          90s pool-local clock while chasing
+//   · ERROR_BACKOFF_MS                     an erroring band backs off an hour
+//   · circuit breaker                      the book high-water halt, which is
+//     the "bounds the money" the old comment was already pointing at
 /** A re-quote must shift the band at least this many spacings to be worth a
  *  move (an out-of-range band only needs one: it earns nothing where it is). */
 const MIN_REQUOTE_SPACINGS = 2;
-/** Chase re-quotes beyond the daily cap: a stranded bid always gets to follow
- *  the price, capped so this can never become an unbounded second budget.
- *  15 -> 40 on 2026-08-08: the reserve was sized before the min-improvement
- *  gate existed, and it ran dry with three bands stranded 5-7% under a rising
- *  market and 70 minutes left in the day. A chase now has to be worth two
- *  spacings to spend anything, so a larger reserve cannot be burned on
- *  micro-churn, only on genuinely following the price. */
-const CHASE_RESERVE_MOVES = 40;
-/** Overnight pacing. The budget resets at UTC midnight, straight into the
- *  thinnest hours of the day, and on 2026-08-08 the desk spent all 60 moves
- *  on overnight chop by 08:00 UTC and was benched through the entire active
- *  session that followed. Thin hours (00-08 UTC) may spend at most this share
- *  of the day's moves, so the budget is still there when the volume is.
- *  Chase re-quotes and every exit path are exempt: this paces new quoting,
- *  never following price and never getting out. */
-const THIN_HOURS_MOVE_SHARE = 0.4;
 const MIN_BAND_USD = 25;
 const MIN_LEG_USD = 20;
 const ERROR_BACKOFF_MS = 60 * 60 * 1000;
@@ -462,7 +474,6 @@ async function fastFlipPass(pid: string): Promise<void> {
     if (b.poolId.toLowerCase() !== pid) continue;
     if (b.inRange || b.side !== "token") continue; // must CONFIRM as filled on authoritative data
     if (b.valueUsd < MIN_BAND_USD) continue;
-    if (movesToday >= DAILY_MOVE_CAP) return;
     const reg = venueByToken.get(b.token.toLowerCase());
     if (!reg) continue;
     const flipDrift = tickDriftPctPerHour(poolTickHistory.get(pid) ?? [], Date.now());
@@ -530,7 +541,8 @@ const outOfRangeSince = new Map<string, number>();
 const errorBackoffUntil = new Map<string, number>();
 let lastPassLogAt = 0;
 let lastExpandVerdictAt = 0;
-let lastCapLogAt = 0;
+// Vestigial: the chase reserve it counted was deleted with the move cap.
+// Kept only so an existing state file round-trips without losing its shape.
 let chaseExtraToday = 0;
 let lastMoveAt = 0;
 const poolMoveAt = new Map<string, number>();
@@ -754,30 +766,6 @@ export async function memeRotorTick(): Promise<void> {
     if (pumpChase
       ? now - (poolMoveAt.get(b.poolId) ?? 0) < PUMP_CHASE_POOL_COOLDOWN_MS
       : now - lastMoveAt < GLOBAL_COOLDOWN_MS) continue;
-    // The cap is a runaway brake, but a band the price walked away from must
-    // always be able to follow it: chase re-quotes draw on a reserve beyond
-    // the cap so a stranded bid is never stuck out of range all day.
-    const chaseReserved = pumpChase && chaseExtraToday < CHASE_RESERVE_MOVES;
-    // Overnight pacing: hold back most of the budget for the active session.
-    const utcHour = new Date().getUTCHours(); // inline, not the thinHours() declared far below
-    if (!chaseReserved && utcHour < 8 && movesToday >= Math.floor(DAILY_MOVE_CAP * THIN_HOURS_MOVE_SHARE)) {
-      if (Date.now() - lastCapLogAt > 10 * 60 * 1000) {
-        lastCapLogAt = Date.now();
-        console.error(`[memeRotor] overnight pacing: ${movesToday}/${Math.floor(DAILY_MOVE_CAP * THIN_HOURS_MOVE_SHARE)} thin-hours moves spent, saving the rest for the session; chases and exits stay armed`);
-      }
-      break;
-    }
-    if (movesToday >= DAILY_MOVE_CAP && !chaseReserved) {
-      if (Date.now() - lastCapLogAt > 10 * 60 * 1000) {
-        lastCapLogAt = Date.now();
-        console.error(`[memeRotor] daily cap ${DAILY_MOVE_CAP} reached (chase reserve ${chaseExtraToday}/${CHASE_RESERVE_MOVES}); holding new quotes until UTC midnight, exits stay armed`);
-      }
-      // BREAK, never return: the cap governs risk-ADDING moves only. The
-      // stop ladder, the wallet sweep and the fee collect run below and must
-      // never be skipped, or a capped desk would hold inventory overnight
-      // with its exits switched off (found 2026-08-08).
-      break;
-    }
     const offsetAbove = knife ? reg.offsetAbove + 2 : eff.offsetAbove;
     const target = targetRange(eff, b.currentTick, b.side, offsetAbove);
     // Only spend a move when the quote is materially better, unless the band
@@ -792,7 +780,6 @@ export async function memeRotorTick(): Promise<void> {
       // making other venues wait because one pool is trending would recreate
       // the contention the pool-local cooldown exists to remove.
       if (!pumpChase) lastMoveAt = Date.now();
-      if (movesToday >= DAILY_MOVE_CAP) chaseExtraToday += 1;
       movesToday += 1;
       outOfRangeSince.delete(b.tokenId);
     } catch (err) {
@@ -896,7 +883,6 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
     catchesToday = 0;
   }
   if (catchesToday >= CATCHERS_PER_DAY) return;
-  if (movesToday >= DAILY_MOVE_CAP) return;
 
   for (const reg of venueByToken.values()) {
     const pid = poolId(reg).toLowerCase();
