@@ -17,6 +17,30 @@ import {AgentTreasury} from "../AgentTreasury.sol";
 // the agent has been working, mid-epoch, with fees already accrued.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Reproduces the ERC-6551 v0.3.1 proxy layout: a 45-byte ERC-1167 proxy with
+/// salt, chainId, tokenContract and tokenId appended to the runtime code. If
+/// this and the real registry ever disagree, the fork suite is what catches it.
+contract MockRegistry {
+    function createAccount(address impl, uint256 chainId, address tokenContract, uint256 tokenId)
+        external
+        returns (address deployed)
+    {
+        bytes memory code = abi.encodePacked(
+            hex"3d60ad80600a3d3981f3363d3d373d3d3d363d73",
+            impl,
+            hex"5af43d82803e903d91602b57fd5bf3",
+            bytes32(0), // salt
+            bytes32(chainId),
+            bytes32(uint256(uint160(tokenContract))),
+            bytes32(tokenId)
+        );
+        assembly {
+            deployed := create(0, add(code, 0x20), mload(code))
+        }
+        require(deployed != address(0), "create failed");
+    }
+}
+
 contract MerdSeatStackTest is Test {
     MerdSeat seat;
     SeatAccount account;
@@ -35,10 +59,11 @@ contract MerdSeatStackTest is Test {
         seat = new MerdSeat(12, "https://meridian402.xyz/seat/");
         seat.mint(alice, SEAT_ID, "venue-maker");
 
-        // In production the registry deploys this deterministically; deploying
-        // and initializing directly exercises identical logic.
-        account = new SeatAccount();
-        account.initialize(block.chainid, address(seat), SEAT_ID);
+        // The canonical registry deploys the implementation as a proxy that
+        // carries its NFT binding in bytecode, so a direct deployment cannot
+        // stand in for it. MockRegistry reproduces that layout exactly; the
+        // fork suite proves the layout against the real registry.
+        account = SeatAccount(payable(new MockRegistry().createAccount(address(new SeatAccount()), block.chainid, address(seat), SEAT_ID)));
 
         // The seat's account owns the treasury. Nobody else does, including us.
         treasury = new AgentTreasury(address(account), agent, EPOCH);
@@ -141,9 +166,13 @@ contract MerdSeatStackTest is Test {
         account.execute(address(treasury), 0, "", 1);
     }
 
-    function test_account_cannot_be_reinitialized_to_another_nft() public {
-        vm.expectRevert(SeatAccount.AlreadyInitialized.selector);
-        account.initialize(block.chainid, address(seat), 999);
+    /// The binding lives in immutable bytecode, not storage, so there is no
+    /// initializer to re-run and nothing to point at a different NFT.
+    function test_binding_is_bytecode_not_storage() public view {
+        (uint256 c, address tc, uint256 id) = account.token();
+        assertEq(c, block.chainid);
+        assertEq(tc, address(seat));
+        assertEq(id, SEAT_ID);
     }
 
     // ── supply honesty ───────────────────────────────────────────────────────

@@ -26,7 +26,9 @@ pragma solidity ^0.8.26;
 // THE ONE PROPERTY TO CHECK WHEN READING THIS
 //   `owner()` reads through to the NFT's current holder on every call. There is
 //   no stored owner to go stale, no admin, no upgrade path, and no way for the
-//   deployer to move funds. If the NFT moves, control moved with it.
+//   deployer to move funds. If the NFT moves, control moved with it. The NFT
+//   binding itself lives in immutable bytecode, not storage, so not even a
+//   reinitialization bug can point this account at a different NFT.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface IERC721 {
@@ -34,46 +36,36 @@ interface IERC721 {
 }
 
 contract SeatAccount {
-    /// Set once by the registry-deployed proxy pattern's initializer OR by
-    /// constructor when deployed directly. Immutable in spirit: initialize
-    /// reverts if called twice.
-    uint256 public chainId;
-    address public tokenContract;
-    uint256 public tokenId;
-    bool private initialized;
-
-    /// Bumped on every state-changing execution, per ERC-6551, so signatures
-    /// and integrations can detect that the account acted.
+    /// Bumped on every state-changing execution, per ERC-6551, so integrations
+    /// can detect that the account acted.
     uint256 public state;
 
-    event Initialized(uint256 chainId, address tokenContract, uint256 tokenId);
     event Executed(address indexed to, uint256 value, bytes data);
 
-    error AlreadyInitialized();
     error NotOwner();
     error UnsupportedOperation();
-    error WrongChain();
     error CallFailed(bytes reason);
 
-    function initialize(uint256 chainId_, address tokenContract_, uint256 tokenId_) external {
-        if (initialized) revert AlreadyInitialized();
-        initialized = true;
-        chainId = chainId_;
-        tokenContract = tokenContract_;
-        tokenId = tokenId_;
-        emit Initialized(chainId_, tokenContract_, tokenId_);
-    }
-
-    /// ERC-6551: the NFT this account is bound to.
-    function token() external view returns (uint256, address, uint256) {
-        return (chainId, tokenContract, tokenId);
+    /// ERC-6551 v0.3.1: the registry deploys this as an ERC-1167 proxy with
+    /// salt, chainId, tokenContract and tokenId APPENDED to the runtime code.
+    /// There is no initializer to call and no storage to set, so the binding
+    /// cannot be changed after deployment by anyone, including us. The 45-byte
+    /// proxy is followed by the salt at 0x2d, so the three fields we want begin
+    /// at 0x4d and run 0x60 bytes.
+    function token() public view returns (uint256, address, uint256) {
+        bytes memory footer = new bytes(0x60);
+        assembly {
+            extcodecopy(address(), add(footer, 0x20), 0x4d, 0x60)
+        }
+        return abi.decode(footer, (uint256, address, uint256));
     }
 
     /// Derived on every call, never stored. This is the whole security model:
     /// there is no separate owner record that could disagree with the NFT.
     function owner() public view returns (address) {
-        if (chainId != block.chainid) return address(0); // a foreign-chain binding controls nothing here
-        return IERC721(tokenContract).ownerOf(tokenId);
+        (uint256 chainId_, address tokenContract_, uint256 tokenId_) = token();
+        if (chainId_ != block.chainid) return address(0); // a foreign binding controls nothing here
+        return IERC721(tokenContract_).ownerOf(tokenId_);
     }
 
     function isValidSigner(address signer, bytes calldata) external view returns (bytes4) {
@@ -81,8 +73,8 @@ contract SeatAccount {
     }
 
     /// The only way value leaves. Operation 0 (CALL) only: DELEGATECALL would
-    /// let a single malicious target rewrite this account's storage and detach
-    /// it from its NFT, which is the one thing that must never be possible.
+    /// let a single malicious target rewrite this account's storage, which is
+    /// the one thing that must never be possible.
     function execute(address to, uint256 value, bytes calldata data, uint8 operation)
         external
         payable
@@ -98,7 +90,6 @@ contract SeatAccount {
     }
 
     function supportsInterface(bytes4 id) external pure returns (bool) {
-        // IERC165, IERC6551Account, IERC6551Executable
         return id == 0x01ffc9a7 || id == 0x6faff5f1 || id == 0x51945447;
     }
 

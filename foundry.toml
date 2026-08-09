@@ -20,3 +20,11 @@ via_ir = true
 # error. Robinhood Chain is an Arbitrum Orbit L2 running an ArbOS that supports
 # it, which is why v4 is deployed there at all.
 evm_version = "cancun"
+
+# Robinhood Chain sits behind a Cloudflare challenge that rejects forge's
+# default user agent, so fork runs go through the local proxy in
+# contracts/test/rpcproxy.mjs (node contracts/test/rpcproxy.mjs, then
+# forge test --fork-url http://127.0.0.1:8546). Documented here because the
+# failure mode is a wall of HTML, not an obvious auth error.
+[rpc_endpoints]
+robinhood = "http://127.0.0.1:8546"
