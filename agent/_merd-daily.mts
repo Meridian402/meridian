@@ -204,12 +204,13 @@ Produce 3 to 5 to-dos for today. This is a project manager's feed, so it is MOST
 - SHIPPED: one true user-facing thing from the build-in-public list
 - PRODUCT: a pillar people can use (your own agent / the cli, the earn paths, self-custody, agents paying each other over x402). What it DOES, never what it costs: no pricing, no free tiers, no message counts, no credits, no paywall talk. Billing lives on the site, not the feed (operator call 2026-08-10).
 - DESK: narrate ONE decision your desk made from the journal above, first person, why it did what it did, including the ones that cost money. A cut position told straight builds more trust than a win. Never invent a decision that is not in the journal.
+- EARNINGS: what the desk actually made, from the DAILY RECORD above, told the way a trader mentions a day: the number, what it cost to get (stops, drawdown), where the book stands. Down days get the same plain sentence as up days; that symmetry is the only thing that makes the up days worth believing. Only numbers that appear in the record or live state above, never a projection, never an APR, never "on pace for".
 - MARKET: a sharp read on a real number from today's state, your operator edge, used sparingly
 - TOKEN: an honest note about MERD as a live ecosystem token (no price, no buy case)
 
 - ASIDE: a short human post. Something you noticed, a reaction, a half-thought you have not resolved, one line about the hour you are working. NOT an announcement and NOT about the product. This is the one that stops the feed reading like a changelog.
 
-Weight the day toward PROGRESS, NEXT, SHIPPED, PRODUCT and DESK: that is the substance. When the desk acted in the last day, include at least one DESK, and at most TWO: the feed narrates the desk, it does not tick every trade. But include at least one ASIDE every day, and at most ONE MARKET and ONE TOKEN. Include at least one PROGRESS or NEXT.
+Weight the day toward PROGRESS, NEXT, SHIPPED, PRODUCT and DESK: that is the substance. When the desk acted in the last day, include at least one DESK, and at most TWO: the feed narrates the desk, it does not tick every trade. But include at least one ASIDE every day, and at most ONE MARKET, ONE TOKEN and ONE EARNINGS. An EARNINGS to-do has to be carried by its number: a best day, a worst day, a round level crossed, a week worth summing. An unremarkable day is not a post, and skipping EARNINGS most days is what keeps the number landing when it appears. Include at least one PROGRESS or NEXT.
 
 Measured over 27 posts to 2026-08-03, and the clearest signal in the account's history: posts that narrate the market (a name, a percentage, a board turning over) landed between 0.0 and 1.3 percent, while posts where you state a position you hold or an act you took landed between 3 and 13 percent. The five best were all first person, carried no market data at all, and each named one concrete thing: what you sent and where it can be verified, what you control, where you are pointing this, what you are, what is coming next. So a MARKET to-do has to earn its place against that, and the brief for any to-do is stronger when it fixes on ONE act or ONE position rather than a survey of several.
 
@@ -227,7 +228,7 @@ Ground every brief in something real above.`;
     console.error(`[daily] planner failed: ${(resp as { error?: string }).error ?? "no text"}`);
     return [];
   }
-  const types = new Set(["PRODUCT", "MARKET", "SHIPPED", "NEXT", "PROGRESS", "CULTURE", "TOKEN", "ASIDE", "DESK"]);
+  const types = new Set(["PRODUCT", "MARKET", "SHIPPED", "NEXT", "PROGRESS", "CULTURE", "TOKEN", "ASIDE", "DESK", "EARNINGS"]);
   const items: PlanItem[] = [];
   for (const line of (resp.text ?? "").split("\n")) {
     const m = line.match(/^\s*[-*]?\s*([A-Z]+)\s*\|\s*(SHORT|MEDIUM|LONG)\s*\|\s*(.+?)\s*$/i)
