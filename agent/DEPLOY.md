@@ -3,6 +3,38 @@
 One long-running Node process (agent loop + MCP server + REST API). Any
 container host works: Fly.io, Railway, Render, a VPS.
 
+## READ THIS FIRST: pushing does not deploy. Anywhere.
+
+Neither repo has a working GitHub integration since the org rename to
+Meridian402 (both remotes still print "This repository moved" on every push,
+which is the tell). A push updates main and changes NOTHING in production.
+Every deploy is manual:
+
+**Backend (this repo) -> Railway:**
+
+    npm --prefix agent run build        # verify it compiles before uploading
+    cd agent && railway up --detach -s meridian402-api
+
+**Frontend (meridian-frontend repo) -> Vercel:**
+
+    vercel build --prod --yes           # rebuilds .vercel/output FRESH
+    vercel deploy --prebuilt --prod --yes
+
+For the frontend, never skip the `vercel build` step: `deploy --prebuilt`
+ships whatever is sitting in `.vercel/output`, silently, even if it is days
+stale. That exact mistake shipped an old bundle on 2026-08-10. Verify the
+artifact before shipping when the change matters (grep the built output for
+the string you changed).
+
+Two real incidents this causes, both already paid for: code running in prod
+that was never committed (the earnings tx field, found only because the next
+deploy would have silently reverted it), and commits on main that never ran
+in prod (three desk fixes sat inert for hours on 2026-08-09 while the desk
+stayed frozen). After deploying, diff your assumption: check a log line or an
+API field that only the new code produces. Reconnecting the GitHub
+integrations in the Railway and Vercel dashboards would retire this whole
+section; until someone does, this is the procedure.
+
 ## Required env
 
 - `ROBINHOOD_RPC_URL` — chain RPC
