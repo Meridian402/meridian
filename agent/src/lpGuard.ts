@@ -447,6 +447,13 @@ export function startLpGuard(): NodeJS.Timeout {
     if (phase === "weekday-market" && (await maybeRebalance(positions))) return;
 
     for (const p of positions) {
+      // The meme sleeve's ETH-quoted bands surface in the same discovery scan
+      // but live in a different registry entirely; their "symbol" is a raw
+      // token address, poolTick() can never resolve it, and memeGuard owns
+      // their whole lifecycle. Checking them here failed every band on every
+      // tick, which is noise exactly where a REAL stock-side failure would
+      // need to be visible.
+      if (p.symbol.startsWith("0x")) continue;
       try {
         const tick = await poolTick(p.symbol);
         const wide = halfWidthPct(p) > WIDE_THRESHOLD_HALFPCT;

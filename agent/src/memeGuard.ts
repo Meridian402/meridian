@@ -754,7 +754,10 @@ export async function memeRotorTick(): Promise<void> {
     const knife = b.side === "eth" && drift != null && drift > DUMP_DRIFT_PCT_PER_HR;
     // currentTick BELOW the bid's range = the price rose past it (tick down =
     // pricier). That is the chase-up case: fast clock, pool-local cooldown.
-    const pumpChase = !knife && b.side === "eth" && b.currentTick < b.tickLower;
+    // A chase must also have a tape worth chasing: following price around a
+    // pool doing under 25 swaps/hr pays the move cost to stand in an empty
+    // room. Below the bar the band stays put and the stop ladder owns exits.
+    const pumpChase = !knife && b.side === "eth" && b.currentTick < b.tickLower && poolPulse(b.poolId) >= CHASE_MIN_PULSE;
     // Volume mode: hot pulse + calm drift quotes one spacing off spot at half
     // width, so fills cycle and each swap pays a bigger share. Mutually
     // exclusive with knife by construction (drift thresholds do not overlap).
@@ -1067,21 +1070,59 @@ const STOP_CHUNK_USD = 200;
 const STOP_MAX_CHUNKS_PER_PASS = 3;
 const STOP_MIN_USD = 15;
 
-// Serial stops in one pool are the same lesson repeating: each stop halves
-// the next entry size there for the rest of the UTC day (floor 25%), and a
-// third stop benches the pool until tomorrow. Persisted with the risk state.
-const poolStopsToday = new Map<string, number>();
-let poolStopsDay = "";
-function rollStopDecayDay(): void {
-  const today = new Date().toISOString().slice(0, 10);
-  if (today !== poolStopsDay) {
-    poolStopsDay = today;
-    poolStopsToday.clear();
-  }
+// Serial stops in one pool are the same lesson repeating: each stop halves the
+// next entry size there (floor 25%), and a third stop benches the pool.
+//
+// THE BENCH IS A ROLLING WINDOW NOW, NOT A CALENDAR DAY. Changed 2026-08-10.
+// Under the calendar rule, three stops at 03:30-04:13 retired the desk's only
+// viable venue until UTC midnight, twenty hours later, and the day before that
+// three morning stops did the same. The lesson a stop teaches is real but it
+// AGES: a venue that hurt us three times before dawn is not the same venue at
+// the US open, and a tally that only clears at midnight cannot tell those
+// apart. Six hours is long enough that a genuinely bad tape stays benched
+// through its badness, short enough that one rough overnight patch does not
+// cancel the session that follows. The fee record is unambiguous about what
+// whole-day benches cost: $109/day deployed vs $14.45 benched.
+const BENCH_WINDOW_MS = 6 * 60 * 60 * 1000;
+const poolStopTimes = new Map<string, number[]>();
+
+/** Stops that still count against a venue: those inside the rolling window.
+ *  Pure, for tests. */
+export function stopsInWindow(times: readonly number[] | undefined, now: number, windowMs = BENCH_WINDOW_MS): number {
+  if (!times) return 0;
+  return times.filter((t) => now - t < windowMs).length;
 }
+
+function recordStop(pid: string): void {
+  const times = (poolStopTimes.get(pid) ?? []).filter((t) => Date.now() - t < BENCH_WINDOW_MS);
+  times.push(Date.now());
+  poolStopTimes.set(pid, times.slice(-12)); // bounded: nothing needs more history than the window
+}
+
 export function entrySizeMultiplier(stops: number): number {
   return stops >= 3 ? 0 : Math.max(0.25, Math.pow(0.5, stops));
 }
+
+// --- Pulse sizing: the tape decides how much capital an entry deserves -------
+// Three consecutive days of overnight bleed shared one shape: full-size quoting
+// into a tape doing under 30 swaps/hr. Fee income needs swaps; the risk does
+// not. Every stop in the 2026-08-09/10 journal reads "maker exit unfilled",
+// which is what filling a bid in a pool where nobody trades looks like: the
+// inventory arrives, the exit never does. Full size at volumeMode's 50/hr bar
+// (one number for one idea), scaling down linearly, and NOTHING below 10/hr,
+// where a quote is not market making, it is a standing offer to be run over.
+export function pulseSizeMultiplier(pulse: number): number {
+  const FULL = 50;
+  const NONE = 10;
+  if (pulse >= FULL) return 1;
+  if (pulse <= NONE) return 0;
+  return (pulse - NONE) / (FULL - NONE);
+}
+
+/** Following a price move only pays where there is flow to earn back the move
+ *  cost. Below this pulse a chase re-quote into the pool is refused; the band
+ *  stays put and the stop ladder owns the exit. */
+const CHASE_MIN_PULSE = 25;
 
 const tokenHeldSince = new Map<string, number>();
 const tokenRefPriceEth = new Map<string, number>();
@@ -1190,8 +1231,7 @@ async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<voi
     if (!reg) continue;
     try {
       await liquidateInventory(reg, stuck, ethUsd, aged ? `maker exit unfilled ${Math.round(age / 60000)}min` : `drawdown ${drawdownPct.toFixed(1)}%`);
-      rollStopDecayDay();
-      poolStopsToday.set(pid, (poolStopsToday.get(pid) ?? 0) + 1);
+      recordStop(pid);
       tokenHeldSince.delete(pid);
       tokenRefPriceEth.delete(pid);
       lastMoveAt = Date.now();
@@ -1299,24 +1339,49 @@ export async function looseInventoryUsd(ethUsd: number): Promise<number> {
   return usd;
 }
 
-// --- The daily loss circuit breaker ------------------------------------------
-// The one honest implementation of "never again": a hard dollar line under
-// the day's high-water mark. Two consecutive book marks below it and the desk
-// flattens everything through the normal exit ladder and refuses to trade
-// until the next UTC day. Entry logic bounds each loss; this bounds the day.
+// --- The daily loss circuit breaker, in two stages ---------------------------
+// A hard dollar line under the day's high-water mark, rewritten 2026-08-10
+// after watching the one-stage version fire at 04:13Z: it market-dumped the
+// ENTIRE book (15,505 STONKBROKER, ~$455) into a 25-swap/hr tape at 4am and
+// stood down until midnight. The mark recovered $70 within the hour. A breaker
+// that halts quoting is protection; one that becomes the day's most aggressive
+// taker in the day's thinnest hour is the loss it exists to prevent.
+//
+// STAGE 1, drawdown past the limit: stop quoting for a few hours, pull the
+// ETH-side bands (pure ETH, riskless to withdraw, no market impact), and leave
+// token inventory to the stop ladder, which keeps running through every halt
+// and exits chunked with a slippage floor on ITS clock, not in one dump.
+//
+// STAGE 2, drawdown past twice the limit: the full flatten, immediately, and
+// down until the next UTC day. The catastrophe backstop is unchanged; what
+// changed is that an ordinary bad stretch no longer gets catastrophe handling.
+//
+// After either stage the high-water RE-ARMS at the surviving level. Without
+// that, a sticky morning high keeps the day's drawdown permanently past the
+// limit and a "few hours" stage-1 halt silently becomes the whole day again.
 const DAILY_LOSS_LIMIT_USD = Number(process.env.MERIDIAN_DAILY_LOSS_LIMIT_USD ?? 75);
+const STAGE1_HALT_MS = 4 * 60 * 60 * 1000;
 let bookHwm = 0;
 let bookHwmDay = "";
 let breachStreak = 0;
-let haltDay = "";
+let haltUntil = 0;
 
 export function deskHalted(): boolean {
-  return haltDay !== "" && haltDay === new Date().toISOString().slice(0, 10);
+  return Date.now() < haltUntil;
+}
+
+/** Which response a drawdown deserves. Pure, for tests. */
+export function breakerStage(drawdownUsd: number, limitUsd = DAILY_LOSS_LIMIT_USD): 0 | 1 | 2 {
+  if (drawdownUsd >= 2 * limitUsd) return 2;
+  if (drawdownUsd >= limitUsd) return 1;
+  return 0;
 }
 
 /** Fed by the book snapshotter with every good mark. Marks only; a failed
  *  read never reaches here, so a phantom dip cannot trip the breaker, and the
- *  two-mark streak means even one bad-but-plausible sample cannot either. */
+ *  two-mark streak means even one bad-but-plausible sample cannot either.
+ *  (Stage 2 alone fires on a single mark: at twice the limit, waiting for a
+ *  second reading is precision the book cannot afford.) */
 export function noteBookMark(book: number): void {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== bookHwmDay) {
@@ -1329,20 +1394,73 @@ export function noteBookMark(book: number): void {
     breachStreak = 0;
     return;
   }
-  if (bookHwm - book < DAILY_LOSS_LIMIT_USD) {
+  const drawdown = bookHwm - book;
+  const stage = breakerStage(drawdown);
+  if (stage === 0) {
     breachStreak = 0;
     return;
   }
+  if (deskHalted()) return;
+
+  if (stage === 2) {
+    haltUntil = Date.parse(`${today}T23:59:59Z`) + 1000;
+    bookHwm = book; // re-arm from the surviving level
+    breachStreak = 0;
+    saveRotorState();
+    const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (2x limit $${2 * DAILY_LOSS_LIMIT_USD}); full flatten, down until tomorrow`;
+    appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "circuit-breaker", stage: 2, reason })}\n`);
+    console.error(`[memeRotor] CIRCUIT BREAKER stage 2: ${reason}`);
+    void withHouseWalletLock("circuitBreaker", flattenAll).catch((err) =>
+      console.error(`[memeRotor] circuit-breaker flatten failed (stop ladder still active): ${err instanceof Error ? err.message.slice(0, 160) : err}`),
+    );
+    return;
+  }
+
   breachStreak += 1;
-  if (breachStreak < 2 || deskHalted()) return;
-  haltDay = today;
+  if (breachStreak < 2) return;
+  haltUntil = Date.now() + STAGE1_HALT_MS;
+  bookHwm = book; // re-arm: a further full limit of NEW loss re-triggers
+  breachStreak = 0;
   saveRotorState();
-  const reason = `book $${book.toFixed(0)} is $${(bookHwm - book).toFixed(0)} below today's high $${bookHwm.toFixed(0)} (limit $${DAILY_LOSS_LIMIT_USD}); flattening, standing down until tomorrow`;
-  appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "circuit-breaker", reason })}\n`);
-  console.error(`[memeRotor] CIRCUIT BREAKER: ${reason}`);
-  void withHouseWalletLock("circuitBreaker", flattenAll).catch((err) =>
-    console.error(`[memeRotor] circuit-breaker flatten failed (stop ladder still active): ${err instanceof Error ? err.message.slice(0, 160) : err}`),
+  const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (limit $${DAILY_LOSS_LIMIT_USD}); quoting halted ${Math.round(STAGE1_HALT_MS / 3600000)}h, ETH sides withdrawn, token exits stay on the stop ladder`;
+  appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "circuit-breaker", stage: 1, reason })}\n`);
+  console.error(`[memeRotor] CIRCUIT BREAKER stage 1: ${reason}`);
+  void withHouseWalletLock("circuitBreaker", withdrawEthSides).catch((err) =>
+    console.error(`[memeRotor] stage-1 withdraw failed (stop ladder still active): ${err instanceof Error ? err.message.slice(0, 160) : err}`),
   );
+}
+
+/** Stage 1's only market action: close the bands that are still pure ETH.
+ *  Withdrawing unfilled bids is riskless and sells nothing; the token
+ *  inventory, where dumping does the damage, is left to the stop ladder. */
+async function withdrawEthSides(): Promise<void> {
+  const signer = getAgentSigner();
+  if (!signer) return;
+  const client = getPublicClient();
+  const wallet = getWalletClient();
+  const bands = await memeBandsLive();
+  for (const b of bands) {
+    if (b.side !== "eth") continue;
+    const reg = venueByToken.get(b.token.toLowerCase());
+    if (!reg) continue;
+    try {
+      const liq = await client.readContract({
+        address: POSITION_MANAGER,
+        abi: [parseAbiItem("function getPositionLiquidity(uint256) view returns (uint128)")],
+        functionName: "getPositionLiquidity",
+        args: [BigInt(b.tokenId)],
+      });
+      if (liq === 0n) continue;
+      const wd = buildNativeWithdraw(reg, BigInt(b.tokenId), liq, signer.address);
+      await client.call({ account: signer.address, to: wd.to, data: wd.data });
+      const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
+      const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
+      if (r.status !== "success") throw new Error(`withdraw reverted ${h}`);
+      appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "breaker-withdraw", pool: reg.symbol, tokenId: b.tokenId, txs: [h] })}\n`);
+    } catch (err) {
+      console.error(`[memeRotor] stage-1 withdraw of #${b.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
+    }
+  }
 }
 
 async function flattenAll(): Promise<void> {
@@ -1596,13 +1714,22 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   }
 
   try {
-    rollStopDecayDay();
-    const stopsHere = poolStopsToday.get(poolId(target).toLowerCase()) ?? 0;
-    const mult = entrySizeMultiplier(stopsHere);
-    if (mult === 0) {
-      console.log(`[memeRotor] ${target.symbol} benched for the day: ${stopsHere} stops already`);
+    const targetPid = poolId(target).toLowerCase();
+    const stopsHere = stopsInWindow(poolStopTimes.get(targetPid), Date.now());
+    const benchMult = entrySizeMultiplier(stopsHere);
+    if (benchMult === 0) {
+      console.log(`[memeRotor] ${target.symbol} benched: ${stopsHere} stops in the last 6h (oldest ages out on its own)`);
       return;
     }
+    // The tape sizes the entry alongside the stop history: a dead pool gets
+    // nothing no matter how clean its record is.
+    const pulse = poolPulse(targetPid);
+    const pulseMult = pulseSizeMultiplier(pulse);
+    if (pulseMult === 0) {
+      console.log(`[memeRotor] ${target.symbol} refused: tape too thin to quote (${pulse} swaps/hr)`);
+      return;
+    }
+    const mult = benchMult * pulseMult;
     const wallet = getWalletClient();
     const capWei = BigInt(Math.round(((capUsd * mult) / ethUsd) * 1e18));
     const mintWei = available > capWei ? capWei : available;
@@ -2044,8 +2171,8 @@ export function saveRotorState(): void {
       lastEarnedAt: Object.fromEntries(poolLastEarnedAt),
       feesPrev: Object.fromEntries(bandFeesPrev),
       pulse: Object.fromEntries([...swapPulse].map(([k, v]) => [k, v.slice(-200)])),
-      breaker: { bookHwm, bookHwmDay, haltDay },
-      stopDecay: { day: poolStopsDay, counts: Object.fromEntries(poolStopsToday) },
+      breaker: { bookHwm, bookHwmDay, haltUntil },
+      stopTimes: Object.fromEntries(poolStopTimes),
       counters: {
         movesDay, moves: movesToday, chaseExtra: chaseExtraToday,
         expandDay, expands: expandsToday,
@@ -2071,8 +2198,9 @@ function loadRotorState(): void {
       lastEarnedAt?: Record<string, number>;
       feesPrev?: Record<string, number>;
       pulse?: Record<string, number[]>;
-      breaker?: { bookHwm?: number; bookHwmDay?: string; haltDay?: string };
+      breaker?: { bookHwm?: number; bookHwmDay?: string; haltDay?: string; haltUntil?: number };
       stopDecay?: { day?: string; counts?: Record<string, number> };
+      stopTimes?: Record<string, number[]>;
       counters?: { movesDay?: string; moves?: number; chaseExtra?: number; expandDay?: string; expands?: number; concDay?: string; conc?: number; migDay?: string; migs?: number };
       savedAt?: number;
     };
@@ -2089,10 +2217,25 @@ function loadRotorState(): void {
     // The daily budgets survive a redeploy too: resetting them mid-crash is
     // how 18 expansions happened on a 6-per-day budget (2026-08-05).
     const br = s.breaker ?? {};
-    if (br.bookHwmDay) { bookHwmDay = br.bookHwmDay; bookHwm = br.bookHwm ?? 0; haltDay = br.haltDay ?? ""; }
-    if (s.stopDecay?.day) {
-      poolStopsDay = s.stopDecay.day;
-      for (const [k, v] of Object.entries(s.stopDecay.counts ?? {})) poolStopsToday.set(k, v);
+    if (br.bookHwmDay) {
+      bookHwmDay = br.bookHwmDay;
+      bookHwm = br.bookHwm ?? 0;
+      haltUntil = br.haltUntil ?? 0;
+      // An old-shape halt (haltDay, "stand down until midnight") is NOT carried
+      // forward, deliberately. Under the old code a halt only existed after the
+      // breaker had already flattened the whole book, so the state it protects
+      // is all cash and there is nothing left for a halt to do except cost the
+      // rest of the day. The new stage-1 halts carry their own expiry.
+      if (br.haltDay && !br.haltUntil) console.error(`[memeRotor] old-shape breaker halt (${br.haltDay}) not carried forward: the flatten it triggered already executed`);
+    }
+    // Old-shape stop counts have no timestamps. Seeding them at savedAt is the
+    // conservative reading: they age out one bench-window after the last save
+    // rather than being forgotten because the schema changed.
+    if (s.stopTimes) {
+      for (const [k, v] of Object.entries(s.stopTimes)) poolStopTimes.set(k, v);
+    } else if (s.stopDecay?.counts) {
+      const seedAt = s.savedAt ?? Date.now();
+      for (const [k, v] of Object.entries(s.stopDecay.counts)) poolStopTimes.set(k, Array(Math.min(v, 12)).fill(seedAt));
     }
     const c = s.counters ?? {};
     if (c.movesDay) { movesDay = c.movesDay; movesToday = c.moves ?? 0; chaseExtraToday = c.chaseExtra ?? 0; }
