@@ -26,7 +26,11 @@ interface KnobSpec {
 
 export const KNOBS: Record<string, KnobSpec> = {
   scoutBountyUsd: { min: 0.05, max: 0.25, fallback: () => config.scoutBountyUsd },
-  scoutMinPayoutUsd: { min: 0.25, max: 2, fallback: () => config.scoutMinPayoutUsd },
+  // min 0.25 -> 0.05 on 2026-08-11: day one of the post bounties had three
+  // earners holding a dime each and a public skeptic asking whether payouts
+  // are real. A floor the knob cannot lower is a policy the operator cannot
+  // make, and the answer to "do we actually get paid" is a receipt.
+  scoutMinPayoutUsd: { min: 0.05, max: 2, fallback: () => config.scoutMinPayoutUsd },
   scoutMaxPerWalletPerDay: { min: 1, max: 5, integer: true, fallback: () => config.scoutMaxPerWalletPerDay },
   // Talk-about-Merd bounties ride the scout rails; literal fallbacks because
   // these did not exist when config was written.
