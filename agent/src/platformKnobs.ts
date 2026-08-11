@@ -28,6 +28,10 @@ export const KNOBS: Record<string, KnobSpec> = {
   scoutBountyUsd: { min: 0.05, max: 0.25, fallback: () => config.scoutBountyUsd },
   scoutMinPayoutUsd: { min: 0.25, max: 2, fallback: () => config.scoutMinPayoutUsd },
   scoutMaxPerWalletPerDay: { min: 1, max: 5, integer: true, fallback: () => config.scoutMaxPerWalletPerDay },
+  // Talk-about-Merd bounties ride the scout rails; literal fallbacks because
+  // these did not exist when config was written.
+  xPostBountyUsd: { min: 0.05, max: 0.25, fallback: () => 0.1 },
+  xPostMaxPerWalletPerDay: { min: 1, max: 5, integer: true, fallback: () => 2 },
 };
 
 interface KnobRow {

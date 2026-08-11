@@ -73,6 +73,7 @@ import { earnOpportunities, prepareCarry } from "./earn/carry.js";
 import { prepareIndexYield } from "./earn/yieldPosition.js";
 import { stakingState, prepareStake } from "./earn/staking.js";
 import { runScout, scoutAllowed, bountyBoard, settleBounties, pendingPayouts, recordExternalPayout } from "./earn/scout.js";
+import { submitXPost, xPostAllowed, xTalkBoard } from "./earn/xTalk.js";
 import { knobsState, setKnob } from "./platformKnobs.js";
 import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
@@ -1635,7 +1636,9 @@ app.post("/api/earn/prepare", async (req: Request, res: Response) => {
 app.get("/api/earn/bounties", (req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const address = typeof req.query.address === "string" ? req.query.address : undefined;
-  res.json(bountyBoard(address));
+  // One response, both earn surfaces: the scout board as before, plus the
+  // talk-about-Merd board under its own key so the site fetches once.
+  res.json({ ...bountyBoard(address), xtalk: xTalkBoard(address) });
 });
 
 // ---- Custody (auto-trading vaults) · PREVIEW ----
@@ -1690,6 +1693,24 @@ app.post("/api/custody/prepare-revoke", async (req: Request, res: Response) => {
 });
 
 app.options("/api/earn/scout", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.options("/api/earn/x-post", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+// Talk-about-Merd bounty: validate a public X post and accrue on the shared
+// bounty ledger. No model turn is spent here (the validation is an HTTP read),
+// so unlike scout this takes no slot and records no turn; the caps in
+// xPostAllowed are the whole cost story.
+app.post("/api/earn/x-post", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  const allowed = xPostAllowed(address);
+  if (!allowed.ok) { res.status(429).json({ ok: false, error: allowed.reason }); return; }
+  try {
+    const url = String((req.body as { url?: unknown })?.url ?? "");
+    res.json(await submitXPost(address, url));
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message.slice(0, 140) : "submission failed" });
+  }
+});
 app.post("/api/earn/scout", async (req: Request, res: Response) => {
   setWalletCors(res);
   const address = requireWallet(req, res);

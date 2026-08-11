@@ -27,7 +27,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 interface BountyRow {
   ts: number;
-  kind: "scout" | "payout";
+  kind: "scout" | "payout" | "xpost"; // xpost rows are written by earn/xTalk.ts into this same ledger
   wallet: string;
   // "attempt" is written before the model runs and is what the per-wallet daily
   // cap counts. The other scout statuses are outcomes, recorded after.
@@ -41,6 +41,8 @@ interface BountyRow {
   segment?: string;
   txHash?: string;
   covering?: number;
+  /** xpost rows only: the X author id the wallet is bound to. */
+  authorId?: string;
 }
 
 function readRows(): BountyRow[] {
@@ -72,7 +74,7 @@ function walletBalanceUsd(rows: BountyRow[], wallet: string): number {
   let bal = 0;
   for (const r of rows) {
     if (r.wallet !== w) continue;
-    if (r.kind === "scout" && r.status === "accrued") bal += r.amountUsd;
+    if ((r.kind === "scout" || r.kind === "xpost") && r.status === "accrued") bal += r.amountUsd; // xpost: talk-about-Merd bounties settle through the same balance
     if (r.kind === "payout" && r.status === "paid") bal -= r.amountUsd;
   }
   return Math.round(bal * 100) / 100;
@@ -329,7 +331,7 @@ const transferAbi = [parseAbiItem("function transfer(address to, uint256 amount)
  */
 export function pendingPayouts(): Record<string, unknown> {
   const rows = readRows();
-  const wallets = [...new Set(rows.filter((r) => r.kind === "scout" && r.status === "accrued").map((r) => r.wallet))];
+  const wallets = [...new Set(rows.filter((r) => (r.kind === "scout" || r.kind === "xpost") && r.status === "accrued").map((r) => r.wallet))];
   const payouts = wallets
     .map((w) => ({ wallet: w, balanceUsd: Math.round(walletBalanceUsd(rows, w) * 100) / 100 }))
     .filter((p) => p.balanceUsd >= knobValue("scoutMinPayoutUsd"));
@@ -406,7 +408,7 @@ export async function recordExternalPayout(
 export async function settleBounties(): Promise<Record<string, unknown>> {
   return withHouseWalletLock("settle-bounties", async () => {
     const rows = readRows(); // MUST be read inside the lock — see the double-settle note above
-    const wallets = [...new Set(rows.filter((r) => r.kind === "scout" && r.status === "accrued").map((r) => r.wallet))];
+    const wallets = [...new Set(rows.filter((r) => (r.kind === "scout" || r.kind === "xpost") && r.status === "accrued").map((r) => r.wallet))];
     const paid: Array<{ wallet: string; amountUsd: number; txHash: string }> = [];
     const skipped: Array<{ wallet: string; balanceUsd: number; reason: string }> = [];
 
