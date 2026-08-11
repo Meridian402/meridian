@@ -179,3 +179,52 @@ test("THE INVARIANT: the adaptive clock only ever tightens, never loosens", () =
     }
   }
 });
+
+// ── the 5% rule, operator's call 2026-08-11 ──────────────────────────────────
+
+import { pctOutOfRange, staleBandAction } from "../src/memeGuard.js";
+
+test("in range is zero percent out, on either edge", () => {
+  assert.equal(pctOutOfRange(1500, 1000, 2000), 0);
+  assert.equal(pctOutOfRange(1000, 1000, 2000), 0);
+  assert.equal(pctOutOfRange(2000, 1000, 2000), 0);
+});
+
+test("the tick-to-percent conversion is exact where it matters", () => {
+  // 488 ticks is ~5.0% (1.0001^488 - 1). One side of the boundary holds, the
+  // other rebalances, and both directions of out-of-range measure the same.
+  assert.ok(pctOutOfRange(1000 - 487, 1000, 2000) < 5);
+  assert.ok(pctOutOfRange(1000 - 489, 1000, 2000) > 5);
+  assert.ok(pctOutOfRange(2000 + 489, 1000, 2000) > 5);
+});
+
+test("under five percent holds: the ordinary clocks keep owning the band", () => {
+  assert.equal(staleBandAction(0, 500), "hold");
+  assert.equal(staleBandAction(4.9, 500), "hold");
+  assert.equal(staleBandAction(4.9, 0), "hold", "a quiet pool changes nothing under the line");
+});
+
+test("THE RULE: five percent out rebalances now, however long the band has sat", () => {
+  assert.equal(staleBandAction(5, 57), "requote");
+  assert.equal(staleBandAction(8.2, 500), "requote");
+});
+
+test("five percent out in a DEAD pool withdraws to cash instead", () => {
+  // Re-quoting into a pool nobody trades is feeding a corpse; the capital
+  // comes home and redeploys wherever the tape actually is.
+  assert.equal(staleBandAction(5, 9), "withdraw");
+  assert.equal(staleBandAction(12, 0), "withdraw");
+  assert.equal(staleBandAction(5, 10), "requote", "the pulse bar is a strict floor");
+});
+
+test("the action is monotonic in distance: more stale never means more patient", () => {
+  const rank = { hold: 0, requote: 1, withdraw: 1 } as const;
+  for (const pulse of [0, 9, 10, 57, 500]) {
+    let prev = 0;
+    for (let pct = 0; pct <= 15; pct += 0.5) {
+      const r = rank[staleBandAction(pct, pulse)];
+      assert.ok(r >= prev, `went back to holding at ${pct}% pulse=${pulse}`);
+      prev = r;
+    }
+  }
+});

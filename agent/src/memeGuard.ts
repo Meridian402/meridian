@@ -773,15 +773,28 @@ export async function memeRotorTick(): Promise<void> {
     // pool doing under 25 swaps/hr pays the move cost to stand in an empty
     // room. Below the bar the band stays put and the stop ladder owns exits.
     const pumpChase = !knife && b.side === "eth" && b.currentTick < b.tickLower && poolPulse(b.poolId) >= CHASE_MIN_PULSE;
+    // The 5% rule: far-out ETH bands stop waiting on anything.
+    const oorPct = b.inRange ? 0 : pctOutOfRange(b.currentTick, b.tickLower, b.tickUpper);
+    const stale = b.side === "eth" && !knife && staleBandAction(oorPct, poolPulse(b.poolId)) !== "hold";
+    if (stale && staleBandAction(oorPct, poolPulse(b.poolId)) === "withdraw") {
+      try {
+        await withdrawBandToCash(reg, b);
+        outOfRangeSince.delete(b.tokenId);
+      } catch (err) {
+        errorBackoffUntil.set(b.tokenId, Date.now() + ERROR_BACKOFF_MS);
+        console.error(`[memeRotor] stale withdraw of #${b.tokenId} failed (backing off 1h): ${err instanceof Error ? err.message.slice(0, 140) : err}`);
+      }
+      continue;
+    }
     // Volume mode: hot pulse + calm drift quotes one spacing off spot at half
     // width, so fills cycle and each swap pays a bigger share. Mutually
     // exclusive with knife by construction (drift thresholds do not overlap).
     const vm = !knife && volumeMode(poolPulse(b.poolId), drift);
     const eff = vm ? tightened(reg) : reg;
-    if (now - since < (knife ? KNIFE_PERSIST_MS : pumpChase ? PUMP_CHASE_MIN_MS : OUT_OF_RANGE_MIN_MS)) continue;
+    if (!stale && now - since < (knife ? KNIFE_PERSIST_MS : pumpChase ? PUMP_CHASE_MIN_MS : OUT_OF_RANGE_MIN_MS)) continue;
     if ((errorBackoffUntil.get(b.tokenId) ?? 0) > now) continue;
     if (b.valueUsd < MIN_BAND_USD) continue;
-    if (pumpChase
+    if (pumpChase || stale
       ? now - (poolMoveAt.get(b.poolId) ?? 0) < PUMP_CHASE_POOL_COOLDOWN_MS
       : now - lastMoveAt < moveCooldownMs(poolPulse(b.poolId), drift)) continue;
     const offsetAbove = knife ? reg.offsetAbove + 2 : eff.offsetAbove;
@@ -797,7 +810,7 @@ export async function memeRotorTick(): Promise<void> {
       // A chase-up rotation deliberately does NOT bump the global clock:
       // making other venues wait because one pool is trending would recreate
       // the contention the pool-local cooldown exists to remove.
-      if (!pumpChase) lastMoveAt = Date.now();
+      if (!pumpChase && !stale) lastMoveAt = Date.now();
       movesToday += 1;
       outOfRangeSince.delete(b.tokenId);
     } catch (err) {
@@ -1138,6 +1151,32 @@ export function pulseSizeMultiplier(pulse: number): number {
  *  cost. Below this pulse a chase re-quote into the pool is refused; the band
  *  stays put and the stop ladder owns the exit. */
 const CHASE_MIN_PULSE = 25;
+
+// THE 5% RULE, operator's call 2026-08-11: a band five percent out of range is
+// not a position, it is dead capital wearing one's clothes. It earns nothing
+// where it sits and it re-enters the market at the worst possible moment (only
+// when price comes all the way back). At five percent the patience clocks and
+// the chase pulse bar stop applying and exactly one of two things happens: the
+// band is re-centered onto the market NOW if the pool still has a pulse, or it
+// is withdrawn to cash if the pool is dead, because re-quoting into a pool
+// nobody trades is feeding a corpse. ETH-side bands only: a token-side band
+// far out of range is unsold inventory, and its exit belongs to the stop
+// ladder, never to a re-center that would chase a dump downward.
+const STALE_BAND_PCT = 5;
+const STALE_WITHDRAW_PULSE = 10;
+
+/** Percent distance from spot to the nearest band edge, 0 when in range.
+ *  Ticks convert at 1.0001 each. Pure, for tests. */
+export function pctOutOfRange(currentTick: number, tickLower: number, tickUpper: number): number {
+  const away = currentTick < tickLower ? tickLower - currentTick : currentTick > tickUpper ? currentTick - tickUpper : 0;
+  return away === 0 ? 0 : (Math.pow(1.0001, away) - 1) * 100;
+}
+
+/** What the 5% rule does with a stale ETH-side band. Pure, for tests. */
+export function staleBandAction(oorPct: number, pulse: number): "hold" | "requote" | "withdraw" {
+  if (oorPct < STALE_BAND_PCT) return "hold";
+  return pulse >= STALE_WITHDRAW_PULSE ? "requote" : "withdraw";
+}
 
 const tokenHeldSince = new Map<string, number>();
 const tokenRefPriceEth = new Map<string, number>();
@@ -1505,6 +1544,29 @@ async function withdrawEthSides(): Promise<void> {
       console.error(`[memeRotor] stage-1 withdraw of #${b.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
     }
   }
+}
+
+/** Pull one pure-ETH band back to cash: riskless, sells nothing, journaled.
+ *  The 5% rule's dead-pool branch, and nothing else, calls this. */
+async function withdrawBandToCash(reg: EthPool, b: MemeBand): Promise<void> {
+  const signer = getAgentSigner();
+  if (!signer) return;
+  const client = getPublicClient();
+  const wallet = getWalletClient();
+  const liq = await client.readContract({
+    address: POSITION_MANAGER,
+    abi: [parseAbiItem("function getPositionLiquidity(uint256) view returns (uint128)")],
+    functionName: "getPositionLiquidity",
+    args: [BigInt(b.tokenId)],
+  });
+  if (liq === 0n) return;
+  const wd = buildNativeWithdraw(reg, BigInt(b.tokenId), liq, signer.address);
+  await client.call({ account: signer.address, to: wd.to, data: wd.data });
+  const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
+  const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
+  if (r.status !== "success") throw new Error(`stale withdraw reverted ${h}`);
+  appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "stale-withdraw", pool: reg.symbol, tokenId: b.tokenId, reason: "5% out of range in a dead pool", txs: [h] })}\n`);
+  console.log(`[memeRotor] stale band #${b.tokenId} (${reg.symbol}) withdrawn to cash: 5%+ out of range, pool too quiet to requote into`);
 }
 
 async function flattenAll(): Promise<void> {
