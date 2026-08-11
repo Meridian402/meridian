@@ -1361,6 +1361,7 @@ export async function looseInventoryUsd(ethUsd: number): Promise<number> {
 // limit and a "few hours" stage-1 halt silently becomes the whole day again.
 const DAILY_LOSS_LIMIT_USD = Number(process.env.MERIDIAN_DAILY_LOSS_LIMIT_USD ?? 75);
 const STAGE1_HALT_MS = 4 * 60 * 60 * 1000;
+const STAGE2_HALT_MS = 6 * 60 * 60 * 1000;
 let bookHwm = 0;
 let bookHwmDay = "";
 let breachStreak = 0;
@@ -1368,6 +1369,21 @@ let haltUntil = 0;
 
 export function deskHalted(): boolean {
   return Date.now() < haltUntil;
+}
+
+/** Operator lever: clear a breaker halt after a KNOWN-benign trigger (an
+ *  intentional withdrawal or burn reads exactly like a catastrophic loss to a
+ *  balance snapshot, and no amount of cleverness here can tell them apart).
+ *  Resets the high-water so the stale pre-withdrawal high cannot re-fire the
+ *  breaker on the next mark. Exposed via an authed admin route only. */
+export function clearBreakerHalt(): { cleared: boolean; wasHaltedUntil: number } {
+  const was = haltUntil;
+  haltUntil = 0;
+  breachStreak = 0;
+  bookHwmDay = ""; // next mark re-seeds the high-water at the current book
+  saveRotorState();
+  console.error(`[memeRotor] breaker halt CLEARED by operator (was until ${was ? new Date(was).toISOString() : "n/a"}); high-water re-seeds on the next mark`);
+  return { cleared: true, wasHaltedUntil: was };
 }
 
 /** Which response a drawdown deserves. Pure, for tests. */
@@ -1403,11 +1419,24 @@ export function noteBookMark(book: number): void {
   if (deskHalted()) return;
 
   if (stage === 2) {
-    haltUntil = Date.parse(`${today}T23:59:59Z`) + 1000;
+    // TWO consecutive marks, learned 2026-08-11 the expensive way: a single
+    // mark caught mid-operator-withdrawal (the buyback shuffle moved ~$312
+    // between wallets and out) read as a $168 collapse, and the one-mark
+    // stage 2 flattened the whole book into a midnight tape and stood down
+    // for a day. A mid-transfer distortion lasts one mark; a real catastrophe
+    // persists into the next. The four-minute confirmation costs at most one
+    // more mark of drawdown and buys immunity to every single-snapshot lie.
+    breachStreak += 1;
+    if (breachStreak < 2) return;
+    // Rolling halt, not the calendar: the engine's standing order is that it
+    // does not stop for a day on any single trigger. A catastrophe that is
+    // still real when the halt lifts re-fires immediately, because the
+    // high-water re-arms at the surviving level below.
+    haltUntil = Date.now() + STAGE2_HALT_MS;
     bookHwm = book; // re-arm from the surviving level
     breachStreak = 0;
     saveRotorState();
-    const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (2x limit $${2 * DAILY_LOSS_LIMIT_USD}); full flatten, down until tomorrow`;
+    const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (2x limit $${2 * DAILY_LOSS_LIMIT_USD}); full flatten, quoting down ${Math.round(STAGE2_HALT_MS / 3600000)}h`;
     appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "circuit-breaker", stage: 2, reason })}\n`);
     console.error(`[memeRotor] CIRCUIT BREAKER stage 2: ${reason}`);
     void withHouseWalletLock("circuitBreaker", flattenAll).catch((err) =>

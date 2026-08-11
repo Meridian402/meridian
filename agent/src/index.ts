@@ -11,7 +11,7 @@ import { ponsDeployment } from "./launch/pons.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
-import { startMemeFastWatch } from "./memeGuard.js";
+import { startMemeFastWatch, clearBreakerHalt, deskHalted } from "./memeGuard.js";
 import { assetScorecard } from "./assetScorecard.js";
 import { listSkills } from "./skills/registry.js";
 import { runLearningPass } from "./learn/harness.js";
@@ -1830,6 +1830,12 @@ app.post("/api/admin/record-payout", async (req: Request, res: Response) => {
 // The dials Merd turns himself. The ranges live in platformKnobs.ts and are
 // not settable over the wire: this surface can move a value inside its walls,
 // never move a wall.
+app.post("/api/admin/clear-halt", (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
+  if (!deskHalted()) { res.json({ cleared: false, note: "the desk is not halted" }); return; }
+  res.json(clearBreakerHalt());
+});
+
 app.get("/api/admin/knobs", (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
   res.json(knobsState());

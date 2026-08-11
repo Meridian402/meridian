@@ -138,3 +138,14 @@ test("the limit scales the stages, not just stage 1", () => {
   assert.equal(breakerStage(120, 100), 1);
   assert.equal(breakerStage(200, 100), 2);
 });
+
+// ── stage 2 confirmation, added 2026-08-11 after the burn false-positive ─────
+// The pure stage mapping is unchanged (these tests above still pin it); what
+// changed is the IMPURE half: stage 2 now needs two consecutive marks and
+// halts on a rolling clock. Those live in noteBookMark and are exercised in
+// production rather than faked here; this block pins the one new pure fact.
+
+test("stage 2 still begins at exactly twice the limit after the two-mark change", () => {
+  assert.equal(breakerStage(149.99, 75), 1);
+  assert.equal(breakerStage(150, 75), 2);
+});
