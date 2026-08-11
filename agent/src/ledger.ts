@@ -28,6 +28,7 @@ const TABLE = "meridian_ledger";
 // (lp-guard-state.json, position-state.json, rwa-universe.json) are not rows —
 // the snapshot mirror covers those.
 const LEDGER_FILES = [
+  "x-links.jsonl",
   "accounts.jsonl",
   "agent-settings.jsonl",
   "basis-log.jsonl",

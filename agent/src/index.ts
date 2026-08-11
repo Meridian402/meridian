@@ -74,6 +74,7 @@ import { prepareIndexYield } from "./earn/yieldPosition.js";
 import { stakingState, prepareStake } from "./earn/staking.js";
 import { runScout, scoutAllowed, bountyBoard, settleBounties, pendingPayouts, recordExternalPayout } from "./earn/scout.js";
 import { submitXPost, xPostAllowed, xTalkBoard } from "./earn/xTalk.js";
+import { xOAuthConfigured, beginLink, completeLink, linkedAccount } from "./social/xOAuth.js";
 import { knobsState, setKnob } from "./platformKnobs.js";
 import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
@@ -1694,6 +1695,44 @@ app.post("/api/custody/prepare-revoke", async (req: Request, res: Response) => {
 
 app.options("/api/earn/scout", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
 app.options("/api/earn/x-post", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+
+// ── X account linking: our own OAuth 2.0 + PKCE, no third party ──────────────
+// Sign-in stays wallet-only; this VERIFIES an X identity onto a signed-in
+// wallet so the earn surface can trust authorship. Dormant without the
+// client credentials in env.
+const X_CALLBACK = `${(process.env.MERIDIAN_PUBLIC_MCP_URL ?? "https://meridian402-api-production.up.railway.app").replace(/\/mcp$/, "").replace(/\/$/, "")}/api/auth/x/callback`;
+const SITE_RETURN = "https://meridian402.xyz/#earn";
+
+app.options("/api/auth/x/start", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post("/api/auth/x/start", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  if (!xOAuthConfigured()) { res.status(503).json({ ok: false, error: "X linking is not armed yet" }); return; }
+  res.json({ ok: true, url: beginLink(address, X_CALLBACK).url });
+});
+
+// The callback arrives from X's redirect, so it carries no bearer token; the
+// single-use server-side state is what binds it to the wallet that started.
+app.get("/api/auth/x/callback", async (req: Request, res: Response) => {
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  if (!state || !code) { res.redirect(`${SITE_RETURN}?x=denied`); return; }
+  try {
+    const r = await completeLink(state, code, X_CALLBACK);
+    res.redirect(r.ok ? `${SITE_RETURN}?x=linked` : `${SITE_RETURN}?x=failed&why=${encodeURIComponent(r.error ?? "")}`);
+  } catch {
+    res.redirect(`${SITE_RETURN}?x=failed`);
+  }
+});
+
+app.options("/api/auth/x/status", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/auth/x/status", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  res.json({ ok: true, armed: xOAuthConfigured(), linked: linkedAccount(address) });
+});
 // Talk-about-Merd bounty: validate a public X post and accrue on the shared
 // bounty ledger. No model turn is spent here (the validation is an HTTP read),
 // so unlike scout this takes no slot and records no turn; the caps in

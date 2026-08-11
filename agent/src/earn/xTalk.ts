@@ -21,6 +21,7 @@ import { dataPath } from "../dataDir.js";
 import { existsSync, readFileSync } from "node:fs";
 import { knobValue } from "../platformKnobs.js";
 import { config } from "../config.js";
+import { linkedAccount, xOAuthConfigured } from "../social/xOAuth.js";
 
 const LOG = "bounties.jsonl";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -188,7 +189,18 @@ export async function submitXPost(wallet: string, url: string): Promise<XPostRes
     return { ok: false, message: "could not read that post right now (it may be private, deleted, or X is slow). the try was not counted." };
   }
 
-  const refusal = postRefusal(tweet, Date.now()) ?? bindingRefusal(rows, w, tweet.authorId);
+  // A wallet with a VERIFIED X link may only submit that account's posts:
+  // OAuth-proven authorship replaces the first-claim heuristic entirely. When
+  // linking is armed platform-wide, a link is REQUIRED, so the earn surface
+  // and the login identity stay in sync rather than side by side.
+  let linkRefusalMsg: string | null = null;
+  const link = linkedAccount(w);
+  if (link) {
+    if (link.xId !== tweet.authorId) linkRefusalMsg = `your wallet is verified as @${link.handle}; only that account's posts earn here`;
+  } else if (xOAuthConfigured()) {
+    linkRefusalMsg = "connect your X account first (the button above), then submit your post";
+  }
+  const refusal = linkRefusalMsg ?? postRefusal(tweet, Date.now()) ?? bindingRefusal(rows, w, tweet.authorId);
   if (refusal) {
     appendLedger(LOG, { ts: Date.now(), kind: "xpost", wallet: w, status: "invalid", amountUsd: 0, url: canonical, authorId: tweet.authorId });
     return { ok: false, message: refusal };

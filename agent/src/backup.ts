@@ -112,6 +112,10 @@ const FILES = [
   // the desk has of its own P&L over time.
   "book-snapshots.jsonl",
   "turns.jsonl",
+  // x-links.jsonl is the wallet-to-X identity ledger behind the earn surface's
+  // sybil rule. Losing it un-verifies every linked account and reopens
+  // first-claim squatting, so it is durable from birth, in BOTH lists.
+  "x-links.jsonl",
 ];
 
 const lastHash = new Map<string, string>();
