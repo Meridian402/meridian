@@ -149,3 +149,33 @@ test("stage 2 still begins at exactly twice the limit after the two-mark change"
   assert.equal(breakerStage(149.99, 75), 1);
   assert.equal(breakerStage(150, 75), 2);
 });
+
+// ── the adaptive move clock, added 2026-08-11 at the operator's call ─────────
+
+import { moveCooldownMs } from "../src/memeGuard.js";
+
+test("the clock tightens ONLY for hot-and-calm, the regime that pays", () => {
+  assert.equal(moveCooldownMs(500, 1.0), 3 * 60 * 1000, "hot and calm: three minutes");
+  assert.equal(moveCooldownMs(57, 2.3), 3 * 60 * 1000, "modestly hot, calm: still fast");
+});
+
+test("hot-and-trending gets NO speedup: speed there buys adverse selection", () => {
+  assert.equal(moveCooldownMs(500, 7.4), 7 * 60 * 1000, "the exact tape that ate today's bids");
+  assert.equal(moveCooldownMs(95, -6.8), 7 * 60 * 1000, "direction does not matter");
+});
+
+test("cold tape keeps the slow clock no matter how calm", () => {
+  assert.equal(moveCooldownMs(10, 0.5), 7 * 60 * 1000);
+  assert.equal(moveCooldownMs(49, 1.0), 7 * 60 * 1000, "just under the volume bar");
+  assert.equal(moveCooldownMs(null, null), 7 * 60 * 1000, "unknown tape is a slow tape");
+});
+
+test("THE INVARIANT: the adaptive clock only ever tightens, never loosens", () => {
+  for (const pulse of [null, 0, 25, 49, 50, 100, 548]) {
+    for (const drift of [null, 0, 2, 3.9, 4, 7, -7]) {
+      const ms = moveCooldownMs(pulse as number | null, drift as number | null);
+      assert.ok(ms <= 7 * 60 * 1000, `slower than the old clock at pulse=${pulse} drift=${drift}`);
+      assert.ok(ms >= 3 * 60 * 1000, `faster than the hot-calm floor at pulse=${pulse} drift=${drift}`);
+    }
+  }
+});

@@ -73,6 +73,21 @@ const FLOW_LOG = dataPath("pool-flow.jsonl");
 const OUT_OF_RANGE_MIN_MS = 10 * 60 * 1000;
 const KNIFE_PERSIST_MS = 30 * 60 * 1000;
 const GLOBAL_COOLDOWN_MS = 7 * 60 * 1000;
+// THE CLOCK FOLLOWS THE TAPE, 2026-08-11. A flat seven minutes between moves
+// was sized for an ordinary tape and quietly rationed the desk's best hours:
+// in volume-mode conditions (hot pulse, calm drift, the one regime that has
+// paid every single profitable day this week) price walks through a band in
+// a couple of minutes and the desk sat stale for five more. The clock now
+// tightens to three minutes exactly when the tape is measured hot AND calm,
+// and stays at seven everywhere else. It deliberately does NOT tighten for
+// hot-and-trending, which is the regime that eats bids; speed there would
+// just buy more adverse selection per hour.
+const HOT_CALM_COOLDOWN_MS = 3 * 60 * 1000;
+
+/** The wait between risk-adding moves, decided by the tape. Pure, for tests. */
+export function moveCooldownMs(pulseSwapsPerHour: number | null, driftPctPerHr: number | null): number {
+  return volumeMode(pulseSwapsPerHour ?? 0, driftPctPerHr) ? HOT_CALM_COOLDOWN_MS : GLOBAL_COOLDOWN_MS;
+}
 // A bid the price ran away from UPWARD is a different animal than a bid in a
 // falling market: re-quoting up behind a rising price is knife-free (the new
 // bid only fills on a pullback, which is the trade this desk wants), so it
@@ -768,7 +783,7 @@ export async function memeRotorTick(): Promise<void> {
     if (b.valueUsd < MIN_BAND_USD) continue;
     if (pumpChase
       ? now - (poolMoveAt.get(b.poolId) ?? 0) < PUMP_CHASE_POOL_COOLDOWN_MS
-      : now - lastMoveAt < GLOBAL_COOLDOWN_MS) continue;
+      : now - lastMoveAt < moveCooldownMs(poolPulse(b.poolId), drift)) continue;
     const offsetAbove = knife ? reg.offsetAbove + 2 : eff.offsetAbove;
     const target = targetRange(eff, b.currentTick, b.side, offsetAbove);
     // Only spend a move when the quote is materially better, unless the band
@@ -1616,7 +1631,15 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     expandDay = today;
     expandsToday = 0;
   }
-  if (Date.now() - lastMoveAt < GLOBAL_COOLDOWN_MS) return;
+  {
+    // The expansion clock reads the hottest pool we quote: compounding into a
+    // printing venue should not wait on a clock sized for a sleepy one.
+    const hottest = bands.reduce<{ pulse: number; drift: number | null }>((best, b) => {
+      const pl = poolPulse(b.poolId);
+      return pl > best.pulse ? { pulse: pl, drift: tickDriftPctPerHour(poolTickHistory.get(b.poolId.toLowerCase()) ?? [], Date.now()) } : best;
+    }, { pulse: 0, drift: null });
+    if (Date.now() - lastMoveAt < moveCooldownMs(hottest.pulse, hottest.drift)) return;
+  }
 
   // Priority order is the operator's allocation policy (flipped 2026-08-05,
   // concentration order):
@@ -1668,7 +1691,16 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     }
   }
   let adopted: CandidateVenue | null = null;
-  let capUsd = PROBATION_CAP_USD;
+  // COMPOUNDING INTO A PROVEN EARNER IS NOT A PROBE, 2026-08-11. The probation
+  // cap exists so a stranger venue cannot take real size on its first date.
+  // Applying the same $250 to the venue currently paying us treated our best
+  // pool like our riskiest, and it could not scale: the cap was set when the
+  // book was half this size. A compound entry now sizes at 15% of the desk's
+  // own float (idle + working, never the treasury), floored at the probation
+  // cap so it is never SMALLER than before. Probes and fresh candidates keep
+  // the flat cap and the half-size overrides exactly as they were.
+  const deskFloatUsd = idleUsd + bands.reduce((s, b) => s + b.valueUsd, 0);
+  let capUsd = target ? Math.max(PROBATION_CAP_USD, 0.15 * deskFloatUsd) : PROBATION_CAP_USD;
   if (!target) {
     const probes = [...venueByToken.values()]
       .filter((p) => {
