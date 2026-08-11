@@ -400,11 +400,19 @@ export async function discoverOwnedPositions(wallet: Address): Promise<ChainPosi
   // not commit it, do not return it, and leave the previous cursor intact so a
   // good picture is not replaced by a bad one. Callers already treat a throw as
   // "keep the last good view" rather than "the book is empty".
+  // At the SAME height as the log scan, or the check races the desk's own
+  // minting: a band minted between getLogs(toBlock: head) and a latest-height
+  // balanceOf reads as found-N, holds-N+1, and this desk mints every few
+  // minutes. Measured live 2026-08-11: found 557/holds 558, then 561/562,
+  // always exactly one behind, throwing on every raced tick. Pinning both
+  // reads to `head` makes the comparison exact while keeping full sensitivity
+  // to real truncation.
   const heldOnChain = await client.readContract({
     address: POSITION_MANAGER,
     abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
     functionName: "balanceOf",
     args: [wallet],
+    blockNumber: head,
   });
   if (BigInt(owned.size) < heldOnChain) {
     throw new Error(
@@ -454,6 +462,13 @@ export async function lpPositionsWithValue(): Promise<LpPositionValue[]> {
   const out: LpPositionValue[] = [];
   for (const p of positions) {
     if (p.liquidity === 0n) continue; // emptied position: it is owned but holds nothing
+    // THE MEME SLEEVE'S BANDS ARE NOT STOCK POSITIONS. This valuation assumes
+    // a 6-decimal USDG quote; a native-quoted band (18 decimals) inflates by
+    // 1e12 and one such leak made the allocator believe it managed $2.3e17,
+    // at which size every real pool reads as too thin and the stock sleeve
+    // sits in cash forever (measured live 2026-08-11). memeGuard values its
+    // own bands; this list is the USDG book only.
+    if (p.currency0.toLowerCase() === NATIVE.toLowerCase()) continue;
     const poolId = keccak256(
       encodeAbiParameters(parseAbiParameters("address, address, uint24, int24, address"), [p.currency0, p.currency1, p.fee, p.tickSpacing, NATIVE]),
     );
