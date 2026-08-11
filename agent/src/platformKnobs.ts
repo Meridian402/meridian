@@ -32,6 +32,9 @@ export const KNOBS: Record<string, KnobSpec> = {
   // these did not exist when config was written.
   xPostBountyUsd: { min: 0.05, max: 0.25, fallback: () => 0.1 },
   xPostMaxPerWalletPerDay: { min: 1, max: 5, integer: true, fallback: () => 2 },
+  // Eligibility floor for the earn surfaces: USD of MERD (at the live pool
+  // spot) a wallet must hold to submit. Zero disables the gate.
+  merdHoldGateUsd: { min: 0, max: 500, integer: true, fallback: () => 100 },
 };
 
 interface KnobRow {

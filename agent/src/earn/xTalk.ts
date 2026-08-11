@@ -22,6 +22,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { knobValue } from "../platformKnobs.js";
 import { config } from "../config.js";
 import { linkedAccount, xOAuthConfigured } from "../social/xOAuth.js";
+import { merdHeldUsd, holdGateRefusal } from "../merd/merdSpot.js";
+import type { Address } from "viem";
 
 const LOG = "bounties.jsonl";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -173,6 +175,18 @@ export async function submitXPost(wallet: string, url: string): Promise<XPostRes
   if (!parsed) return { ok: false, message: "that is not a link to an X post (expected x.com/yourname/status/...)" };
 
   const canonical = `https://x.com/${parsed.handle}/status/${parsed.id}`;
+
+  // Skin in the game, checked BEFORE the attempt row so an ineligible wallet
+  // is told what it needs without burning a daily slot. The knob at zero
+  // disables the gate. A failed price read throws to the route's catch: an
+  // unreadable holding must read as "try again", never as "you hold nothing".
+  const required = knobValue("merdHoldGateUsd");
+  if (required > 0) {
+    const held = await merdHeldUsd(w as Address);
+    const gate = holdGateRefusal(held, required);
+    if (gate) return { ok: false, message: `${gate}. the contract address is in the tokenomics tab.` };
+  }
+
   const rows = readRows();
   // One bounty per tweet, ever, checked before the attempt row so a duplicate
   // does not burn a submission slot.

@@ -115,3 +115,30 @@ test("binding is case-insensitive on the wallet", () => {
   const rows = [accrued("0xaaa", "111")];
   assert.equal(bindingRefusal(rows, "0xAAA", "111"), null, "checksum casing must not fork an identity");
 });
+
+// ── the holder gate ──────────────────────────────────────────────────────────
+
+import { holdGateRefusal, merdPerWeth } from "../src/merd/merdSpot.js";
+
+test("holding the floor or more passes, holding less names both numbers", () => {
+  assert.equal(holdGateRefusal(100, 100), null, "exactly the floor is enough");
+  assert.equal(holdGateRefusal(250.5, 100), null);
+  const r = holdGateRefusal(12.34, 100)!;
+  assert.match(r, /\$100/, "the requirement is named");
+  assert.match(r, /\$12\.34/, "and so is what they actually hold");
+});
+
+test("a zero requirement disables the gate entirely", () => {
+  assert.equal(holdGateRefusal(0, 0), null, "knob at zero means no gate, even for empty wallets");
+});
+
+test("an empty wallet is refused when the gate is on", () => {
+  assert.match(holdGateRefusal(0, 100)!, /at least \$100 of MERD/);
+});
+
+test("the pool price math round-trips a known sqrtPrice", () => {
+  // sqrtPriceX96 = 2^96 means price exactly 1 token1 per token0.
+  assert.equal(merdPerWeth(2n ** 96n), 1);
+  // Doubling sqrt quadruples price, the v3 invariant this must preserve.
+  assert.equal(merdPerWeth(2n ** 97n), 4);
+});
