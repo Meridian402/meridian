@@ -301,7 +301,7 @@ async function ensureApprovedForSwap(token: Address, amount: bigint): Promise<vo
   });
   if (erc20Allowance < amount) {
     const hash = await wallet.writeContract({ address: token, abi: erc20Abi, functionName: "approve", args: [PERMIT2, (1n << 256n) - 1n] });
-    await client.waitForTransactionReceipt({ hash });
+    await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   }
 
   const [permit2Allowance] = await client.readContract({
@@ -318,7 +318,7 @@ async function ensureApprovedForSwap(token: Address, amount: bigint): Promise<vo
       functionName: "approve",
       args: [token, UNIVERSAL_ROUTER, (1n << 160n) - 1n, expiration],
     });
-    await client.waitForTransactionReceipt({ hash });
+    await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   }
 }
 
@@ -428,7 +428,7 @@ async function swapExactInPath(params: {
   const balanceBefore = await currencyBalance(outputCurrency, signer.address);
   const hash = await wallet.sendTransaction({ to, data, value });
   const client = getPublicClient();
-  await client.waitForTransactionReceipt({ hash });
+  await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   const balanceAfter = await currencyBalance(outputCurrency, signer.address);
   return { hash, amountOutReal: balanceAfter - balanceBefore };
 }
@@ -467,7 +467,7 @@ export async function unwrapWeth(): Promise<{ hash: Hex; amountWei: bigint } | n
     functionName: "withdraw",
     args: [balance],
   });
-  await client.waitForTransactionReceipt({ hash });
+  await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   return { hash, amountWei: balance };
 }
 

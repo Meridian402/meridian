@@ -119,7 +119,7 @@ async function ensureApprovedForPM(token: Address): Promise<void> {
   const erc20Allowance = await client.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [signer.address, PERMIT2] });
   if (erc20Allowance < 1n << 128n) {
     const hash = await wallet.writeContract({ address: token, abi: erc20Abi, functionName: "approve", args: [PERMIT2, (1n << 256n) - 1n] });
-    await client.waitForTransactionReceipt({ hash });
+    await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   }
   const [p2] = await client.readContract({ address: PERMIT2, abi: permit2Abi, functionName: "allowance", args: [signer.address, token, POSITION_MANAGER] });
   if (BigInt(p2) < 1n << 100n) {
@@ -130,7 +130,7 @@ async function ensureApprovedForPM(token: Address): Promise<void> {
       functionName: "approve",
       args: [token, POSITION_MANAGER, (1n << 160n) - 1n, expiration],
     });
-    await client.waitForTransactionReceipt({ hash });
+    await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   }
 }
 
@@ -232,7 +232,7 @@ export async function mintRange(params: { symbol: string; widthPct: number }): P
     to: POSITION_MANAGER,
     data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
   });
-  const receipt = await client.waitForTransactionReceipt({ hash });
+  const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`mint reverted: ${hash}`);
 
   // tokenId from the ERC721 mint Transfer(0x0 -> us) on the PositionManager.
@@ -629,7 +629,7 @@ export async function collectFees(params: { tokenId: string; symbol: string }): 
     to: POSITION_MANAGER,
     data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
   });
-  const receipt = await client.waitForTransactionReceipt({ hash });
+  const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`collect reverted: ${hash}`);
 
   const [usdgAfter, tokenAfter] = await Promise.all([bal(USDG), bal(k.token)]);
@@ -699,7 +699,7 @@ export async function withdrawPosition(params: { tokenId: string; symbol: string
     to: POSITION_MANAGER,
     data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
   });
-  const receipt = await getPublicClient().waitForTransactionReceipt({ hash });
+  const receipt = await getPublicClient().waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`withdraw reverted: ${hash}`);
   appendLedger("lp-positions.jsonl", { tokenId: params.tokenId, closedAt: Date.now(), txHash: hash });
   recordExecution({ ts: Date.now(), kind: "lp-exit", fromSymbol: params.symbol, toSymbol: "USDG", amountUsd: 0, success: true, txHash: hash });

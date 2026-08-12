@@ -77,7 +77,7 @@ export async function ensureRouterApprovals(p: EthPool, amountWei: bigint): Prom
       args: [PERMIT2, maxUint256],
     });
     const h = await wallet.sendTransaction({ to: p.token, data });
-    await client.waitForTransactionReceipt({ hash: h });
+    await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
   }
   const [p2] = await client.readContract({
     address: PERMIT2,
@@ -92,7 +92,7 @@ export async function ensureRouterApprovals(p: EthPool, amountWei: bigint): Prom
       args: [p.token, UNIVERSAL_ROUTER, maxUint160, 2 ** 48 - 1],
     });
     const h = await wallet.sendTransaction({ to: PERMIT2, data });
-    await client.waitForTransactionReceipt({ hash: h });
+    await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
   }
 }
 
@@ -123,7 +123,7 @@ export async function sellTokenForEth(
   const before = await client.getBalance({ address: signer.address });
   await client.call({ account: signer.address, to: tx.to, data: tx.data });
   const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data });
-  const r = await client.waitForTransactionReceipt({ hash });
+  const r = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (r.status !== "success") throw new Error(`sell reverted ${hash}`);
   const ethOut = (await client.getBalance({ address: signer.address })) - before;
   return { hash, ethOut: ethOut > 0n ? ethOut : 0n, minOut };

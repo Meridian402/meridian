@@ -152,7 +152,7 @@ async function ensureIndexApprovedForSwap(amount: bigint): Promise<void> {
       functionName: "approve",
       args: [PERMIT2, (1n << 256n) - 1n],
     });
-    await client.waitForTransactionReceipt({ hash });
+    await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   }
 
   const [permit2Allowance] = await client.readContract({
@@ -169,7 +169,7 @@ async function ensureIndexApprovedForSwap(amount: bigint): Promise<void> {
       functionName: "approve",
       args: [INDEX_TOKEN, UNIVERSAL_ROUTER, (1n << 160n) - 1n, expiration],
     });
-    await client.waitForTransactionReceipt({ hash });
+    await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   }
 }
 
@@ -249,7 +249,7 @@ async function swapExactInSingle(params: {
 
   const hash = await wallet.sendTransaction({ to, data, value });
   const client = getPublicClient();
-  const receipt = await client.waitForTransactionReceipt({ hash });
+  const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   const outputToken = zeroForOne ? POOL_KEY.currency1 : POOL_KEY.currency0;
   const amountReceived =
     outputToken === NATIVE
