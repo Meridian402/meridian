@@ -746,17 +746,19 @@ app.get("/api/proof", async (_req: Request, res: Response) => {
 // No `capital` query => sized from the wallet's REAL deployable capital. Pass
 // one to ask "what would $X earn"; that answer is explicitly excluded from the
 // cache the autonomous rebalancer reads.
-// The USDG flow surface: where the stablecoin-denominated liquidity is and what
-// it would pay an LP, scored on the same fees-minus-markout bar as the desk.
-// READ-ONLY sight into the half of the chain the ETH-only discovery never saw;
-// nothing here deploys capital. `?refresh=1` re-indexes new pools first (slower).
-app.get("/api/flow-scan", async (req: Request, res: Response) => {
+// The USDG flow surface, served from the background job's last result only.
+// The scan itself (genesis index + full-chain swap sweep) is far too heavy to
+// run on a request thread -- doing so spiked memory and restarted the service
+// on 2026-08-12, with the desk auto-recovering. It now runs ONLY in the gated
+// background job (MERIDIAN_RUN_FLOW_SCAN), which writes flow-scan-latest.json;
+// this endpoint just reads that file. Read-only, and it can never touch the
+// desk's memory or threads.
+app.get("/api/flow-scan", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
-    if (req.query.refresh === "1") await updateUsdgPoolIndex();
-    const minSwaps = Number(req.query.minSwaps);
-    const { scanned, rows } = await analyzeUsdgPools(Number.isFinite(minSwaps) && minSwaps > 0 ? minSwaps : 30);
-    res.json({ scanned, count: rows.length, rows: rows.slice(0, 50) });
+    const path = dataPath("flow-scan-latest.json");
+    if (!existsSync(path)) { res.json({ ready: false, note: "no scan yet; enable MERIDIAN_RUN_FLOW_SCAN" }); return; }
+    res.json(JSON.parse(readFileSync(path, "utf8")));
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message.slice(0, 160) : "flow scan unavailable" });
   }
@@ -2274,7 +2276,8 @@ if (process.env.MERIDIAN_RUN_FLOW_SCAN === "1") {
   const runFlowScan = async () => {
     try {
       const { added, known } = await updateUsdgPoolIndex();
-      const { rows } = await analyzeUsdgPools();
+      const { scanned, rows } = await analyzeUsdgPools();
+      writeFileSync(dataPath("flow-scan-latest.json"), JSON.stringify({ ready: true, at: Date.now(), scanned, count: rows.length, rows: rows.slice(0, 50) }));
       const top = rows.filter((r) => r.verdict === "fees beat toxicity").slice(0, 6);
       console.log(`[flowScan] ${known} USDG pools indexed (+${added}); top by LP-net/day: ${top.map((r) => `${r.token.slice(0, 8)} $${r.lpNetUsd24h}/d @${r.feeTierPct}%`).join(", ") || "none cleared the bar"}`);
     } catch (err) {

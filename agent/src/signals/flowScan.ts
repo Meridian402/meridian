@@ -245,6 +245,10 @@ export async function analyzeUsdgPools(minSwaps = 30): Promise<{ scanned: number
         if (!sample) continue;
         let arr = swaps.get(id);
         if (!arr) swaps.set(id, (arr = []));
+        // Bounded retention: a $650M/day chain would otherwise hold every swap
+        // in memory at once. 1500 recent samples per pool scores the same and
+        // caps the footprint. This is why the request thread must never call it.
+        if (arr.length >= 3000) arr.splice(0, arr.length - 1500);
         arr.push(sample);
       }
     },
