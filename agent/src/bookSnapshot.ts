@@ -86,7 +86,15 @@ export async function computeBookNow(): Promise<BookPoint | null> {
  *  to ~20:42: the snapshotter did not count loose wallet tokens and printed
  *  a $290-deep crater that never happened. The raw lines stay in the ledger
  *  (we do not rewrite history); they are just never served as truth. */
-export const QUARANTINED: [number, number][] = [[1785972000000, 1785973400000]];
+export const QUARANTINED: [number, number][] = [
+  [1785972000000, 1785973400000],
+  // 2026-08-11 00:20-00:45Z: the operator's buyback shuffle moved balances
+  // between wallets mid-snapshot and one mark read the book ~$480 low. The
+  // spike tripped the old one-mark breaker and then sat in the daily record
+  // as a fake $482.67 max drawdown. Marks in this window are not readings of
+  // the book, they are photographs of money mid-flight.
+  [1786407600000, 1786409100000],
+];
 
 export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPoint[] {
   if (!existsSync(BOOK_PATH)) return [];
