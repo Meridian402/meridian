@@ -116,6 +116,10 @@ const FILES = [
   // sybil rule. Losing it un-verifies every linked account and reopens
   // first-claim squatting, so it is durable from birth, in BOTH lists.
   "x-links.jsonl",
+  // usdg-pool-index.json is the flow scanner's durable checkpoint of every
+  // USDG-quoted pool it has discovered. Losing it forces a slow from-genesis
+  // re-scan; read-only, but the rebuild is expensive, so it is durable.
+  "usdg-pool-index.json",
 ];
 
 const lastHash = new Map<string, string>();

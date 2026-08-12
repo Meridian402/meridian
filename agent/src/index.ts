@@ -58,6 +58,7 @@ import { recall } from "./learn/recall.js";
 import { consistencyBoard } from "./consistency.js";
 import { marketMakingProof } from "./marketMakingPnl.js";
 import { scanOpportunities, startLpAllocator } from "./lpAllocator.js";
+import { updateUsdgPoolIndex, analyzeUsdgPools } from "./signals/flowScan.js";
 import { startBasisLogger } from "./research/basisLogger.js";
 import { startLighterLogger } from "./research/lighterLogger.js";
 import { startYieldLogger, yieldSummary } from "./research/yieldLogger.js";
@@ -745,6 +746,22 @@ app.get("/api/proof", async (_req: Request, res: Response) => {
 // No `capital` query => sized from the wallet's REAL deployable capital. Pass
 // one to ask "what would $X earn"; that answer is explicitly excluded from the
 // cache the autonomous rebalancer reads.
+// The USDG flow surface: where the stablecoin-denominated liquidity is and what
+// it would pay an LP, scored on the same fees-minus-markout bar as the desk.
+// READ-ONLY sight into the half of the chain the ETH-only discovery never saw;
+// nothing here deploys capital. `?refresh=1` re-indexes new pools first (slower).
+app.get("/api/flow-scan", async (req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    if (req.query.refresh === "1") await updateUsdgPoolIndex();
+    const minSwaps = Number(req.query.minSwaps);
+    const { scanned, rows } = await analyzeUsdgPools(Number.isFinite(minSwaps) && minSwaps > 0 ? minSwaps : 30);
+    res.json({ scanned, count: rows.length, rows: rows.slice(0, 50) });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message.slice(0, 160) : "flow scan unavailable" });
+  }
+});
+
 app.get("/api/lp-scan", async (req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
@@ -2249,6 +2266,24 @@ void logFundingHealthAtBoot(); // says what the wallets can actually pay for, be
 startBackups(); // Postgres mirror of the durable JSONL/JSON state + boot-time restore
 void initLedger(); // row-level Postgres ledger: table + one-time history backfill, then live dual-writes
 scheduleOpenDeploy(); // one-shot capital deployment at the next open, if a plan is configured
+
+// The USDG flow scanner: keep the index warm and log the ranked surface so the
+// operator can watch where the stablecoin liquidity concentrates over time.
+// Read-only; opt-in because it does real RPC work every pass.
+if (process.env.MERIDIAN_RUN_FLOW_SCAN === "1") {
+  const runFlowScan = async () => {
+    try {
+      const { added, known } = await updateUsdgPoolIndex();
+      const { rows } = await analyzeUsdgPools();
+      const top = rows.filter((r) => r.verdict === "fees beat toxicity").slice(0, 6);
+      console.log(`[flowScan] ${known} USDG pools indexed (+${added}); top by LP-net/day: ${top.map((r) => `${r.token.slice(0, 8)} $${r.lpNetUsd24h}/d @${r.feeTierPct}%`).join(", ") || "none cleared the bar"}`);
+    } catch (err) {
+      console.error(`[flowScan] pass failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
+    }
+  };
+  void runFlowScan();
+  setInterval(runFlowScan, 30 * 60 * 1000).unref?.();
+}
 
 // Global error handler (registered last): log the real error server-side and
 // return a generic message, so a route exception can never leak internals

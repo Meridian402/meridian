@@ -29,6 +29,7 @@ const TABLE = "meridian_ledger";
 // the snapshot mirror covers those.
 const LEDGER_FILES = [
   "x-links.jsonl",
+  "usdg-pool-index.json",
   "accounts.jsonl",
   "agent-settings.jsonl",
   "basis-log.jsonl",
