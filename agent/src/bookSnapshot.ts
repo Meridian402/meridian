@@ -88,12 +88,14 @@ export async function computeBookNow(): Promise<BookPoint | null> {
  *  (we do not rewrite history); they are just never served as truth. */
 export const QUARANTINED: [number, number][] = [
   [1785972000000, 1785973400000],
-  // 2026-08-11 00:20-00:45Z: the operator's buyback shuffle moved balances
-  // between wallets mid-snapshot and one mark read the book ~$480 low. The
-  // spike tripped the old one-mark breaker and then sat in the daily record
-  // as a fake $482.67 max drawdown. Marks in this window are not readings of
-  // the book, they are photographs of money mid-flight.
-  [1786407600000, 1786409100000],
+  // 2026-08-11 00:00-01:00Z: the operator's buyback night. Wallet approvals,
+  // treasury-to-execution shuffles, the swap and the burn spanned the first
+  // half hour, snapshots caught money mid-flight repeatedly (one mark read
+  // ~$480 low and tripped the old one-mark breaker), and the flatten it
+  // triggered owns the rest of the hour. A first pass quarantined 00:20-00:45
+  // and the distorted trough survived just outside it, so the whole hour goes:
+  // nothing in it is a reading of the book.
+  [1786406400000, 1786410000000],
 ];
 
 export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPoint[] {
