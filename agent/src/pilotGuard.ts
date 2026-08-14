@@ -24,11 +24,19 @@ import { appendLedger } from "./ledger.js";
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
 const FLOOR_USD = Number(process.env.MERIDIAN_PILOT_FLOOR_USD ?? 120);
-const RECENTER_MIN_OUT_MS = Number(process.env.MERIDIAN_PILOT_RECENTER_MIN ?? 45) * 60 * 1000;
+// THE WAIT IS ASYMMETRIC (operator insight, 2026-08-14). The two exits are
+// not the same trade. Exit BELOW: the position holds the fallen token, and
+// re-centering REALIZES the drift, so patience protects real money there.
+// Exit ABOVE: the position holds pure USDG (it sold the token on the way up
+// at good prices), there is nothing to realize, and every waiting minute on
+// a pumping pool is fees not earned. Down waits for proof; up only debounces.
+const RECENTER_BELOW_MIN_MS = Number(process.env.MERIDIAN_PILOT_RECENTER_MIN ?? 30) * 60 * 1000;
+const RECENTER_ABOVE_MIN_MS = Number(process.env.MERIDIAN_PILOT_RECENTER_ABOVE_MIN ?? 12) * 60 * 1000;
 const REBAND_WIDTH_PCT = 20; // ±10%, the width the pilot proved
 /** Price still moving away faster than this (pct over the stability window) blocks a re-center. */
 const STABLE_DRIFT_PCT = 1.0;
 const STABILITY_WINDOW_MS = 30 * 60 * 1000;
+const STABILITY_WINDOW_ABOVE_MS = 12 * 60 * 1000;
 
 interface TickSample {
   t: number;
@@ -50,7 +58,7 @@ export function recenterVerdict(
   now: number,
   samples: readonly TickSample[],
   awayIsTickDown: boolean,
-  minOutMs = RECENTER_MIN_OUT_MS,
+  minOutMs = RECENTER_BELOW_MIN_MS,
   stableDriftPct = STABLE_DRIFT_PCT,
   windowMs = STABILITY_WINDOW_MS,
 ): { act: boolean; reason: string } {
@@ -159,7 +167,11 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   // token is currency0, and as tick rises when it is currency1.
   const belowBand = tokenIsC0 ? tick < p.tickLower : tick >= p.tickUpper;
   const awayIsTickDown = tokenIsC0 ? belowBand : !belowBand;
-  const verdict = recenterVerdict(outSince.get(key), now, hist, awayIsTickDown);
+  // Below: the slow clock (drift realization risk). Above: the fast clock
+  // (all-USDG, nothing to realize, missed fees are the only cost).
+  const minOut = belowBand ? RECENTER_BELOW_MIN_MS : RECENTER_ABOVE_MIN_MS;
+  const window = belowBand ? STABILITY_WINDOW_MS : STABILITY_WINDOW_ABOVE_MS;
+  const verdict = recenterVerdict(outSince.get(key), now, hist, awayIsTickDown, minOut, STABLE_DRIFT_PCT, window);
   if (!verdict.act) {
     return; // quiet: the state line is logged on transitions, not every tick
   }
@@ -191,6 +203,8 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   const timer = setInterval(() => void tickFn(), CHECK_MS);
   timer.unref?.();
   void tickFn();
-  console.error(`[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}} — collect ≥$${COLLECT_THRESHOLD_USD}, re-center after ${RECENTER_MIN_OUT_MS / 60000}m out + stable tape, floor $${FLOOR_USD}`);
+  console.error(
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}} — collect ≥$${COLLECT_THRESHOLD_USD}, re-center ${RECENTER_BELOW_MIN_MS / 60000}m below / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, floor $${FLOOR_USD}`,
+  );
   return timer;
 }

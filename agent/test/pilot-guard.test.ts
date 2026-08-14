@@ -57,6 +57,25 @@ test("no verdict without tape history: never act blind", () => {
   assert.equal(v.act, false);
 });
 
+// ── the asymmetric clocks: patience down, speed up ───────────────────────────
+
+test("an above-band exit re-centers on the fast clock: 15 minutes of settled tape suffice", () => {
+  const now = 1_000_000_000;
+  // exited above (all USDG, nothing to realize); away is tick UP here.
+  // 15 minutes out, tape settled: the fast clock (12m) acts where the slow
+  // clock (30m) would still sit earning nothing on a busy pool.
+  const flat = mk([1200, 1201, 1199, 1200], now);
+  assert.equal(recenterVerdict(now - 15 * MIN, now, flat, false, 12 * MIN, 1.0, 12 * MIN).act, true);
+  assert.equal(recenterVerdict(now - 15 * MIN, now, flat, false, 30 * MIN).act, false);
+});
+
+test("the fast clock still refuses to chase a tape that is running away upward", () => {
+  const now = 1_000_000_000;
+  // still pumping away from the band: re-entering would buy the top. Wait.
+  const pumping = mk([1200, 1300, 1400, 1500], now);
+  assert.equal(recenterVerdict(now - 20 * MIN, now, pumping, false, 12 * MIN, 1.0, 12 * MIN).act, false);
+});
+
 // ── the floor: bounded worst case ────────────────────────────────────────────
 
 test("floor counts value plus uncollected fees, and trips strictly below", () => {
