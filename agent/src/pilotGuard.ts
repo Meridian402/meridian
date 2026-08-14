@@ -77,6 +77,15 @@ export function floorBreached(valueUsd: number, feesUsd: number, floorUsd = FLOO
   return valueUsd + feesUsd < floorUsd;
 }
 
+/** PURE: the floor for a position, SCALED to what actually went in. The env
+ *  floor was calibrated to the first ~$146 pilot; left fixed, a $300
+ *  position would tolerate a 60% loss before it tripped. The floor is the
+ *  larger of the env floor and 80% of the deposit, so protection scales with
+ *  the position automatically. depositUsd 0/unknown falls back to the env. */
+export function effectiveFloorUsd(depositUsd: number, envFloorUsd = FLOOR_USD): number {
+  return depositUsd > 0 ? Math.max(envFloorUsd, 0.8 * depositUsd) : envFloorUsd;
+}
+
 const outSince = new Map<string, number>();
 const tickHistory = new Map<string, TickSample[]>();
 
@@ -106,9 +115,12 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   const fees = await uncollectedFeesUsd(p).catch(() => 0);
 
   // 3. THE FLOOR, checked first: a bleeding position does not get managed,
-  // it gets closed. Worst case is bounded by construction.
-  if (floorBreached(p.valueUsd, fees)) {
-    console.error(`[pilotGuard] FLOOR: #${p.tokenId} (${p.symbol}) worth $${(p.valueUsd + fees).toFixed(2)} < $${FLOOR_USD} — withdrawing to cash`);
+  // it gets closed. Worst case is bounded by construction. Deposit basis is
+  // ~2x the recorded USDG side (balanced mint); no basis falls back to env.
+  const depositUsd = p.hasCostBasis && p.usdgIn > 0 ? p.usdgIn * 2 : 0;
+  const floorUsd = effectiveFloorUsd(depositUsd);
+  if (floorBreached(p.valueUsd, fees, floorUsd)) {
+    console.error(`[pilotGuard] FLOOR: #${p.tokenId} (${p.symbol}) worth $${(p.valueUsd + fees).toFixed(2)} < $${floorUsd.toFixed(0)} — withdrawing to cash`);
     await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
     // Sell whatever token inventory the withdraw returned; USDG stays cash.
     try {

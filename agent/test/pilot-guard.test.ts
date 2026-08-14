@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd } from "../src/pilotGuard.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
 
 /**
@@ -63,6 +63,12 @@ test("floor counts value plus uncollected fees, and trips strictly below", () =>
   assert.equal(floorBreached(118, 1, 120), true, "$119 all-in is under a $120 floor");
   assert.equal(floorBreached(118, 3, 120), false, "$121 all-in is not");
   assert.equal(floorBreached(120, 0, 120), false, "exactly at the floor holds");
+});
+
+test("the floor scales with the deposit, so bigger positions keep proportional protection", () => {
+  assert.equal(effectiveFloorUsd(146, 120), 120, "small pilot: the env floor is already the tighter bound");
+  assert.equal(effectiveFloorUsd(300, 120), 240, "a $300 position is floored at 80% of deposit, not a fixed $120");
+  assert.equal(effectiveFloorUsd(0, 120), 120, "no cost basis falls back to the env floor");
 });
 
 // ── the skim: float target, not events ───────────────────────────────────────

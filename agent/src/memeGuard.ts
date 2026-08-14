@@ -1866,18 +1866,24 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
       console.log(`[memeRotor] ${target.symbol} refused: tape too thin to quote (${pulse} swaps/hr)`);
       return;
     }
-    // THE REGIME GATE, 2026-08-14. Ten live days split cleanly: every
-    // profitable stretch was hot-and-calm tape, every trap was an entry into
-    // trending tape (single-sided bids are adverse-selected in trends, and
-    // fees never catch the inventory loss). Entries now require the regime
-    // that actually pays: volumeMode on the live tape, or no new capital at
-    // all. Exits, stops and requotes are untouched; this gates money IN.
-    // Escape hatch for the operator: MERIDIAN_MEME_REGIME_GATE=off.
+    // THE REGIME GATE, 2026-08-14 (refined same day). Ten live days split
+    // cleanly: every profitable stretch was calm tape, every trap was an
+    // entry into trending tape (single-sided bids are adverse-selected in
+    // trends, and fees never catch the inventory loss). So entries require
+    // CALM, measured drift, full stop. Volume is deliberately NOT gated
+    // here: thin tape is already priced by pulseSizeMultiplier (zero below
+    // 10 swaps/hr, full at 50), and a first cut that also demanded 50+
+    // swaps/hr just re-restricted what the sizing ladder had priced,
+    // closing the mid-pulse calm pools the rotor used to earn from. Unknown
+    // drift refuses too: never act blind (history builds within minutes via
+    // the tick watcher). Exits, stops and requotes are untouched; this
+    // gates money IN. Escape hatch: MERIDIAN_MEME_REGIME_GATE=off.
     if (process.env.MERIDIAN_MEME_REGIME_GATE !== "off") {
       const entryDrift = tickDriftPctPerHour(poolTickHistory.get(targetPid) ?? [], Date.now());
-      if (!volumeMode(pulse, entryDrift)) {
+      const calm = entryDrift != null && Math.abs(entryDrift) < 4;
+      if (!calm) {
         console.log(
-          `[memeRotor] ${target.symbol} refused by the regime gate: tape not hot-and-calm (${pulse} swaps/hr, drift ${entryDrift == null ? "?" : entryDrift.toFixed(1)}%/hr)`,
+          `[memeRotor] ${target.symbol} refused by the regime gate: drift ${entryDrift == null ? "unknown" : `${entryDrift.toFixed(1)}%/hr`} is not calm tape`,
         );
         return;
       }
