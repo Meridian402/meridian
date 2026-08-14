@@ -73,14 +73,33 @@ const TIGHT_WIDTH_PCT = 2; // ±1%
 const WEEKEND_WIDTH_PCT = 8; // ±4%
 const WIDE_THRESHOLD_HALFPCT = 2.5; // separates a tight (~1.2%) from a wide (~4%) range
 const MAX_WEEKEND_DRIFT_PCT = 2.5; // drift from range center that trips a full weekend pull
-// Market hours 13:30–20:00 UTC (9:30–16:00 ET, DST). Weekend mode begins at
-// the Friday close and runs until Monday's open settles. Revisit the UTC
-// offsets at the November clock change.
+// Market hours in US EASTERN TIME, computed properly: 9:30 to 16:00 ET.
+// Weekend mode begins at the Friday close and runs until Monday's open
+// settles. This replaced fixed UTC offsets on 2026-08-14: those were correct
+// only for the DST half of the year and would have silently shifted every
+// boundary by an hour at the November clock change.
 const FRIDAY = 5;
-const MARKET_OPEN_MIN = 13 * 60 + 30;
-const MARKET_CLOSE_MIN = 20 * 60;
-const WEEKEND_START_MIN = 19 * 60 + 50; // Friday: widen just before the close
-const MONDAY_SETTLE_MIN = 14 * 60; // Monday: re-tighten 30min after the open
+const MARKET_OPEN_MIN = 9 * 60 + 30;
+const MARKET_CLOSE_MIN = 16 * 60;
+const WEEKEND_START_MIN = 15 * 60 + 50; // Friday: widen just before the close
+const MONDAY_SETTLE_MIN = 10 * 60; // Monday: re-tighten 30min after the open
+
+const ET_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  weekday: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const ET_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/** The instant's US-Eastern weekday and minutes-since-midnight, DST-correct. */
+function easternParts(now: Date): { day: number; mins: number } {
+  const parts = ET_FMT.formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  // Some ICU builds print midnight as "24" with hour12:false; normalize.
+  const hour = Number(get("hour")) % 24;
+  return { day: ET_DAYS.indexOf(get("weekday")), mins: hour * 60 + Number(get("minute")) };
+}
 
 const outOfRangeSince = new Map<string, number>();
 
@@ -109,8 +128,7 @@ let lastRebalanceAt = _guardState.lastRebalanceAt;
 export type Phase = "weekend" | "weekday-market" | "weekday-off";
 
 export function phaseOf(now: Date): Phase {
-  const day = now.getUTCDay(); // 0=Sun … 6=Sat
-  const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const { day, mins } = easternParts(now); // 0=Sun … 6=Sat, US Eastern
   if (day === 6 || day === 0) return "weekend"; // Sat/Sun
   if (day === FRIDAY && mins >= WEEKEND_START_MIN) return "weekend"; // Fri close onward
   if (day === 1 && mins < MONDAY_SETTLE_MIN) return "weekend"; // Mon pre-open + settle

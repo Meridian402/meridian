@@ -73,9 +73,15 @@ export function consistencyBoard() {
     books.push(marks[i]);
   }
 
+  // Days are US EASTERN, not UTC (2026-08-14): the operator lives on ET and
+  // so does the market this desk trades around. Bucketing by UTC rolled the
+  // record's "day" at 8pm Eastern, so every morning the current row already
+  // carried most of a day of numbers that felt like yesterday's. en-CA
+  // formatting yields YYYY-MM-DD, keeping the keys sortable and stable.
+  const dayKey = (ts: number) => new Date(ts).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const byDay = new Map<string, { fees: number[]; books: number[] }>();
   for (const p of books) {
-    const d = new Date(p.ts).toISOString().slice(0, 10);
+    const d = dayKey(p.ts);
     const rec = byDay.get(d) ?? byDay.set(d, { fees: [], books: [] }).get(d)!;
     if (Number.isFinite(p.feesUsd)) rec.fees.push(p.feesUsd!);
     rec.books.push(p.book);
@@ -88,7 +94,7 @@ export function consistencyBoard() {
       if (!line.trim()) continue;
       try {
         const e = JSON.parse(line) as { ts: number; kind?: string };
-        const d = new Date(e.ts).toISOString().slice(0, 10);
+        const d = new Date(e.ts).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
         if (e.kind === "stop-loss") stopsByDay.set(d, (stopsByDay.get(d) ?? 0) + 1);
         if (e.kind === "collect") collectsByDay.set(d, (collectsByDay.get(d) ?? 0) + 1);
       } catch {

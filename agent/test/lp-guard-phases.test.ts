@@ -11,12 +11,12 @@ import { join } from "node:path";
  * closing churn, or chases an informed off-hours move the guard was built to
  * sit out. Nothing else exercises these edges, so this file pins them.
  *
- * The code reads getUTCDay/getUTCHours/getUTCMinutes, so every instant below
- * is a fixed UTC instant, against the hardcoded DST-era offsets: open 13:30,
- * close 20:00, Friday widen 19:50, Monday settle 14:00 (all UTC). lpGuard.ts
- * says to revisit those offsets at the November clock change; when the
- * constants move, these instants must be moved with them. That is a feature:
- * this file is the tripwire.
+ * Since 2026-08-14 the clock computes US Eastern time properly (Intl,
+ * America/New_York), so the same wall-clock boundaries hold on both sides of
+ * a DST change: open 9:30 ET, close 16:00 ET, Friday widen 15:50 ET, Monday
+ * settle 10:00 ET. The July instants below are the EDT half (UTC-4); the
+ * December block at the bottom is the EST half (UTC-5), the exact case the
+ * old fixed-UTC-offset clock would have silently shifted by an hour.
  */
 
 // lpGuard loads its durable anti-churn state through dataPath at import time,
@@ -86,4 +86,28 @@ test("seconds never move a boundary: the phase flips on whole minutes only", () 
   // early on one side or close it early on the other.
   assert.equal(at("2026-07-22T13:29:59.999Z"), "weekday-off");
   assert.equal(at("2026-07-22T19:59:59.999Z"), "weekday-market");
+});
+
+// ── the EST half of the year: the case the old fixed-UTC clock got wrong ─────
+// 2026-12-09 is a plain Wednesday; EST is UTC-5, so 9:30 ET = 14:30 UTC.
+
+test("December: the open is 14:30 UTC, not 13:30", () => {
+  assert.equal(at("2026-12-09T13:30:00Z"), "weekday-off", "13:30 UTC is 8:30 ET in winter, pre-open");
+  assert.equal(at("2026-12-09T14:29:00Z"), "weekday-off");
+  assert.equal(at("2026-12-09T14:30:00Z"), "weekday-market");
+});
+
+test("December: the close is 21:00 UTC, not 20:00", () => {
+  assert.equal(at("2026-12-09T20:59:00Z"), "weekday-market", "20:59 UTC is 15:59 ET in winter, still open");
+  assert.equal(at("2026-12-09T21:00:00Z"), "weekday-off");
+});
+
+test("December Friday hands over to the weekend at 20:50 UTC (15:50 ET)", () => {
+  assert.equal(at("2026-12-11T20:49:00Z"), "weekday-market");
+  assert.equal(at("2026-12-11T20:50:00Z"), "weekend");
+});
+
+test("December Monday settles at 15:00 UTC (10:00 ET)", () => {
+  assert.equal(at("2026-12-07T14:59:00Z"), "weekend");
+  assert.equal(at("2026-12-07T15:00:00Z"), "weekday-market");
 });
