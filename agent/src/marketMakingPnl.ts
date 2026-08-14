@@ -11,6 +11,7 @@ import { getPublicClient } from "./venues/signer.js";
 import { openPositionsOnChain } from "./venues/lpPositions.js";
 import { readAllExecutions } from "./executionsLog.js";
 import { INDEX_CONTRACTS } from "./venues/indexContracts.js";
+import { tokenAddressFor } from "./venues/stockPools.js";
 import { memeBandsLive, type MemeBand } from "./memeGuard.js";
 
 const SV: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
@@ -31,6 +32,13 @@ interface PositionProof {
   netVsHoldUsd: number;
   positionValueUsd: number;
   profitable: boolean;
+  /** Range status, read with the same slot0 as the valuation: earning only
+   *  while in range, and the edge distances say how much room is left. */
+  inRange: boolean;
+  /** % the price can FALL before the position leaves range (0 if already out below). */
+  roomDownPct: number;
+  /** % the price can RISE before the position leaves range (0 if already out above). */
+  roomUpPct: number;
 }
 
 /**
@@ -107,7 +115,10 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
 
   for (const p of positions) {
     if (memeIds.has(p.tokenId)) continue; // priced live in memeBands, not "unmeasured"
-    const token = (INDEX_CONTRACTS.tokens as Record<string, string>)[p.symbol] as Address;
+    // Resolve through the stock index first, then the LP seed/qualified set —
+    // the desk's universe outgrew the index the night PONS armed, and a $146
+    // position rendering as "cannot price it" was the visible symptom.
+    const token = ((INDEX_CONTRACTS.tokens as Record<string, string>)[p.symbol] as Address) ?? tokenAddressFor(p.symbol);
     if (!token) {
       unmeasured.push({ tokenId: p.tokenId, symbol: p.symbol, reason: "token not in the known universe — cannot price it" });
       continue;
@@ -131,9 +142,17 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
     const poolId = poolIdFor(token, fee, ts);
     const tokenIsC1 = USDG.toLowerCase() < token.toLowerCase();
 
-    const [sqrtP] = await client.readContract({ address: SV, abi: [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")], functionName: "getSlot0", args: [poolId] });
+    const [sqrtP, tickNow] = await client.readContract({ address: SV, abi: [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")], functionName: "getSlot0", args: [poolId] });
     const praw = (Number(sqrtP) / Q96) ** 2;
     const tokenUsd = (tokenIsC1 ? 1 / praw : praw) * 1e12;
+    // Range status in TOKEN-PRICE terms. Tick tracks currency1-per-currency0,
+    // so which tick direction means "the token got dearer" flips with the sort
+    // order: token-as-currency0 rises with the tick, token-as-currency1 falls.
+    const t = Number(tickNow);
+    const inRange = t >= p.tickLower && t < p.tickUpper;
+    const ratio = (from: number, to: number) => 1.0001 ** (tokenIsC1 ? from - to : to - from) - 1;
+    const roomUpPct = Math.max(0, ratio(t, tokenIsC1 ? p.tickLower : p.tickUpper)) * 100;
+    const roomDownPct = Math.max(0, -ratio(t, tokenIsC1 ? p.tickUpper : p.tickLower)) * 100;
 
     const salt = `0x${BigInt(p.tokenId).toString(16).padStart(64, "0")}` as `0x${string}`;
     const posKey = keccak256(encodePacked(["address", "int24", "int24", "bytes32"], [PM_NFT, p.tickLower, p.tickUpper, salt]));
@@ -173,6 +192,9 @@ export async function marketMakingProof(): Promise<MarketMakingProof> {
       netVsHoldUsd: netVsHold,
       positionValueUsd: posValue,
       profitable: netVsHold > 0,
+      inRange,
+      roomDownPct: Math.round(roomDownPct * 10) / 10,
+      roomUpPct: Math.round(roomUpPct * 10) / 10,
     });
   }
 

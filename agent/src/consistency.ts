@@ -28,7 +28,7 @@ const CACHE_MS = 5 * 60 * 1000;
 export function consistencyBoard() {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.body;
 
-  const byDay = new Map<string, { fees: number[]; books: number[] }>();
+  const marks: { ts: number; book: number; feesUsd?: number }[] = [];
   if (existsSync(BOOK_PATH)) {
     for (const line of readFileSync(BOOK_PATH, "utf8").split("\n")) {
       if (!line.trim()) continue;
@@ -38,14 +38,47 @@ export function consistencyBoard() {
         // The same quarantine the chart honors: marks from a known-broken
         // gauge must not resurface here as a phantom record drawdown.
         if (QUARANTINED.some(([a, b]) => p.ts >= a && p.ts <= b)) continue;
-        const d = new Date(p.ts).toISOString().slice(0, 10);
-        const rec = byDay.get(d) ?? byDay.set(d, { fees: [], books: [] }).get(d)!;
-        if (Number.isFinite(p.feesUsd)) rec.fees.push(p.feesUsd!);
-        rec.books.push(p.book);
+        marks.push(p);
       } catch {
         /* skip bad line */
       }
     }
+  }
+  marks.sort((a, b) => a.ts - b.ts);
+
+  // THE TRANSIENT-CRATER FILTER. A restart or half-failed read can print one
+  // or two marks hundreds of dollars below reality (a boot catches the wallet
+  // mid-scan, positions read as absent), and a single such mark became the
+  // published "worst intraday drawdown $285" for 2026-08-12 — a number no
+  // market produced. The tell is shape: a real drawdown persists across many
+  // consecutive 2-minute marks; an artifact plunges and fully recovers within
+  // a couple. Drop dips of <= 3 marks that fall > $120 below the level both
+  // BEFORE and AFTER them: $120 is the desk's own hard daily floor, so a
+  // "move" this size that fully round-trips inside six minutes is not a market
+  // event at this book size — it is a bad read. Raw lines stay in the ledger;
+  // they are just never served as a record.
+  const CRATER_USD = 120;
+  const CRATER_RUN = 3;
+  const books: typeof marks = [];
+  for (let i = 0; i < marks.length; i++) {
+    const prev = books[books.length - 1];
+    if (prev && prev.book - marks[i].book > CRATER_USD) {
+      let j = i;
+      while (j < marks.length && j - i < CRATER_RUN && prev.book - marks[j].book > CRATER_USD) j++;
+      if (j < marks.length && j - i <= CRATER_RUN && prev.book - marks[j].book <= CRATER_USD) {
+        i = j - 1; // the dip healed within a couple of marks: artifact, skip it
+        continue;
+      }
+    }
+    books.push(marks[i]);
+  }
+
+  const byDay = new Map<string, { fees: number[]; books: number[] }>();
+  for (const p of books) {
+    const d = new Date(p.ts).toISOString().slice(0, 10);
+    const rec = byDay.get(d) ?? byDay.set(d, { fees: [], books: [] }).get(d)!;
+    if (Number.isFinite(p.feesUsd)) rec.fees.push(p.feesUsd!);
+    rec.books.push(p.book);
   }
 
   const stopsByDay = new Map<string, number>();

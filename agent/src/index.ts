@@ -11,7 +11,7 @@ import { ponsDeployment } from "./launch/pons.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
-import { startMemeFastWatch, clearBreakerHalt, deskHalted } from "./memeGuard.js";
+import { startMemeFastWatch, clearBreakerHalt, deskHalted, operatorFlattenMeme } from "./memeGuard.js";
 import { assetScorecard } from "./assetScorecard.js";
 import { listSkills } from "./skills/registry.js";
 import { runLearningPass } from "./learn/harness.js";
@@ -627,10 +627,13 @@ app.get("/api/earnings-history", async (_req: Request, res: Response) => {
   }
 });
 
-app.get("/api/book-history", (_req: Request, res: Response) => {
+app.get("/api/book-history", (req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
-    res.json({ points: readBookHistory() });
+    // ?hours=72 widens the window (capped at 30 days) — the default stays 24h.
+    const hours = Number(req.query.hours);
+    const windowMs = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 720) * 3600e3 : undefined;
+    res.json({ points: windowMs ? readBookHistory(windowMs) : readBookHistory() });
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : "book history unavailable" });
   }
@@ -2058,6 +2061,46 @@ app.post("/api/admin/research-run", async (req: Request, res: Response) => {
 // Operator-only: close all LP positions (and optionally consolidate all
 // depth-verified stock to USDG). Runs ON the operator so the authoritative
 // ledger is updated in-place — no split-brain. Bearer-required (moves money).
+// Operator-only: sell the wallet's loose holding of one tradable token back to
+// USDG (full balance). For surplus inventory sitting OUTSIDE any position —
+// exposure earning nothing. Deliberately does not touch LP positions.
+app.post("/api/sell-surplus", async (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  const symbol = String((req.body ?? {}).symbol ?? "").toUpperCase();
+  if (!symbol || !isTradable(symbol)) {
+    res.status(400).json({ ok: false, error: `symbol must be a tradable pool (${tradableSymbols().join(", ")})` });
+    return;
+  }
+  try {
+    const r = await withHouseWalletLock("sell-surplus", () => realSellStockForUsdg({ fromSymbol: symbol }));
+    console.error(`[sell-surplus] sold ${r.tokensSold} ${symbol} for $${r.usdgReceived.toFixed(2)} USDG`);
+    res.json({ ok: true, symbol, tokensSold: r.tokensSold, usdgReceived: r.usdgReceived, txHash: r.hash });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Operator-only: flatten the MEME sleeve — withdraw every native-quoted band
+// and liquidate its token inventory back to ETH cash. The rotor's own breaker
+// path, exposed as a deliberate lever for when the rotor is disabled
+// (MERIDIAN_MEME_ROTATOR=off) and nothing else will release that capital.
+app.post("/api/meme-flatten", async (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  try {
+    const result = await withHouseWalletLock("meme-flatten", () => operatorFlattenMeme());
+    console.error(`[meme-flatten] flattened ${result.bandsSeen} band(s) (~$${result.workingUsdBefore.toFixed(2)} working)`);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 app.post("/api/lp-close", async (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) {
     res.status(401).json({ error: "unauthorized" });
@@ -2123,13 +2166,18 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
   }
   const symbol = String((req.body ?? {}).symbol ?? "").toUpperCase();
   const widthPct = Number((req.body ?? {}).widthPct);
+  const maxUsd = Number((req.body ?? {}).maxUsd);
   if (!symbol || !isTradable(symbol)) {
     res.status(400).json({ ok: false, error: `symbol must be a tradable pool (${tradableSymbols().join(", ")})` });
     return;
   }
   try {
     const pos = await withHouseWalletLock("lp-open", () =>
-      openInPool(symbol, Number.isFinite(widthPct) && widthPct > 0 ? widthPct : undefined),
+      openInPool(
+        symbol,
+        Number.isFinite(widthPct) && widthPct > 0 ? widthPct : undefined,
+        Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : undefined,
+      ),
     );
     console.error(`[lp-open] opened #${pos.tokenId} in ${pos.symbol}`);
     res.json({ ok: true, ...pos });

@@ -24,7 +24,8 @@
 // guard over the house wallet, so exactly one may run at a time. See the note
 // on getAgentSigner in venues/signer.ts.
 import { openPositionsOnChain, withdrawPosition, mintRange, poolTick, lastMintedPosition, lastPoolOnChain, uncollectedFeesUsd, collectFees, type LpPositionRecord } from "./venues/lpPositions.js";
-import { realBuyStockFromNative, realSellStockForUsdg, poolPricesUsd, isTradable, isAutoExecutable, poolFeePct, unwrapWeth } from "./venues/stockPools.js";
+import { realBuyStockFromNative, realSellStockForUsdg, poolPricesUsd, isTradable, isAutoExecutable, poolFeePct, unwrapWeth, swapNativeToUsdg, tokenAddressFor } from "./venues/stockPools.js";
+import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { getAgentSigner, getPublicClient } from "./venues/signer.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { latestScan, scanOpportunities } from "./lpAllocator.js";
@@ -82,6 +83,17 @@ const WEEKEND_START_MIN = 19 * 60 + 50; // Friday: widen just before the close
 const MONDAY_SETTLE_MIN = 14 * 60; // Monday: re-tighten 30min after the open
 
 const outOfRangeSince = new Map<string, number>();
+
+// Pools the guard must NOT manage or auto-enter: chain-native 24/7 venues
+// (surfaced by the USDG flow scan) run as a MANUAL pilot sleeve. This guard's
+// whole phase machine is keyed to US stock hours — re-tighten at the open,
+// widen for the weekend — and every one of those moves is wrong for a token
+// that trades around the clock. Their positions are opened, watched and closed
+// by the operator until a 24/7 management clock exists. Env-overridable so a
+// pool can graduate without a deploy.
+const HANDS_OFF_SYMBOLS = new Set(
+  (process.env.MERIDIAN_GUARD_HANDS_OFF ?? "PONS,TTWO,STONKBROKER").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+);
 
 // ---- Auto-rebalance ("most profitable at all times") -------------------------
 // The house agent moves capital to the best pool ON ITS OWN when the gain clears
@@ -190,6 +202,7 @@ async function attemptRecovery(): Promise<void> {
   // into a pool we already left.
   const target = (await lastPoolOnChain()) ?? lastMintedPosition()?.symbol ?? null;
   if (!target) return; // never held a position; nothing to recover to
+  if (HANDS_OFF_SYMBOLS.has(target)) return; // the manual sleeve recovers by the operator's hand, never this path's
   if (!isAutoExecutable(target)) {
     console.error(`[lpGuard] recovery held: ${target} is not auto-executable (no landed mint on record) — manual review.`);
     return;
@@ -243,7 +256,61 @@ async function attemptRecovery(): Promise<void> {
  * caller chooses the pool instead of it defaulting to the last one held. Run on
  * a flat wallet (close the current position first); it deploys available USDG.
  */
-export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_PCT): Promise<{ tokenId: string; symbol: string }> {
+export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_PCT, maxUsd?: number): Promise<{ tokenId: string; symbol: string }> {
+  // Size-capped entry (pilots): acquire ~half the budget in the token, then mint
+  // a two-sided range hard-capped at maxUsd. Deliberately skips the full-balance
+  // rebalanceSides and the dust-absorb so it can NEVER deploy more than the
+  // budget — "a deliberate $50, not all available USDG".
+  if (maxUsd && maxUsd > 0) {
+    // Fund the two sides from whatever float the wallet holds: fold WETH into
+    // native, count any token ALREADY held toward the token side (a retried
+    // open must not re-buy inventory it bought last attempt), top up USDG from
+    // ETH only for the real shortfall, then mint with retries — a hot pool can
+    // move between the price read and execution and revert a single attempt
+    // (measured live on PONS 2026-08-13; the replayed calldata succeeded).
+    try { await unwrapWeth(); } catch (e) { console.error(`[lpGuard] pre-open unwrap skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
+    const signer = getAgentSigner()!;
+    const client = getPublicClient();
+    const balAbi = [parseAbiItem("function balanceOf(address) view returns (uint256)")];
+    const token = tokenAddressFor(symbol);
+    const [usdgRaw, tokenRaw, prices] = await Promise.all([
+      client.readContract({ address: USDG, abi: balAbi, functionName: "balanceOf", args: [signer.address] }),
+      token ? client.readContract({ address: token, abi: balAbi, functionName: "balanceOf", args: [signer.address] }) : Promise.resolve(0n),
+      poolPricesUsd(),
+    ]);
+    const usdgHave = Number(usdgRaw) / 1e6;
+    const tokenHaveUsd = (Number(tokenRaw) / 1e18) * (prices[symbol] ?? 0);
+    const buyUsd = Math.max(0, maxUsd / 2 - tokenHaveUsd);
+    const usdgNeed = maxUsd / 2 + buyUsd; // mint side + what the token buy will spend
+    if (usdgHave < usdgNeed * 0.99) {
+      const ethUsd = await fetchEthUsd();
+      const ethHaveUsd = (Number(await client.getBalance({ address: signer.address })) / 1e18) * ethUsd;
+      const GAS_RESERVE_USD = 5;
+      const short = usdgNeed - usdgHave;
+      if (ethHaveUsd - GAS_RESERVE_USD < short) {
+        throw new Error(
+          `insufficient float to fund $${maxUsd}: have $${usdgHave.toFixed(2)} USDG + $${tokenHaveUsd.toFixed(2)} ${symbol} + ~$${ethHaveUsd.toFixed(2)} ETH. Move more WETH to ${signer.address}.`,
+        );
+      }
+      console.error(`[lpGuard] funding USDG side: swapping ~$${(short + 1).toFixed(2)} ETH -> USDG`);
+      await swapNativeToUsdg(short + 1); // +$1 buffer for slippage
+    }
+    if (buyUsd > 5) await realBuyStockFromNative({ toSymbol: symbol, amountUsd: buyUsd });
+    else if (tokenHaveUsd > 0) console.error(`[lpGuard] token side already funded: holding $${tokenHaveUsd.toFixed(2)} of ${symbol}`);
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const pos = await mintRange({ symbol, widthPct, maxUsd });
+        console.error(`[lpGuard] operator opened CAPPED #${pos.tokenId} in ${symbol} (±${widthPct / 2}%, ≤$${maxUsd})`);
+        return { tokenId: pos.tokenId, symbol: pos.symbol };
+      } catch (err) {
+        lastErr = err;
+        console.error(`[lpGuard] capped mint attempt ${attempt}/3 failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 15_000));
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
   await rebalanceSides(symbol);
   const pos = await mintRange({ symbol, widthPct });
   console.error(`[lpGuard] operator opened #${pos.tokenId} in ${symbol} (±${widthPct / 2}%)`);
@@ -281,6 +348,12 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
 async function maybeRebalance(positions: LpPositionRecord[]): Promise<boolean> {
   if (!AUTO_REBALANCE) return false;
   if (Date.now() - lastRebalanceAt < REBALANCE_COOLDOWN_MS) return false;
+  // The manual pilot sleeve is invisible to rebalancing in BOTH directions:
+  // never a destination (filtered below) and never a source — this path
+  // closes every position it considers, and it must not be able to unwind an
+  // operator-held pilot to chase a stock pool.
+  positions = positions.filter((p) => !HANDS_OFF_SYMBOLS.has(p.symbol));
+  if (positions.length === 0) return false;
   const symbols = new Set(positions.map((p) => p.symbol));
   if (symbols.size !== 1) return false; // mixed/mid-move — let it settle first
   const currentSymbol = positions[0].symbol;
@@ -315,7 +388,7 @@ async function maybeRebalance(positions: LpPositionRecord[]): Promise<boolean> {
   // symbol check — and openInPool("AAPL") then mints AAPL's configured 1% pool.
   // We would have scored one pool and bought a different one.
   const best = scan.opportunities
-    .filter((o) => o.viable && o.mintable && isAutoExecutable(o.symbol))
+    .filter((o) => o.viable && o.mintable && isAutoExecutable(o.symbol) && !HANDS_OFF_SYMBOLS.has(o.symbol))
     .sort((a, b) => b.expectedNetPerDayUsd - a.expectedNetPerDayUsd)[0];
   if (!best || best.symbol === currentSymbol) return false;
 
@@ -454,6 +527,10 @@ export function startLpGuard(): NodeJS.Timeout {
       // tick, which is noise exactly where a REAL stock-side failure would
       // need to be visible.
       if (p.symbol.startsWith("0x")) continue;
+      // The manual pilot sleeve: named, priced, counted — but never steered by
+      // this clock. A 24/7 venue managed on stock hours would be re-tightened
+      // into churn at every US open.
+      if (HANDS_OFF_SYMBOLS.has(p.symbol)) continue;
       try {
         const tick = await poolTick(p.symbol);
         const wide = halfWidthPct(p) > WIDE_THRESHOLD_HALFPCT;

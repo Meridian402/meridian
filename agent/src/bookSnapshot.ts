@@ -14,10 +14,12 @@ import { dataPath } from "./dataDir.js";
 import { getPublicClient, getAgentSigner } from "./venues/signer.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { memeBandsLive, looseInventoryUsd, noteBookMark } from "./memeGuard.js";
+import { lpPositionsWithValue, uncollectedFeesUsd } from "./venues/lpPositions.js";
 import { TREASURY_WALLET } from "./merd/wallets.js";
 
 const EXECUTION: Address = "0xDFF0Cf4f18dA55f931ae2A5a0770BaAD1e45D7fe";
 const WETH: Address = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
+const USDG: Address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 const BOOK_PATH = dataPath("book-snapshots.jsonl");
 const balOf = parseAbiItem("function balanceOf(address) view returns (uint256)");
 
@@ -41,21 +43,41 @@ export interface BookPoint {
 export async function computeBookNow(): Promise<BookPoint | null> {
   const client = getPublicClient();
   try {
-    const [tEth, xEth, tWeth, xWeth, ethUsd, bands] = await Promise.all([
+    const [tEth, xEth, tWeth, xWeth, tUsdg, xUsdg, ethUsd, bands] = await Promise.all([
       client.getBalance({ address: TREASURY_WALLET }),
       client.getBalance({ address: EXECUTION }),
       client.readContract({ address: WETH, abi: [balOf], functionName: "balanceOf", args: [TREASURY_WALLET] }),
       client.readContract({ address: WETH, abi: [balOf], functionName: "balanceOf", args: [EXECUTION] }),
+      client.readContract({ address: USDG, abi: [balOf], functionName: "balanceOf", args: [TREASURY_WALLET] }),
+      client.readContract({ address: USDG, abi: [balOf], functionName: "balanceOf", args: [EXECUTION] }),
       fetchEthUsd(),
       memeBandsLive(),
     ]);
     if (!ethUsd) return null;
-    const banked = ((Number(tEth) + Number(xEth) + Number(tWeth) + Number(xWeth)) / 1e18) * ethUsd;
-    const accruing = bands.reduce((s, b) => s + b.feesUsd, 0);
+    // Banked is CASH in both wallets, all three cash assets: ETH, WETH, and
+    // USDG (a dollar each). USDG was invisible until 2026-08-14 — the night
+    // the desk's first USDG-quoted position opened, ~$226 of real money
+    // (position + USDG float) fell out of this gauge and the book "dropped".
+    // A gauge that only sees ETH stops being a gauge the day the desk holds
+    // dollars.
+    const banked = ((Number(tEth) + Number(xEth) + Number(tWeth) + Number(xWeth)) / 1e18) * ethUsd + (Number(tUsdg) + Number(xUsdg)) / 1e6;
+    // USDG-quoted LP positions (the stock/RWA sleeve, e.g. PONS) are working
+    // capital exactly like the meme bands: value marked to live pool state,
+    // plus fees accrued inside and not yet collected. Same read the proof
+    // endpoint serves; lpPositionsWithValue THROWS on a failed chain read, so
+    // a bad cycle nulls the whole mark rather than printing a fake dip.
+    const usdgPositions = await lpPositionsWithValue();
+    let usdgPosValue = 0;
+    let usdgPosFees = 0;
+    for (const p of usdgPositions) {
+      usdgPosValue += p.valueUsd;
+      usdgPosFees += await uncollectedFeesUsd(p).catch(() => 0);
+    }
+    const accruing = bands.reduce((s, b) => s + b.feesUsd, 0) + usdgPosFees;
     // Loose venue tokens count too: a sweep remainder is still the book's
     // money, and forgetting it made 2026-08-05's marks read $290 low.
     const loose = await looseInventoryUsd(ethUsd);
-    const working = bands.reduce((s, b) => s + b.valueUsd, 0) + accruing + loose;
+    const working = bands.reduce((s, b) => s + b.valueUsd, 0) + usdgPosValue + accruing + loose;
     // Cumulative fee income = prior cumulative + the positive change in
     // accrual since the last snapshot. A drop in accrual (a collect/sweep
     // moving it to the bank) adds nothing and subtracts nothing: that income
@@ -96,6 +118,15 @@ export const QUARANTINED: [number, number][] = [
   // and the distorted trough survived just outside it, so the whole hour goes:
   // nothing in it is a reading of the book.
   [1786406400000, 1786410000000],
+  // 2026-08-14 01:55-10:00Z: the night the USDG sleeve armed, recorded by a
+  // gauge that could not see dollars. The first ETH->USDG conversion at ~01:56
+  // printed as a $127 "loss" (the dollars were real, the gauge was ETH-only),
+  // and everything after — the rotor absorbing the operator's WETH, the wedged
+  // lock, three restarts, the meme flatten, the PONS open and the surplus sell
+  // — is money mid-flight read by that same blind gauge, ~$226 low by the end.
+  // The gauge learned to count USDG (cash and LP positions) at the end of this
+  // window; marks from then on are whole-book readings.
+  [1786672500000, 1786701600000],
 ];
 
 export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPoint[] {

@@ -46,6 +46,14 @@ const LP_POOLS: Record<string, { token: Address; fee: number; tickSpacing: numbe
   META: { token: INDEX_CONTRACTS.tokens.META as Address, fee: 3000, tickSpacing: 60 },
   AAPL: { token: INDEX_CONTRACTS.tokens.AAPL as Address, fee: 10000, tickSpacing: 200 },
   GOOGL: { token: INDEX_CONTRACTS.tokens.GOOGL as Address, fee: 10000, tickSpacing: 200 },
+  // Chain-native / non-index USDG pools surfaced by the USDG flow scan (2026-08-13),
+  // depth- and toxicity-ranked. UNDER DRY-TEST: not in TRUSTED_BASELINE and with no
+  // landed mint yet, so isAutoExecutable() keeps the guard from auto-deploying into
+  // them until an operator deliberately lands a mint. Their tokens are 18-decimal and
+  // verified freely transferable on a fork (not restricted like SPCX).
+  PONS: { token: "0x39dBED3a2bd333467115dE45665cC57F813C4571" as Address, fee: 3000, tickSpacing: 60 },
+  TTWO: { token: "0x5e81213613b6B86EaB4c6c50d718d34359459786" as Address, fee: 40000, tickSpacing: 400 },
+  STONKBROKER: { token: "0xe934e36A439C94017B64a3FecE66AF12099aBF50" as Address, fee: 9000, tickSpacing: 90 },
 };
 // The trusted, mint-proven baseline. Kept SEPARATE from the qualifier so these
 // five are always deployable even before the qualifier's cache has warmed, and
@@ -170,8 +178,8 @@ export interface LpPositionRecord {
  * wallet's ACTUAL balances of both currencies (deploys the largest liquidity
  * both sides can support). widthPct is total width, e.g. 4 => ±2%.
  */
-export async function mintRange(params: { symbol: string; widthPct: number }): Promise<LpPositionRecord> {
-  const { symbol, widthPct } = params;
+export async function mintRange(params: { symbol: string; widthPct: number; maxUsd?: number }): Promise<LpPositionRecord> {
+  const { symbol, widthPct, maxUsd } = params;
   guardWalletOp(`lp-mint ${symbol}`); // global runaway breaker (counts every deploy attempt)
   recordWalletOp(0, "lp-mint");
   const k = poolKeyOf(symbol);
@@ -190,8 +198,25 @@ export async function mintRange(params: { symbol: string; widthPct: number }): P
     ),
   );
   // Keep a whisper of headroom so maxes never bind on rounding.
-  const amt0 = Number(bal0Raw) * 0.995;
-  const amt1 = Number(bal1Raw) * 0.995;
+  let amt0 = Number(bal0Raw) * 0.995;
+  let amt1 = Number(bal1Raw) * 0.995;
+
+  // Optional hard size cap: deploy at most `maxUsd` (split ~half per side of a
+  // two-sided range), regardless of how much the wallet holds. This is what lets
+  // a pilot be a deliberate $50, not "all available USDG". Capping the AMOUNTS
+  // (not the liquidity) keeps the existing lFrom0/lFrom1 math and the amountMax
+  // safety caps intact; the smaller side still bounds the mint as before.
+  if (maxUsd && maxUsd > 0) {
+    const usdgIsC0 = k.currency0.toLowerCase() === USDG.toLowerCase();
+    const praw = (sqrtP / Q96) ** 2; // currency1 raw per currency0 raw
+    const tokenPriceUsd = (usdgIsC0 ? 1 / praw : praw) * 1e12; // USDG per whole token (USDG 6dec, token 18dec)
+    const capUsdgRaw = (maxUsd / 2) * 1e6;
+    const capTokenRaw = tokenPriceUsd > 0 ? (maxUsd / 2 / tokenPriceUsd) * 1e18 : Infinity;
+    const capC0 = usdgIsC0 ? capUsdgRaw : capTokenRaw;
+    const capC1 = usdgIsC0 ? capTokenRaw : capUsdgRaw;
+    amt0 = Math.min(amt0, capC0);
+    amt1 = Math.min(amt1, capC1);
+  }
 
   const sC = Math.min(Math.max(sqrtP, sqrtAtTick(tickLower)), sqrtAtTick(tickUpper));
   const sA = sqrtAtTick(tickLower);
@@ -315,9 +340,14 @@ export interface LpPositionValue extends LpPositionRecord {
 // in one cheap call even over full history (verified: 9 ids in ~170ms). A burn
 // is Transfer(owner -> 0x0), so `from == wallet`, which the sent set removes;
 // received-minus-sent is therefore exactly what the wallet still holds.
-const SYMBOL_BY_TOKEN: Record<string, string> = Object.fromEntries(
-  Object.entries(INDEX_CONTRACTS.tokens).map(([s, a]) => [String(a).toLowerCase(), s]),
-);
+const SYMBOL_BY_TOKEN: Record<string, string> = Object.fromEntries([
+  ...Object.entries(INDEX_CONTRACTS.tokens).map(([s, a]) => [String(a).toLowerCase(), s] as const),
+  // The LP seed reaches beyond the stock index (PONS et al). Without these, a
+  // seed position discovers as a raw token address: the proof can't price it
+  // ("unmeasured"), the snapshotter can't count it, and the site renders an
+  // empty card over $146 of real working capital (2026-08-14).
+  ...Object.entries(LP_POOLS).map(([s, p]) => [p.token.toLowerCase(), s] as const),
+]);
 const xferEvent = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)");
 const poolAndInfoAbi = [
   parseAbiItem(

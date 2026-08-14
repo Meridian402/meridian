@@ -84,6 +84,13 @@ const POOLS: Record<string, PoolEntry> = {
   // lands in faithful eth_call simulation (holdable). Tradable now; LP-deploy is
   // still gated on a mint check (poolQualify.ts), not enabled here.
   MSFT: { token: INDEX_CONTRACTS.tokens.MSFT as Address, quote: "USDG", fee: 3000, tickSpacing: 60 },
+  // Chain-native / non-index USDG pools surfaced by the USDG flow scan (2026-08-13).
+  // UNDER DRY-TEST: tradable + routable so a fork mint/collect/withdraw can be proven,
+  // but NOT in TRUSTED_BASELINE, so isAutoExecutable() gates any autonomous deploy on a
+  // landed mint. Tokens verified 18-decimal and freely transferable on a fork.
+  PONS: { token: "0x39dBED3a2bd333467115dE45665cC57F813C4571" as Address, quote: "USDG", fee: 3000, tickSpacing: 60 },
+  TTWO: { token: "0x5e81213613b6B86EaB4c6c50d718d34359459786" as Address, quote: "USDG", fee: 40000, tickSpacing: 400 },
+  STONKBROKER: { token: "0xe934e36A439C94017B64a3FecE66AF12099aBF50" as Address, quote: "USDG", fee: 9000, tickSpacing: 90 },
   // SPCX still EXCLUDED. Removed 2026-07-16 after a real mint reverted (0x70a08…):
   // SPCX (SpaceX) is a TRANSFER-RESTRICTED token, so our wallet couldn't receive
   // or LP it. Re-checked 2026-07-21: a USDG→SPCX swap now LANDS in faithful
@@ -170,6 +177,12 @@ export function isAutoExecutable(symbol: string): boolean {
     mintedCache = { at: Date.now(), symbols };
   }
   return mintedCache.symbols.has(symbol);
+}
+
+/** The token address a symbol resolves to (seed or qualified), or null. Lets
+ *  callers read real balances for symbols outside the stock index (e.g. PONS). */
+export function tokenAddressFor(symbol: string): Address | null {
+  return poolEntryFor(symbol)?.token ?? null;
 }
 
 /** Per-leg pool fee in percent (0.3 or 1.0 across the current universe) — the strategy's cost-aware bar consults this. */
@@ -694,4 +707,20 @@ export async function realBuyStockFromNative(params: {
   const route: RouteHop[] = toEntry.quote === "NATIVE" ? [stockHop] : [BRIDGE_HOP_TO_USDG, stockHop];
   const { hash, amountOutReal } = await swapExactInPath({ currencyIn: NATIVE, route, amountIn });
   return { hash, amountReceived: Number(amountOutReal) / 1e18, hops: route.length };
+}
+
+/**
+ * Swap native ETH -> USDG for ~`amountUsd` of USDG, through the deepest
+ * NATIVE/USDG bridge tier. This is how ETH/WETH float becomes the USDG side a
+ * USDG-quoted LP needs: the mint requires USDG, but the desk's working capital
+ * arrives as WETH (unwrapped to native each tick). One atomic swap; the real
+ * USDG received is the balance delta.
+ */
+export async function swapNativeToUsdg(amountUsd: number): Promise<{ hash: Hex; usdgReceived: number }> {
+  guardWalletOp(`eth->usdg $${amountUsd.toFixed(0)}`);
+  recordWalletOp(amountUsd, "eth-to-usdg");
+  const ethUsd = await fetchEthUsd();
+  const amountIn = BigInt(Math.round((amountUsd / ethUsd) * 1e18));
+  const { hash, amountOutReal } = await swapExactInPath({ currencyIn: NATIVE, route: [BRIDGE_HOP_TO_USDG], amountIn });
+  return { hash, usdgReceived: Number(amountOutReal) / 1e6 };
 }

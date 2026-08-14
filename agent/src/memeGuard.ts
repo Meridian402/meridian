@@ -1569,6 +1569,20 @@ async function withdrawBandToCash(reg: EthPool, b: MemeBand): Promise<void> {
   console.log(`[memeRotor] stale band #${b.tokenId} (${reg.symbol}) withdrawn to cash: 5%+ out of range, pool too quiet to requote into`);
 }
 
+/**
+ * Operator-invoked full flatten: withdraw every meme band and liquidate the
+ * token inventory back to ETH cash. Exactly the breaker's flattenAll, exposed
+ * so the operator can reclaim the meme sleeve deliberately (e.g. with the
+ * rotor disabled via MERIDIAN_MEME_ROTATOR=off, when nothing else will).
+ * Returns what it saw so the caller can report honestly.
+ */
+export async function operatorFlattenMeme(): Promise<{ bandsSeen: number; workingUsdBefore: number }> {
+  const bands = await memeBandsLive();
+  const workingUsdBefore = bands.reduce((s, b) => s + b.valueUsd, 0);
+  await flattenAll();
+  return { bandsSeen: bands.length, workingUsdBefore };
+}
+
 async function flattenAll(): Promise<void> {
   const signer = getAgentSigner();
   if (!signer) return;
