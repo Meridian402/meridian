@@ -12,7 +12,7 @@ const LOG_PATH = dataPath("executions.jsonl");
 
 export interface ExecutionRecord {
   ts: number;
-  kind: "rotation" | "entry" | "yield-enter" | "yield-exit" | "liquidation" | "lp-mint" | "lp-exit" | "lp-collect";
+  kind: "rotation" | "entry" | "yield-enter" | "yield-exit" | "liquidation" | "lp-mint" | "lp-exit" | "lp-collect" | "treasury-skim";
   fromSymbol?: string;
   toSymbol?: string;
   amountUsd: number;

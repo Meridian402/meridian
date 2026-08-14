@@ -1866,6 +1866,36 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
       console.log(`[memeRotor] ${target.symbol} refused: tape too thin to quote (${pulse} swaps/hr)`);
       return;
     }
+    // THE REGIME GATE, 2026-08-14. Ten live days split cleanly: every
+    // profitable stretch was hot-and-calm tape, every trap was an entry into
+    // trending tape (single-sided bids are adverse-selected in trends, and
+    // fees never catch the inventory loss). Entries now require the regime
+    // that actually pays: volumeMode on the live tape, or no new capital at
+    // all. Exits, stops and requotes are untouched; this gates money IN.
+    // Escape hatch for the operator: MERIDIAN_MEME_REGIME_GATE=off.
+    if (process.env.MERIDIAN_MEME_REGIME_GATE !== "off") {
+      const entryDrift = tickDriftPctPerHour(poolTickHistory.get(targetPid) ?? [], Date.now());
+      if (!volumeMode(pulse, entryDrift)) {
+        console.log(
+          `[memeRotor] ${target.symbol} refused by the regime gate: tape not hot-and-calm (${pulse} swaps/hr, drift ${entryDrift == null ? "?" : entryDrift.toFixed(1)}%/hr)`,
+        );
+        return;
+      }
+    }
+    // THE FLOAT ALLOWANCE, 2026-08-14. deskFloatUsd counts every idle dollar
+    // in the wallet, which is how the rotor absorbed an operator transfer
+    // meant for another sleeve within minutes of it arriving. The rotor now
+    // has an allowance: bands plus this entry may never exceed
+    // MERIDIAN_MEME_FLOAT_CAP_USD. Capital beyond the allowance is simply
+    // not the rotor's to deploy, no matter how idle it looks.
+    const allowanceUsd = Number(process.env.MERIDIAN_MEME_FLOAT_CAP_USD ?? 150);
+    const workingNowUsd = bands.reduce((s, b) => s + b.valueUsd, 0);
+    const headroomUsd = allowanceUsd - workingNowUsd;
+    if (headroomUsd < 25) {
+      console.log(`[memeRotor] expansion refused by the float allowance: $${workingNowUsd.toFixed(0)} of $${allowanceUsd} already working`);
+      return;
+    }
+    capUsd = Math.min(capUsd, headroomUsd);
     const mult = benchMult * pulseMult;
     const wallet = getWalletClient();
     const capWei = BigInt(Math.round(((capUsd * mult) / ethUsd) * 1e18));

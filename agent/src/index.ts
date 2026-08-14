@@ -11,6 +11,8 @@ import { ponsDeployment } from "./launch/pons.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
 import { startLpGuard, openInPool } from "./lpGuard.js";
+import { startPilotGuard } from "./pilotGuard.js";
+import { startTreasurySkim } from "./treasurySkim.js";
 import { startMemeFastWatch, clearBreakerHalt, deskHalted, operatorFlattenMeme } from "./memeGuard.js";
 import { assetScorecard } from "./assetScorecard.js";
 import { listSkills } from "./skills/registry.js";
@@ -2297,6 +2299,11 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
   // Seconds-scale fill detection for the meme book: flips filled bands to the
   // sell side in under a minute. Same house lock, own kill switch.
   startMemeFastWatch();
+  // The 24/7 clock over the hands-off pilot pools (collect, stabilization
+  // re-center, hard floor), and the hourly float-target treasury skim. Both
+  // signer-gated, both on the house lock.
+  startPilotGuard();
+  startTreasurySkim();
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
 }

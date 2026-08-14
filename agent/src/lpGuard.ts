@@ -91,7 +91,7 @@ const outOfRangeSince = new Map<string, number>();
 // that trades around the clock. Their positions are opened, watched and closed
 // by the operator until a 24/7 management clock exists. Env-overridable so a
 // pool can graduate without a deploy.
-const HANDS_OFF_SYMBOLS = new Set(
+export const HANDS_OFF_SYMBOLS = new Set(
   (process.env.MERIDIAN_GUARD_HANDS_OFF ?? "PONS,TTWO,STONKBROKER").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
 );
 
