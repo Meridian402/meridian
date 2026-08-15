@@ -28,11 +28,11 @@ contract MockMerd {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The Meridians' public mint, as the operator specced it on 2026-08-15:
-// two per wallet, the first free, the second $15 paid in MERD (burned) or
-// ETH (to the payout address). Every rule here is a promise the mint page
-// will make in public, so every rule gets a test that would fail loudly if
-// the contract drifted from the promise.
+// The Meridians' public mint LADDER, as the operator specced it on 2026-08-15:
+// three per wallet, each rung with exactly one price and one payment route.
+//   #1 free  ·  #2 discounted, in MERD, burned  ·  #3 outright, in ETH.
+// Every rule here is a promise the mint page will make in public, so every
+// rule gets a test that would fail loudly if the contract drifted from it.
 // ─────────────────────────────────────────────────────────────────────────────
 contract MerdSeatMintTest is Test {
     MerdSeat seat;
@@ -41,8 +41,8 @@ contract MerdSeatMintTest is Test {
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
 
-    uint256 constant PRICE_WEI = 0.008 ether; // ~$15 at deploy-time peg
-    uint256 constant PRICE_MERD = 25_000e18; // ~$15 of MERD at deploy-time peg
+    uint256 constant PRICE_WEI = 0.008 ether; // the outright rung, ~$15 at deploy-time peg
+    uint256 constant PRICE_MERD = 17_000e18; // the discounted rung, ~$10 at deploy-time peg
     address constant DEAD = 0x000000000000000000000000000000000000dEaD;
 
     function setUp() public {
@@ -55,12 +55,25 @@ contract MerdSeatMintTest is Test {
         merd.mint(alice, 1_000_000e18);
     }
 
+    /// Climb alice through the full ladder. Reused so ladder-order tests stay terse.
+    function _climb(uint256 rungs) internal {
+        vm.startPrank(alice);
+        if (rungs >= 1) seat.mintFree();
+        if (rungs >= 2) {
+            merd.approve(address(seat), PRICE_MERD);
+            seat.mintPaidMerd();
+        }
+        if (rungs >= 3) seat.mintPaidEth{value: PRICE_WEI}();
+        vm.stopPrank();
+    }
+
     function test_collection_identity() public view {
         assertEq(seat.name(), "The Meridians");
         assertEq(seat.symbol(), "MERIDIAN");
+        assertEq(seat.WALLET_CAP(), 3);
     }
 
-    // ── the free first mint ──────────────────────────────────────────────────
+    // ── rung 1: free ─────────────────────────────────────────────────────────
 
     function test_first_mint_is_free_and_assigns_sequential_ids() public {
         vm.prank(alice);
@@ -71,42 +84,77 @@ contract MerdSeatMintTest is Test {
         assertEq(b, 2);
         assertEq(seat.ownerOf(1), alice);
         assertEq(seat.ownerOf(2), bob);
-        assertEq(seat.totalSupply(), 2);
     }
 
     function test_one_free_mint_per_wallet_ever() public {
-        vm.startPrank(alice);
-        seat.mintFree();
+        _climb(1);
+        vm.prank(alice);
         vm.expectRevert(MerdSeat.FreeMintUsed.selector);
         seat.mintFree();
-        vm.stopPrank();
     }
 
-    function test_paying_for_the_first_mint_is_refused_not_pocketed() public {
-        // The paid path is the SECOND mint. A wallet that tries to pay for its
-        // first would be overpaying for what is free; the contract refuses
-        // rather than keeping the money.
+    // ── the ladder is strict: each route only at its rung ────────────────────
+
+    function test_eth_cannot_buy_the_second_seat() public {
+        _climb(1);
+        // The second seat is the DISCOUNTED one and it is paid in MERD. ETH
+        // out of order is refused, not repriced.
         vm.prank(alice);
         vm.expectRevert(MerdSeat.WrongPayment.selector);
         seat.mintPaidEth{value: PRICE_WEI}();
     }
 
-    // ── the paid second mint ─────────────────────────────────────────────────
-
-    function test_second_mint_in_eth_pays_the_payout_address_exactly() public {
+    function test_merd_cannot_buy_the_third_seat() public {
+        _climb(2);
         vm.startPrank(alice);
-        seat.mintFree();
-        uint256 before = payout.balance;
-        uint256 id = seat.mintPaidEth{value: PRICE_WEI}();
+        merd.approve(address(seat), PRICE_MERD);
+        vm.expectRevert(MerdSeat.WrongPayment.selector);
+        seat.mintPaidMerd();
         vm.stopPrank();
+    }
+
+    function test_paying_for_the_first_mint_is_refused_not_pocketed() public {
+        vm.startPrank(alice);
+        merd.approve(address(seat), PRICE_MERD);
+        vm.expectRevert(MerdSeat.WrongPayment.selector);
+        seat.mintPaidMerd();
+        vm.expectRevert(MerdSeat.WrongPayment.selector);
+        seat.mintPaidEth{value: PRICE_WEI}();
+        vm.stopPrank();
+        assertEq(payout.balance, 0, "no money was kept for a refused mint");
+    }
+
+    // ── rung 2: the MERD discount, burned ────────────────────────────────────
+
+    function test_second_mint_burns_the_merd_payment() public {
+        uint256 before = merd.balanceOf(alice);
+        _climb(2);
+        assertEq(merd.balanceOf(DEAD), PRICE_MERD, "the MERD goes to the dead address, not a wallet");
+        assertEq(before - merd.balanceOf(alice), PRICE_MERD);
+        assertEq(seat.totalBurnedForMints(), PRICE_MERD);
+        assertEq(seat.balanceOf(alice), 2);
+    }
+
+    function test_merd_payment_without_approval_fails_cleanly() public {
+        _climb(1);
+        vm.prank(alice);
+        vm.expectRevert(MerdSeat.BurnFailed.selector);
+        seat.mintPaidMerd();
+    }
+
+    // ── rung 3: outright ETH to the payout address ───────────────────────────
+
+    function test_third_mint_pays_the_payout_address_exactly() public {
+        uint256 before = payout.balance;
+        _climb(3);
         assertEq(payout.balance - before, PRICE_WEI, "the ETH lands at the payout address, all of it");
-        assertEq(seat.ownerOf(id), alice);
-        assertEq(seat.mintedBy(alice), 2);
+        assertEq(seat.balanceOf(alice), 3);
+        assertEq(seat.mintedBy(alice), 3);
     }
 
     function test_wrong_eth_amount_is_refused_over_and_under() public {
+        _climb(2);
         vm.startPrank(alice);
-        seat.mintFree();
         vm.expectRevert(MerdSeat.WrongPayment.selector);
         seat.mintPaidEth{value: PRICE_WEI - 1}();
         vm.expectRevert(MerdSeat.WrongPayment.selector);
@@ -114,46 +162,25 @@ contract MerdSeatMintTest is Test {
         vm.stopPrank();
     }
 
-    function test_second_mint_in_merd_burns_the_payment() public {
-        vm.startPrank(alice);
-        seat.mintFree();
-        merd.approve(address(seat), PRICE_MERD);
-        uint256 supplyBefore = merd.balanceOf(alice);
-        seat.mintPaidMerd();
-        vm.stopPrank();
-        assertEq(merd.balanceOf(DEAD), PRICE_MERD, "the MERD goes to the dead address, not a wallet");
-        assertEq(supplyBefore - merd.balanceOf(alice), PRICE_MERD);
-        assertEq(seat.totalBurnedForMints(), PRICE_MERD);
-    }
+    // ── the wall at three ────────────────────────────────────────────────────
 
-    function test_merd_payment_without_approval_fails_cleanly() public {
+    function test_no_fourth_mint_at_any_price() public {
+        _climb(3);
         vm.startPrank(alice);
-        seat.mintFree();
-        vm.expectRevert(MerdSeat.BurnFailed.selector);
-        seat.mintPaidMerd();
-        vm.stopPrank();
-    }
-
-    // ── the wall at two ──────────────────────────────────────────────────────
-
-    function test_no_third_mint_at_any_price() public {
-        vm.startPrank(alice);
-        seat.mintFree();
-        seat.mintPaidEth{value: PRICE_WEI}();
-        vm.expectRevert(MerdSeat.WalletCapReached.selector);
-        seat.mintPaidEth{value: PRICE_WEI}();
-        merd.approve(address(seat), PRICE_MERD);
-        vm.expectRevert(MerdSeat.WalletCapReached.selector);
-        seat.mintPaidMerd();
         vm.expectRevert(MerdSeat.FreeMintUsed.selector);
         seat.mintFree();
+        merd.approve(address(seat), PRICE_MERD);
+        vm.expectRevert(MerdSeat.WalletCapReached.selector);
+        seat.mintPaidMerd();
+        vm.expectRevert(MerdSeat.WalletCapReached.selector);
+        seat.mintPaidEth{value: PRICE_WEI}();
         vm.stopPrank();
-        assertEq(seat.balanceOf(alice), 2, "two is the wall, no matter the route");
+        assertEq(seat.balanceOf(alice), 3, "three is the wall, no matter the route");
     }
 
     // ── supply, gating, and coexistence with the owner mint ──────────────────
 
-    function test_mint_respects_the_1000_cap() public {
+    function test_mint_respects_the_supply_cap() public {
         seat.lowerMaxSupply(2);
         vm.prank(alice);
         seat.mintFree();

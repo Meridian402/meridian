@@ -199,21 +199,28 @@ contract MerdSeat {
     }
 
     // ── the public mint ──────────────────────────────────────────────────────
-    // Two per wallet, and the wallet chooses how it pays for the second:
+    // Three per wallet, a LADDER where each rung has exactly one price and
+    // one payment route (operator's spec, 2026-08-15):
     //   mint #1  free
-    //   mint #2  priceMerd in MERD (burned), or priceWei in ETH (to treasury)
+    //   mint #2  priceMerd in MERD, burned. Pegged BELOW the ETH rung on
+    //            purpose: the discount is the reason to hold the token.
+    //   mint #3  priceWei in ETH, outright, to the payout address.
     //
-    // Prices are OWNER-SET AMOUNTS pegged to a dollar target off-chain, not
+    // The routes are not interchangeable: ETH cannot buy the second seat and
+    // MERD cannot buy the third. A ladder that could be paid out of order
+    // would quietly become "whichever is cheaper today", and the discount
+    // would stop meaning anything.
+    //
+    // Prices are OWNER-SET AMOUNTS pegged to dollar targets off-chain, not
     // oracle-derived: this chain has no hardened price feed, and a mint that
     // reads a thin pool's spot invites paying with a flash-moved price. A
     // re-peg is a public, evented transaction; manipulation of it would have
     // to happen in front of everyone.
     //
     // MERD payments BURN, deliberately: the same shape as activation, so every
-    // paid mint shrinks the token supply rather than funding a wallet. ETH
-    // payments go to the immutable payout address set at deploy.
+    // token-paid mint shrinks the token supply rather than funding a wallet.
 
-    uint256 public constant WALLET_CAP = 2;
+    uint256 public constant WALLET_CAP = 3;
     bool public mintOpen;
     uint256 public priceWei;
     uint256 public priceMerd;
@@ -237,34 +244,35 @@ contract MerdSeat {
         emit PricesSet(priceWei_, priceMerd_);
     }
 
-    /// Mint #1 for the caller: free, once per wallet.
+    /// Rung 1: free, once per wallet.
     function mintFree() external returns (uint256 id) {
         if (mintedBy[msg.sender] >= 1) revert FreeMintUsed();
-        return _publicMint(false, false);
+        return _publicMint(0, false);
     }
 
-    /// Mint #2 for the caller, paid in ETH. Exact price, no overpay kept.
+    /// Rung 2: the discounted seat, paid in MERD. The payment burns.
+    function mintPaidMerd() external returns (uint256 id) {
+        if (!merd.transferFrom(msg.sender, BURN_ADDRESS, priceMerd)) revert BurnFailed();
+        totalBurnedForMints += priceMerd;
+        return _publicMint(1, true);
+    }
+
+    /// Rung 3: the outright seat, paid in ETH. Exact price, no overpay kept.
     function mintPaidEth() external payable returns (uint256 id) {
         if (msg.value != priceWei) revert WrongPayment();
         (bool ok,) = payout.call{value: msg.value}("");
         if (!ok) revert PayFailed();
-        return _publicMint(true, false);
+        return _publicMint(2, false);
     }
 
-    /// Mint #2 for the caller, paid in MERD. The payment burns.
-    function mintPaidMerd() external returns (uint256 id) {
-        if (!merd.transferFrom(msg.sender, BURN_ADDRESS, priceMerd)) revert BurnFailed();
-        totalBurnedForMints += priceMerd;
-        return _publicMint(true, true);
-    }
-
-    function _publicMint(bool paid, bool inMerd) private returns (uint256 id) {
+    function _publicMint(uint256 rung, bool inMerd) private returns (uint256 id) {
         if (!mintOpen) revert MintClosed();
         uint256 already = mintedBy[msg.sender];
         if (already >= WALLET_CAP) revert WalletCapReached();
-        // The free mint must come first: a wallet's paid mint is its SECOND.
-        // Paying for the first would be a worse deal offered to the confused.
-        if (paid == (already == 0)) revert WrongPayment();
+        // Each route is valid at exactly its rung: free is the first seat,
+        // MERD the second, ETH the third. Out of order is refused, not
+        // repriced; a ladder you can pay out of order is not a ladder.
+        if (already != rung) revert WrongPayment();
         if (totalSupply + 1 > maxSupply) revert SoldOut();
         // The cursor skips any id the owner minted by hand pre-launch.
         id = nextId;
@@ -279,7 +287,7 @@ contract MerdSeat {
         roleOf[id] = "meridian";
         emit Transfer(address(0), msg.sender, id);
         emit SeatMinted(id, msg.sender, "meridian");
-        emit PublicMint(id, msg.sender, paid, inMerd);
+        emit PublicMint(id, msg.sender, rung > 0, inMerd);
         _checkReceiver(address(0), msg.sender, id, "");
     }
 
