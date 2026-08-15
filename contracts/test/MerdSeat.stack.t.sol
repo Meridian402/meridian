@@ -57,7 +57,7 @@ contract MerdSeatStackTest is Test {
     address NATIVE;
 
     function setUp() public {
-        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
+        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18, address(0xFEE));
         seat.mint(alice, SEAT_ID, "venue-maker");
 
         // The canonical registry deploys the implementation as a proxy that
@@ -234,7 +234,7 @@ contract MerdSeatRegistryTest is Test {
     address constant TREASURY = address(0x7EA5);
 
     function setUp() public {
-        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18);
+        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18, address(0xFEE));
         seat.mint(alice, 1, "launch");
     }
 
@@ -324,7 +324,7 @@ contract MerdSeatActivationTest is Test {
 
     function setUp() public {
         merd = new MockMerd();
-        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", address(merd), FEE);
+        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", address(merd), FEE, address(0xFEE));
         seat.mint(alice, 1, "desk");
         merd.mint(alice, 5_000_000e18);
         merd.mint(bob, 5_000_000e18);

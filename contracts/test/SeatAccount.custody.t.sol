@@ -55,7 +55,7 @@ contract SeatAccountCustodyTest is Test {
     SeatAccount rootAccount;
 
     function setUp() public {
-        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", MERD_TOKEN, 1_000_000e18);
+        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", MERD_TOKEN, 1_000_000e18, address(0xFEE));
         registry = new MockRegistry();
         implementation = address(new SeatAccount());
         seat.mint(alice, ROOT, "root");

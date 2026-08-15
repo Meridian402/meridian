@@ -35,8 +35,8 @@ interface IERC20 {
 }
 
 contract MerdSeat {
-    string public constant name = "Merd Desk Seat";
-    string public constant symbol = "SEAT";
+    string public constant name = "The Meridians";
+    string public constant symbol = "MERIDIAN";
 
     address public owner;
     uint256 public totalSupply;
@@ -112,18 +112,25 @@ contract MerdSeat {
     error NotHolder();
     error AlreadyActive();
     error BurnFailed();
+    error MintClosed();
+    error WalletCapReached();
+    error FreeMintUsed();
+    error WrongPayment();
+    error PayFailed();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
         _;
     }
 
-    constructor(uint256 maxSupply_, string memory baseURI_, address merd_, uint256 activationFee_) {
+    constructor(uint256 maxSupply_, string memory baseURI_, address merd_, uint256 activationFee_, address payout_) {
+        if (payout_ == address(0)) revert ToZero();
         owner = msg.sender;
         maxSupply = maxSupply_;
         baseURI = baseURI_;
         merd = IERC20(merd_);
         activationFee = activationFee_;
+        payout = payout_;
         emit ActivationFeeSet(activationFee_);
         emit OwnershipTransferred(address(0), msg.sender);
     }
@@ -189,6 +196,91 @@ contract MerdSeat {
 
     function supportsInterface(bytes4 iid) external pure returns (bool) {
         return iid == 0x01ffc9a7 || iid == 0x80ac58cd || iid == 0x5b5e139f;
+    }
+
+    // ── the public mint ──────────────────────────────────────────────────────
+    // Two per wallet, and the wallet chooses how it pays for the second:
+    //   mint #1  free
+    //   mint #2  priceMerd in MERD (burned), or priceWei in ETH (to treasury)
+    //
+    // Prices are OWNER-SET AMOUNTS pegged to a dollar target off-chain, not
+    // oracle-derived: this chain has no hardened price feed, and a mint that
+    // reads a thin pool's spot invites paying with a flash-moved price. A
+    // re-peg is a public, evented transaction; manipulation of it would have
+    // to happen in front of everyone.
+    //
+    // MERD payments BURN, deliberately: the same shape as activation, so every
+    // paid mint shrinks the token supply rather than funding a wallet. ETH
+    // payments go to the immutable payout address set at deploy.
+
+    uint256 public constant WALLET_CAP = 2;
+    bool public mintOpen;
+    uint256 public priceWei;
+    uint256 public priceMerd;
+    address public immutable payout;
+    uint256 public nextId = 1;
+    mapping(address => uint256) public mintedBy;
+    uint256 public totalBurnedForMints;
+
+    event PublicMint(uint256 indexed id, address indexed to, bool paid, bool inMerd);
+    event MintOpenSet(bool open);
+    event PricesSet(uint256 priceWei, uint256 priceMerd);
+
+    function setMintOpen(bool open) external onlyOwner {
+        mintOpen = open;
+        emit MintOpenSet(open);
+    }
+
+    function setPrices(uint256 priceWei_, uint256 priceMerd_) external onlyOwner {
+        priceWei = priceWei_;
+        priceMerd = priceMerd_;
+        emit PricesSet(priceWei_, priceMerd_);
+    }
+
+    /// Mint #1 for the caller: free, once per wallet.
+    function mintFree() external returns (uint256 id) {
+        if (mintedBy[msg.sender] >= 1) revert FreeMintUsed();
+        return _publicMint(false, false);
+    }
+
+    /// Mint #2 for the caller, paid in ETH. Exact price, no overpay kept.
+    function mintPaidEth() external payable returns (uint256 id) {
+        if (msg.value != priceWei) revert WrongPayment();
+        (bool ok,) = payout.call{value: msg.value}("");
+        if (!ok) revert PayFailed();
+        return _publicMint(true, false);
+    }
+
+    /// Mint #2 for the caller, paid in MERD. The payment burns.
+    function mintPaidMerd() external returns (uint256 id) {
+        if (!merd.transferFrom(msg.sender, BURN_ADDRESS, priceMerd)) revert BurnFailed();
+        totalBurnedForMints += priceMerd;
+        return _publicMint(true, true);
+    }
+
+    function _publicMint(bool paid, bool inMerd) private returns (uint256 id) {
+        if (!mintOpen) revert MintClosed();
+        uint256 already = mintedBy[msg.sender];
+        if (already >= WALLET_CAP) revert WalletCapReached();
+        // The free mint must come first: a wallet's paid mint is its SECOND.
+        // Paying for the first would be a worse deal offered to the confused.
+        if (paid == (already == 0)) revert WrongPayment();
+        if (totalSupply + 1 > maxSupply) revert SoldOut();
+        // The cursor skips any id the owner minted by hand pre-launch.
+        id = nextId;
+        while (_ownerOf[id] != address(0)) id++;
+        nextId = id + 1;
+        mintedBy[msg.sender] = already + 1;
+        unchecked {
+            totalSupply++;
+            _balanceOf[msg.sender]++;
+        }
+        _ownerOf[id] = msg.sender;
+        roleOf[id] = "meridian";
+        emit Transfer(address(0), msg.sender, id);
+        emit SeatMinted(id, msg.sender, "meridian");
+        emit PublicMint(id, msg.sender, paid, inMerd);
+        _checkReceiver(address(0), msg.sender, id, "");
     }
 
     // ── seats ────────────────────────────────────────────────────────────────
