@@ -132,6 +132,12 @@ export function consistencyBoard() {
     });
 
   const totalFees = days.reduce((s, d) => s + d.lpFeesUsd, 0);
+  // The $120 hard floor came into force on 2026-08-11 (raised from $75). A
+  // headline that measures the pre-floor era against today's floor reads as
+  // "the floor is fiction", so the record states both: the worst day since
+  // the floor has existed, and the all-time worst, era labeled.
+  const FLOOR_SINCE = "2026-08-11";
+  const sinceFloor = days.filter((d) => d.date >= FLOOR_SINCE);
   const body = {
     days,
     summary: {
@@ -139,7 +145,14 @@ export function consistencyBoard() {
       totalLpFeesUsd: Math.round(totalFees * 100) / 100,
       bestFeeDayUsd: Math.round(Math.max(0, ...days.map((d) => d.lpFeesUsd)) * 100) / 100,
       worstDrawdownUsd: Math.round(Math.max(0, ...days.map((d) => d.maxDrawdownUsd)) * 100) / 100,
+      worstDrawdownSinceFloorUsd: Math.round(Math.max(0, ...sinceFloor.map((d) => d.maxDrawdownUsd)) * 100) / 100,
+      // The floor's actual jurisdiction is what a DAY can lose, close against
+      // open. Intraday dip marks include operator withdrawals, restarts and
+      // forced flattens; judging the floor by those compares a speed limit to
+      // a pothole. Positive magnitude of the worst net day since the floor.
+      worstDayNetSinceFloorUsd: Math.round(Math.max(0, ...sinceFloor.map((d) => d.bookOpen - d.bookClose)) * 100) / 100,
       dailyLossLimitUsd: DAILY_LOSS_LIMIT_USD,
+      floorSince: FLOOR_SINCE,
     },
   };
   cache = { at: Date.now(), body };

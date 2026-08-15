@@ -110,14 +110,17 @@ export async function computeBookNow(): Promise<BookPoint | null> {
  *  (we do not rewrite history); they are just never served as truth. */
 export const QUARANTINED: [number, number][] = [
   [1785972000000, 1785973400000],
-  // 2026-08-11 00:00-01:00Z: the operator's buyback night. Wallet approvals,
-  // treasury-to-execution shuffles, the swap and the burn spanned the first
-  // half hour, snapshots caught money mid-flight repeatedly (one mark read
-  // ~$480 low and tripped the old one-mark breaker), and the flatten it
-  // triggered owns the rest of the hour. A first pass quarantined 00:20-00:45
-  // and the distorted trough survived just outside it, so the whole hour goes:
-  // nothing in it is a reading of the book.
-  [1786406400000, 1786410000000],
+  // 2026-08-10 23:00Z - 2026-08-11 02:00Z: the operator's buyback night.
+  // Wallet approvals, treasury-to-execution shuffles, the swap and the burn,
+  // snapshots catching money mid-flight repeatedly (one mark read ~$480 low
+  // and tripped the old one-mark breaker), and the flatten that followed. A
+  // first pass quarantined 00:20-00:45Z and the distorted trough survived
+  // just outside it; a second pass took the 00:00-01:00Z hour and the ET
+  // re-bucketing of 2026-08-15 then merged the surviving shoulder marks into
+  // one Eastern day, printing a phantom $537 "record drawdown" for Aug 10.
+  // Third pass: the whole operator-moves evening goes, 7pm to 10pm Eastern.
+  // Nothing in it is a reading of the book.
+  [1786402800000, 1786413600000],
   // 2026-08-14 01:55-10:00Z: the night the USDG sleeve armed, recorded by a
   // gauge that could not see dollars. The first ETH->USDG conversion at ~01:56
   // printed as a $127 "loss" (the dollars were real, the gauge was ETH-only),
