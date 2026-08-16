@@ -1463,6 +1463,56 @@ export function clearBreakerHalt(): { cleared: boolean; wasHaltedUntil: number }
   return { cleared: true, wasHaltedUntil: was };
 }
 
+
+// ── THE VENUE ADMISSION RULE ────────────────────────────────────────────────
+// 2026-08-16: the desk held SIXTEEN bands in one token. The compound arm
+// re-enters whatever venue ranks best and mints a FRESH band each time, and
+// the only brake in the entire path was total headroom against the allowance,
+// so raising that allowance from $250 to $1,200 simply let the loop run five
+// times longer. Worse, a band's range is derived from the current tick, so on
+// a calm tape (exactly the condition the gate admits) every one of those
+// bands landed on the SAME range: one position minted sixteen times, paying
+// gas sixteen times, splitting a single fee stream across sixteen NFTs.
+// Measured that afternoon: $700 across sixteen STONKBROKER bands accrued
+// $0.91, while ONE $97 POOLS band accrued $0.54, four times the yield per
+// dollar. Concentration was never the plan; it was the absence of a rule.
+const VENUE_MAX_SHARE_PCT = Number(process.env.MERIDIAN_VENUE_MAX_SHARE_PCT ?? 35);
+const VENUE_MAX_BANDS = Number(process.env.MERIDIAN_VENUE_MAX_BANDS ?? 4);
+
+/** The range buildNativeOnlyMint WOULD produce for these inputs. Pure, so the
+ *  duplicate check tests the same arithmetic the mint uses. */
+export function plannedRange(
+  currentTick: number,
+  tickSpacing: number,
+  widthSpacings: number,
+  spacingsAbove: number,
+): { tickLower: number; tickUpper: number } {
+  const tickLower = (Math.floor(currentTick / tickSpacing) + Math.max(1, spacingsAbove)) * tickSpacing;
+  return { tickLower, tickUpper: tickLower + widthSpacings * tickSpacing };
+}
+
+/** PURE: may the rotor open ANOTHER band in this venue right now? */
+export function venueAdmits(
+  existing: readonly { valueUsd: number; tickLower: number; tickUpper: number }[],
+  allowanceUsd: number,
+  planned: { tickLower: number; tickUpper: number } | null,
+  maxSharePct = VENUE_MAX_SHARE_PCT,
+  maxBands = VENUE_MAX_BANDS,
+): { ok: boolean; reason: string } {
+  if (existing.length >= maxBands) {
+    return { ok: false, reason: `already ${existing.length} bands here (max ${maxBands})` };
+  }
+  const here = existing.reduce((s, b) => s + b.valueUsd, 0);
+  const cap = (maxSharePct / 100) * allowanceUsd;
+  if (here >= cap) {
+    return { ok: false, reason: `$${here.toFixed(0)} already working here (venue cap $${cap.toFixed(0)} = ${maxSharePct}% of allowance)` };
+  }
+  if (planned && existing.some((b) => b.tickLower === planned.tickLower && b.tickUpper === planned.tickUpper)) {
+    return { ok: false, reason: `range [${planned.tickLower},${planned.tickUpper}] is already quoted; a duplicate splits our own fees` };
+  }
+  return { ok: true, reason: "" };
+}
+
 /** Which response a drawdown deserves. Pure, for tests. */
 export function breakerStage(drawdownUsd: number, limitUsd = DAILY_LOSS_LIMIT_USD): 0 | 1 | 2 {
   if (drawdownUsd >= 2 * limitUsd) return 2;
@@ -1948,6 +1998,15 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
 
     const { tick, sqrtP } = await ethPoolSlot0(target);
     if (sqrtP === 0) return;
+    // No venue may become the book. Checked here rather than earlier because
+    // the duplicate-range test needs the live tick the mint will actually use.
+    const hereBands = bands.filter((b) => b.poolId.toLowerCase() === targetPid);
+    const planned = plannedRange(tick, target.tickSpacing, target.widthSpacings ?? 8, target.offsetAbove);
+    const admit = venueAdmits(hereBands, allowanceUsd, planned);
+    if (!admit.ok) {
+      console.log(`[memeRotor] ${target.symbol} refused: ${admit.reason}`);
+      return;
+    }
     const mint = buildNativeOnlyMint(target, tick, mintWei, signer.address, target.offsetAbove);
     await client.call({ account: signer.address, to: mint.to, data: mint.data, value: mint.value });
     const h = await wallet.sendTransaction({ to: mint.to, data: mint.data, value: mint.value });
