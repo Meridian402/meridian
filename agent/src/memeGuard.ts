@@ -736,7 +736,9 @@ export async function memeRotorTick(): Promise<void> {
   // Heartbeat, throttled: silence must be distinguishable from death.
   if (Date.now() - lastPassLogAt > 5 * 60 * 1000) {
     lastPassLogAt = Date.now();
-    console.log(`[memeRotor] pass: ${bands.length} band(s), \$${bands.reduce((x, b) => x + b.valueUsd, 0).toFixed(0)} working`);
+    const workingNowUsd = bands.reduce((x, b) => x + b.valueUsd, 0);
+    noteRotorWorking(workingNowUsd);
+    console.log(`[memeRotor] pass: ${bands.length} band(s), \$${workingNowUsd.toFixed(0)} working`);
   }
   updateEarnTracking(bands);
   recordTicks(bands);
@@ -1414,6 +1416,25 @@ export async function looseInventoryUsd(ethUsd: number): Promise<number> {
 // that, a sticky morning high keeps the day's drawdown permanently past the
 // limit and a "few hours" stage-1 halt silently becomes the whole day again.
 const DAILY_LOSS_LIMIT_USD = Number(process.env.MERIDIAN_DAILY_LOSS_LIMIT_USD ?? 75);
+// THE FLOOR SCALES WITH DEPLOYMENT (2026-08-16, the $1,200 calibration). A
+// fixed dollar floor is tight at size and loose when small: at $1,200 of
+// working meme inventory, $120 is a routine 10% wobble and the desk would
+// spend half its life halted by ordinary volatility. The limit is now the
+// LARGER of the env floor and this percent of the rotor's working capital,
+// so protection is identical when small and proportional at size. Stage 1 at
+// a 15% adverse day, flatten at 30%, whatever the book size.
+const DAILY_LOSS_PCT = Number(process.env.MERIDIAN_DAILY_LOSS_PCT ?? 15);
+let lastRotorWorkingUsd = 0;
+export function noteRotorWorking(usd: number): void {
+  if (Number.isFinite(usd) && usd >= 0) lastRotorWorkingUsd = usd;
+}
+/** PURE: the day's effective loss limit for a given working size. */
+export function scaledDailyLimit(workingUsd: number, floorUsd = DAILY_LOSS_LIMIT_USD, pct = DAILY_LOSS_PCT): number {
+  return Math.max(floorUsd, (pct / 100) * Math.max(0, workingUsd));
+}
+function effectiveDailyLimitUsd(): number {
+  return scaledDailyLimit(lastRotorWorkingUsd);
+}
 const STAGE1_HALT_MS = 4 * 60 * 60 * 1000;
 const STAGE2_HALT_MS = 6 * 60 * 60 * 1000;
 let bookHwm = 0;
@@ -1465,7 +1486,8 @@ export function noteBookMark(book: number): void {
     return;
   }
   const drawdown = bookHwm - book;
-  const stage = breakerStage(drawdown);
+  const limitUsd = effectiveDailyLimitUsd();
+  const stage = breakerStage(drawdown, limitUsd);
   if (stage === 0) {
     breachStreak = 0;
     return;
@@ -1490,7 +1512,7 @@ export function noteBookMark(book: number): void {
     bookHwm = book; // re-arm from the surviving level
     breachStreak = 0;
     saveRotorState();
-    const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (2x limit $${2 * DAILY_LOSS_LIMIT_USD}); full flatten, quoting down ${Math.round(STAGE2_HALT_MS / 3600000)}h`;
+    const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (2x limit $${(2 * limitUsd).toFixed(0)}); full flatten, quoting down ${Math.round(STAGE2_HALT_MS / 3600000)}h`;
     appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "circuit-breaker", stage: 2, reason })}\n`);
     console.error(`[memeRotor] CIRCUIT BREAKER stage 2: ${reason}`);
     void withHouseWalletLock("circuitBreaker", flattenAll).catch((err) =>
@@ -1505,7 +1527,7 @@ export function noteBookMark(book: number): void {
   bookHwm = book; // re-arm: a further full limit of NEW loss re-triggers
   breachStreak = 0;
   saveRotorState();
-  const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (limit $${DAILY_LOSS_LIMIT_USD}); quoting halted ${Math.round(STAGE1_HALT_MS / 3600000)}h, ETH sides withdrawn, token exits stay on the stop ladder`;
+  const reason = `book $${book.toFixed(0)} is $${drawdown.toFixed(0)} below today's high (limit $${limitUsd.toFixed(0)}); quoting halted ${Math.round(STAGE1_HALT_MS / 3600000)}h, ETH sides withdrawn, token exits stay on the stop ladder`;
   appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "circuit-breaker", stage: 1, reason })}\n`);
   console.error(`[memeRotor] CIRCUIT BREAKER stage 1: ${reason}`);
   void withHouseWalletLock("circuitBreaker", withdrawEthSides).catch((err) =>
@@ -1773,10 +1795,13 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
   // pool like our riskiest, and it could not scale: the cap was set when the
   // book was half this size. A compound entry now sizes at 15% of the desk's
   // own float (idle + working, never the treasury), floored at the probation
-  // cap so it is never SMALLER than before. Probes and fresh candidates keep
+  // cap so it is never SMALLER than before (raised 15% -> 20% in the $1,200
+// calibration, 2026-08-16: at the new float the compound arm was the
+// bottleneck, crawling toward an allowance it could never reach). Probes and
+// fresh candidates keep
   // the flat cap and the half-size overrides exactly as they were.
   const deskFloatUsd = idleUsd + bands.reduce((s, b) => s + b.valueUsd, 0);
-  let capUsd = target ? Math.max(PROBATION_CAP_USD, 0.15 * deskFloatUsd) : PROBATION_CAP_USD;
+  let capUsd = target ? Math.max(PROBATION_CAP_USD, 0.2 * deskFloatUsd) : PROBATION_CAP_USD;
   if (!target) {
     const probes = [...venueByToken.values()]
       .filter((p) => {
