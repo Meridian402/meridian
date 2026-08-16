@@ -1992,10 +1992,17 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
 // the sell-band cycle converts them at a fee EARNED instead of paid. Rotations
 // already sweep fees on every re-quote; this pass exists for bands that sit in
 // range earning for days without a reason to move.
-const FEE_COLLECT_MIN_USD = 10;
-const FEE_SKIM_RATIO = 0.5;
-const FEE_COLLECTS_PER_DAY = 6;
-const MIN_SKIM_WEI = 500_000_000_000_000n; // 0.0005 ETH: below this, wait for more
+// RESCALED 2026-08-16. These were set when the desk ran a handful of fat
+// bands; it now runs twenty thin ones holding ~$0.33 each, so a $2 floor and
+// a $10 trigger meant NOTHING was ever eligible and fees just rolled forward
+// into the next quote, compounding into inventory risk instead of being
+// realized. Gas here is ~0.02 gwei, so collecting fifty cents costs a
+// fraction of a cent: at this band count, frequent small collects beat rare
+// large ones. All env-overridable so tuning does not need a deploy.
+const FEE_COLLECT_MIN_USD = Number(process.env.MERIDIAN_FEE_COLLECT_MIN_USD ?? 3);
+const FEE_SKIM_RATIO = Number(process.env.MERIDIAN_FEE_SKIM_RATIO ?? 0.75);
+const FEE_COLLECTS_PER_DAY = Number(process.env.MERIDIAN_FEE_COLLECTS_PER_DAY ?? 30);
+const MIN_SKIM_WEI = 200_000_000_000_000n; // 0.0002 ETH: below this, wait for more
 
 // SIZE IS ONE ROUTE TO COLLECTING. AGE IS THE OTHER.
 //
@@ -2014,8 +2021,8 @@ const MIN_SKIM_WEI = 500_000_000_000_000n; // 0.0005 ETH: below this, wait for m
 // says so. A band sitting on real money for hours gets swept even when the
 // amount is small. The hard floor underneath both routes exists only so a dust
 // collect never costs more than it banks.
-const FEE_COLLECT_FLOOR_USD = 2;
-const FEE_COLLECT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const FEE_COLLECT_FLOOR_USD = Number(process.env.MERIDIAN_FEE_COLLECT_FLOOR_USD ?? 0.5);
+const FEE_COLLECT_MAX_AGE_MS = Number(process.env.MERIDIAN_FEE_COLLECT_AGE_HOURS ?? 2) * 60 * 60 * 1000;
 
 export function shouldCollect(feesUsd: number, pendingForMs: number): boolean {
   if (feesUsd < FEE_COLLECT_FLOOR_USD) return false;
