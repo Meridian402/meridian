@@ -130,6 +130,13 @@ export const QUARANTINED: [number, number][] = [
   // The gauge learned to count USDG (cash and LP positions) at the end of this
   // window; marks from then on are whole-book readings.
   [1786672500000, 1786701600000],
+  // 2026-08-16 01:25-01:55Z: the NATIVE/USDG bridge pool was displaced to
+  // ~$484/ETH for twenty minutes (thin venue, later arbed back) and the
+  // gauge's single-source price marked the whole book at quarter value: a
+  // phantom $1,658 "drawdown" that fired the breaker's stage-2 halt on a
+  // book that had lost nothing. fetchEthUsd is despiked as of this window's
+  // close; these marks were priced by a broken ruler, not the market.
+  [1786843500000, 1786845300000],
 ];
 
 export function readBookHistory(windowMs = 24 * 3600e3, maxPoints = 300): BookPoint[] {

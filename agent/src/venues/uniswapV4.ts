@@ -106,14 +106,7 @@ async function ethUsdFromPool(): Promise<number> {
   return (Number(sqrtP) / Q96) ** 2 * 1e12;
 }
 
-/** ETH/USD, on-chain first (works from datacenter IPs), with a public feed as fallback. */
-export async function fetchEthUsd(): Promise<number> {
-  try {
-    const p = await ethUsdFromPool();
-    if (Number.isFinite(p) && p > 0) return p;
-  } catch {
-    /* on-chain read failed — fall through to the external fallback */
-  }
+async function externalEthUsd(): Promise<number> {
   const res = await fetch("https://query1.finance.yahoo.com/v8/finance/chart/ETH-USD?range=1d&interval=1d", {
     headers: { "User-Agent": "Mozilla/5.0 (Meridian agent)" },
     signal: AbortSignal.timeout(8000),
@@ -122,6 +115,70 @@ export async function fetchEthUsd(): Promise<number> {
   const price = json.chart?.result?.[0]?.meta?.regularMarketPrice;
   if (typeof price !== "number") throw new Error("couldn't fetch ETH/USD price");
   return price;
+}
+
+/**
+ * PURE: which price to believe. The pool is one THIN venue: on 2026-08-16
+ * someone displaced it to ~$484 for twenty minutes and the gauge marked the
+ * whole book at quarter price, printing a phantom $1,658 record drawdown and
+ * firing the breaker's stage-2 halt on a book that had lost nothing. So a
+ * pool reading only stands on its own when it agrees with the last accepted
+ * price; anything else is corroborated against the external feed first. A
+ * REAL crash passes, because the world's price agrees with the pool's.
+ */
+export function chooseEthUsd(
+  pool: number | null,
+  external: number | null,
+  lastGood: number | null,
+  tolerance = 0.25,
+): { price: number; source: "pool" | "external" | "last-good" } | null {
+  const near = (a: number, b: number) => Math.abs(a - b) / b <= tolerance;
+  if (pool != null && lastGood != null && near(pool, lastGood)) return { price: pool, source: "pool" };
+  if (pool != null && external != null && near(pool, external)) return { price: pool, source: "pool" };
+  if (external != null) return { price: external, source: "external" };
+  if (lastGood != null) return { price: lastGood, source: "last-good" };
+  if (pool != null) return { price: pool, source: "pool" }; // nothing to check against; best effort
+  return null;
+}
+
+let lastGoodEthUsd: { price: number; at: number } | null = null;
+const LAST_GOOD_TTL_MS = 24 * 3600e3;
+
+/** ETH/USD, on-chain first, DESPIKED: a suspicious pool reading is checked
+ *  against the external feed before it can reprice the book, including on a
+ *  fresh boot (booting INTO a displaced pool is how the 08-16 poisoning got
+ *  in: the restart had no memory, so the $484 reading looked normal). */
+export async function fetchEthUsd(): Promise<number> {
+  let pool: number | null = null;
+  try {
+    const p = await ethUsdFromPool();
+    if (Number.isFinite(p) && p > 0) pool = p;
+  } catch {
+    /* on-chain read failed */
+  }
+  const lg = lastGoodEthUsd && Date.now() - lastGoodEthUsd.at < LAST_GOOD_TTL_MS ? lastGoodEthUsd.price : null;
+  // Fast path: the pool agrees with recent history, no external call needed.
+  const fast = pool != null && lg != null ? chooseEthUsd(pool, null, lg) : null;
+  if (fast && fast.source === "pool") {
+    lastGoodEthUsd = { price: fast.price, at: Date.now() };
+    return fast.price;
+  }
+  let external: number | null = null;
+  try {
+    const e = await externalEthUsd();
+    if (Number.isFinite(e) && e > 0) external = e;
+  } catch {
+    /* external unreachable */
+  }
+  const pick = chooseEthUsd(pool, external, lg);
+  if (!pick) throw new Error("couldn't fetch ETH/USD price");
+  if (pick.source !== "pool") {
+    console.error(
+      `[ethUsd] pool reads ${pool == null ? "nothing" : `$${pool.toFixed(0)}`}, trusting ${pick.source} $${pick.price.toFixed(0)}${lg != null ? ` (last good $${lg.toFixed(0)})` : ""}`,
+    );
+  }
+  lastGoodEthUsd = { price: pick.price, at: Date.now() };
+  return pick.price;
 }
 
 const erc20Abi = [
