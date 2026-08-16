@@ -1425,6 +1425,8 @@ const DAILY_LOSS_LIMIT_USD = Number(process.env.MERIDIAN_DAILY_LOSS_LIMIT_USD ??
 // a 15% adverse day, flatten at 30%, whatever the book size.
 const DAILY_LOSS_PCT = Number(process.env.MERIDIAN_DAILY_LOSS_PCT ?? 15);
 let lastRotorWorkingUsd = 0;
+let lastStage2At = 0;
+const STAGE2_ESCALATE_COOLDOWN_MS = 15 * 60e3;
 export function noteRotorWorking(usd: number): void {
   if (Number.isFinite(usd) && usd >= 0) lastRotorWorkingUsd = usd;
 }
@@ -1474,7 +1476,11 @@ export function breakerStage(drawdownUsd: number, limitUsd = DAILY_LOSS_LIMIT_US
  *  (Stage 2 alone fires on a single mark: at twice the limit, waiting for a
  *  second reading is precision the book cannot afford.) */
 export function noteBookMark(book: number): void {
-  const today = new Date().toISOString().slice(0, 10);
+  // EASTERN, like the daily record and the market clock. On UTC the breaker's
+  // day rolled at 8pm ET, so an evening drawdown split into two halves that
+  // each passed under the limit and tripped nothing. The 2026-08-16 pool
+  // displacement landed at ~9:25pm ET, inside that forgiven window.
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   if (today !== bookHwmDay) {
     bookHwmDay = today;
     bookHwm = book;
@@ -1492,7 +1498,14 @@ export function noteBookMark(book: number): void {
     breachStreak = 0;
     return;
   }
-  if (deskHalted()) return;
+  // A stage-1 halt must not disable the catastrophe response. The halt stops
+  // QUOTING; it was never meant to stop the desk from flattening if the book
+  // keeps falling through it, and the early return here did exactly that: the
+  // 4h window where losses can run furthest was the one window stage 2 could
+  // not fire in. Stage 1 stays suppressed while halted (nothing left to halt),
+  // stage 2 escalates, rate-limited so it cannot re-flatten every mark.
+  if (deskHalted() && stage < 2) return;
+  if (stage === 2 && Date.now() - lastStage2At < STAGE2_ESCALATE_COOLDOWN_MS) return;
 
   if (stage === 2) {
     // TWO consecutive marks, learned 2026-08-11 the expensive way: a single
@@ -1504,6 +1517,7 @@ export function noteBookMark(book: number): void {
     // more mark of drawdown and buys immunity to every single-snapshot lie.
     breachStreak += 1;
     if (breachStreak < 2) return;
+    lastStage2At = Date.now();
     // Rolling halt, not the calendar: the engine's standing order is that it
     // does not stop for a day on any single trigger. A catastrophe that is
     // still real when the halt lifts re-fires immediately, because the

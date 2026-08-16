@@ -144,7 +144,11 @@ function halfWidthPct(p: { tickLower: number; tickUpper: number }): number {
 /** How far current price has drifted from a range's geometric center, in %. */
 function driftFromCenterPct(p: { tickLower: number; tickUpper: number }, currentTick: number): number {
   const centerTick = (p.tickLower + p.tickUpper) / 2;
-  return Math.abs(1.0001 ** ((currentTick - centerTick) / 2) - 1) * 100;
+  // No /2 here. halfWidthPct halves because its input is a full width; this
+  // input is ALREADY a distance from the center, and halving it reported
+  // about half the true drift, so the weekend tail guard rode to roughly
+  // twice its configured threshold before pulling.
+  return Math.abs(1.0001 ** (currentTick - centerTick) - 1) * 100;
 }
 
 /** Even up the two sides of the pair from wallet balances so a fresh two-sided range can mint. */

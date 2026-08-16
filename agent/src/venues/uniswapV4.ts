@@ -129,20 +129,36 @@ async function externalEthUsd(): Promise<number> {
 export function chooseEthUsd(
   pool: number | null,
   external: number | null,
-  lastGood: number | null,
-  tolerance = 0.25,
+  anchorPrice: number | null,
+  tolerance = CORROB_TOL,
+  fastTol = FAST_TOL,
 ): { price: number; source: "pool" | "external" | "last-good" } | null {
-  const near = (a: number, b: number) => Math.abs(a - b) / b <= tolerance;
-  if (pool != null && lastGood != null && near(pool, lastGood)) return { price: pool, source: "pool" };
-  if (pool != null && external != null && near(pool, external)) return { price: pool, source: "pool" };
+  const near = (a: number, b: number, tol: number) => Math.abs(a - b) / b <= tol;
+  // Close to the anchor the world already verified: believe the pool.
+  if (pool != null && anchorPrice != null && near(pool, anchorPrice, fastTol)) return { price: pool, source: "pool" };
+  // Far from the anchor, but the world agrees with it: a real move. Believe the pool.
+  if (pool != null && external != null && near(pool, external, tolerance)) return { price: pool, source: "pool" };
   if (external != null) return { price: external, source: "external" };
-  if (lastGood != null) return { price: lastGood, source: "last-good" };
+  if (anchorPrice != null) return { price: anchorPrice, source: "last-good" };
   if (pool != null) return { price: pool, source: "pool" }; // nothing to check against; best effort
   return null;
 }
 
+// THE ANCHOR IS WHAT THE OUTSIDE WORLD AGREED WITH, and it only ever advances
+// through corroboration. The first despike (2026-08-16) measured each pool
+// reading against the LAST ACCEPTED price and then re-anchored to it, so a
+// displacement delivered in steps under the tolerance walked the gauge
+// anywhere it liked: 20% per two-minute mark reaches a quarter of true value
+// in twelve minutes without one external call. Measuring against a fixed,
+// externally-verified point instead makes every step count from the same
+// place, so the walk cannot accumulate. The anchor is also re-corroborated on
+// a clock, so drift can never sit unchecked for long.
+let anchor: { price: number; at: number } | null = null;
 let lastGoodEthUsd: { price: number; at: number } | null = null;
-const LAST_GOOD_TTL_MS = 24 * 3600e3;
+const ANCHOR_TTL_MS = 10 * 60e3; // re-corroborate with the world at least this often
+const FAST_TOL = 0.05; // how far the pool may sit from the anchor with no network call
+const CORROB_TOL = 0.15; // how close the pool must be to the world to be believed over it
+const LAST_GOOD_TTL_MS = 6 * 3600e3;
 
 /** ETH/USD, on-chain first, DESPIKED: a suspicious pool reading is checked
  *  against the external feed before it can reprice the book, including on a
@@ -156,12 +172,14 @@ export async function fetchEthUsd(): Promise<number> {
   } catch {
     /* on-chain read failed */
   }
-  const lg = lastGoodEthUsd && Date.now() - lastGoodEthUsd.at < LAST_GOOD_TTL_MS ? lastGoodEthUsd.price : null;
-  // Fast path: the pool agrees with recent history, no external call needed.
-  const fast = pool != null && lg != null ? chooseEthUsd(pool, null, lg) : null;
-  if (fast && fast.source === "pool") {
-    lastGoodEthUsd = { price: fast.price, at: Date.now() };
-    return fast.price;
+  const now = Date.now();
+  const anchorFresh = anchor && now - anchor.at < ANCHOR_TTL_MS ? anchor.price : null;
+  // Fast path: the pool sits close to a price the world verified recently, so
+  // no network call. The anchor is deliberately NOT advanced here; trust is
+  // spent against it, never re-based onto whatever the pool just said.
+  if (pool != null && anchorFresh != null) {
+    const fast = chooseEthUsd(pool, null, anchorFresh);
+    if (fast && fast.source === "pool") return fast.price;
   }
   let external: number | null = null;
   try {
@@ -170,14 +188,21 @@ export async function fetchEthUsd(): Promise<number> {
   } catch {
     /* external unreachable */
   }
-  const pick = chooseEthUsd(pool, external, lg);
+  // Stale anchors must not vote: an anchor older than its TTL is history, not
+  // corroboration. When the world is unreachable we fall back to the last
+  // accepted price WITHOUT re-stamping its age, so the fallback really does
+  // expire instead of renewing itself forever.
+  const stale = lastGoodEthUsd && now - lastGoodEthUsd.at < LAST_GOOD_TTL_MS ? lastGoodEthUsd.price : null;
+  const pick = chooseEthUsd(pool, external, anchorFresh ?? stale);
   if (!pick) throw new Error("couldn't fetch ETH/USD price");
   if (pick.source !== "pool") {
     console.error(
-      `[ethUsd] pool reads ${pool == null ? "nothing" : `$${pool.toFixed(0)}`}, trusting ${pick.source} $${pick.price.toFixed(0)}${lg != null ? ` (last good $${lg.toFixed(0)})` : ""}`,
+      `[ethUsd] pool reads ${pool == null ? "nothing" : `$${pool.toFixed(0)}`}, trusting ${pick.source} $${pick.price.toFixed(0)}${anchorFresh != null ? ` (anchor $${anchorFresh.toFixed(0)})` : ""}`,
     );
   }
-  lastGoodEthUsd = { price: pick.price, at: Date.now() };
+  // Only a reading the world took part in may become the new anchor.
+  if (external != null) anchor = { price: pick.price, at: now };
+  lastGoodEthUsd = { price: pick.price, at: pick.source === "last-good" ? (lastGoodEthUsd?.at ?? now) : now };
   return pick.price;
 }
 
