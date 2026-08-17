@@ -73,3 +73,30 @@ test("offset is floored at one spacing above spot", () => {
   const r = plannedRange(1000, 100, 4, 0);
   assert.equal(r.tickLower, 1100, "never at or below spot");
 });
+
+// ── the cap breathes with the venue count ────────────────────────────────────
+
+test("a solo venue may take half the allowance; a second venue tightens it to 35%", async () => {
+  const { venueShareCapPct } = await import("../src/memeGuard.js");
+  assert.equal(venueShareCapPct(0), 50, "empty book: the first venue gets the solo cap");
+  assert.equal(venueShareCapPct(1), 50, "one venue holding bands: still solo");
+  assert.equal(venueShareCapPct(2), 35, "the moment a second venue exists, diversification is possible and required");
+  assert.equal(venueShareCapPct(5), 35);
+});
+
+test("the solo cap never drops below the base cap", async () => {
+  const { venueShareCapPct } = await import("../src/memeGuard.js");
+  assert.equal(venueShareCapPct(1, 40, 30), 40, "a misconfigured solo cap cannot tighten below base");
+});
+
+// ── one dump is one lesson ───────────────────────────────────────────────────
+
+test("stops inside the episode window collapse into one strike", async () => {
+  const { isNewStopEpisode } = await import("../src/memeGuard.js");
+  const MIN = 60_000;
+  const t0 = 1_000_000_000;
+  assert.equal(isNewStopEpisode(undefined, t0), true, "the first stop always counts");
+  assert.equal(isNewStopEpisode(t0, t0 + 5 * MIN), false, "five minutes later: same dump, same lesson");
+  assert.equal(isNewStopEpisode(t0, t0 + 29 * MIN), false, "still inside the episode");
+  assert.equal(isNewStopEpisode(t0, t0 + 30 * MIN), true, "a spaced repeat is a genuinely new failure");
+});

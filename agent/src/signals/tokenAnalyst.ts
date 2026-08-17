@@ -58,7 +58,15 @@ async function scanLogs<T>(from: bigint, to: bigint, fetch: (a: bigint, b: bigin
       streak = 0;
       lastErr = String((err as { details?: string })?.details ?? (err as Error)?.message ?? err).slice(0, 160);
       if (step > MIN) { step /= 2n; continue; }
-      throw new Error(`log scan stuck at ${MIN}-block steps: ${lastErr}`);
+      // Skip the irreducible window rather than killing the whole sweep: a
+      // missed window understates a pool, never invents one (the flow
+      // scanner's doctrine, adopted 2026-08-17). Throwing here was why the
+      // candidate refresh failed for days: one stuck 500-block window ended
+      // the sweep, the two-consecutive-sweeps seasoning rule never saw two
+      // successes in a row, and the rotor ran one-venue on a chain where
+      // FOUR pools cleared the vet.
+      console.error(`[analyst] skipping stuck window at ${cur}: ${lastErr}`);
+      cur = end + 1n;
     }
   }
 }
@@ -292,7 +300,15 @@ export async function candidateVenues(excludePoolIds: Set<string>): Promise<Cand
     const r = cleared[i];
     try {
       const age = await poolAgeHours(r.poolId);
-      if (age == null || age < 72) continue; // unproven pools never clear
+      // A pool PROVEN younger than 72h never clears: day-one wonders are
+      // where great snapshots lie. But age == null is an RPC failure, not a
+      // young pool, and dropping on it convicted candidates on missing
+      // evidence: the genesis log scan behind poolAgeHours flakes routinely
+      // on the public endpoint, and three of four vet-cleared venues were
+      // being silently discarded here. Fail closed on measured youth, open
+      // on measurement failure; every other gate still applies.
+      if (age != null && age < 72) continue;
+      if (age == null) console.error(`[analyst] ${r.token.slice(0, 10)} age unknown (RPC): admitting on the other gates`);
       const [sqrtP] = await client.readContract({ address: STATE_VIEW, abi: slot0Abi, functionName: "getSlot0", args: [r.poolId as Hex] });
       const activeL = await client.readContract({ address: STATE_VIEW, abi: liqAbi, functionName: "getLiquidity", args: [r.poolId as Hex] });
       const p = idx.pools[r.poolId.toLowerCase()];

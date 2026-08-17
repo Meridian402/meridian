@@ -1123,9 +1123,25 @@ export function stopsInWindow(times: readonly number[] | undefined, now: number,
   return times.filter((t) => now - t < windowMs).length;
 }
 
+// ONE DUMP IS ONE LESSON. Stops used to be recorded per BAND, so when six
+// bands of the same venue stopped out in a single move (exactly what a band
+// pile does), the venue took six strikes for one market event, benched to
+// zero, and entries stayed crushed for hours afterward (measured 2026-08-16:
+// $438 intended entries sizing at $72 the morning after a pile unwound). A
+// stop landing within the episode window of the previous one on the same
+// venue is the SAME lesson and does not add a strike. Genuinely repeated
+// failure, spaced in time, still benches exactly as before.
+const STOP_EPISODE_MS = Number(process.env.MERIDIAN_STOP_EPISODE_MIN ?? 30) * 60 * 1000;
+
+/** PURE: does a stop at `now` start a new episode, given the last strike? */
+export function isNewStopEpisode(lastStrike: number | undefined, now: number, episodeMs = STOP_EPISODE_MS): boolean {
+  return lastStrike == null || now - lastStrike >= episodeMs;
+}
+
 function recordStop(pid: string): void {
-  const times = (poolStopTimes.get(pid) ?? []).filter((t) => Date.now() - t < BENCH_WINDOW_MS);
-  times.push(Date.now());
+  const now = Date.now();
+  const times = (poolStopTimes.get(pid) ?? []).filter((t) => now - t < BENCH_WINDOW_MS);
+  if (isNewStopEpisode(times[times.length - 1], now)) times.push(now);
   poolStopTimes.set(pid, times.slice(-12)); // bounded: nothing needs more history than the window
 }
 
@@ -1477,7 +1493,20 @@ export function clearBreakerHalt(): { cleared: boolean; wasHaltedUntil: number }
 // $0.91, while ONE $97 POOLS band accrued $0.54, four times the yield per
 // dollar. Concentration was never the plan; it was the absence of a rule.
 const VENUE_MAX_SHARE_PCT = Number(process.env.MERIDIAN_VENUE_MAX_SHARE_PCT ?? 35);
+// When the desk can only stand in ONE venue, a 35% cap is not diversification,
+// it is a straitjacket: the other 65% of the allowance is structurally
+// unreachable (measured 2026-08-16 night: $288 deployed of $1,200, $900 idle,
+// while the gate refused every alternative venue). A solo venue may take up
+// to half the allowance; the moment a second venue qualifies and holds bands,
+// the cap tightens back to 35%. Never 100%: one meme pool holding the whole
+// meme sleeve is one rug away from being the whole meme sleeve.
+const VENUE_SOLO_SHARE_PCT = Number(process.env.MERIDIAN_VENUE_SOLO_SHARE_PCT ?? 50);
 const VENUE_MAX_BANDS = Number(process.env.MERIDIAN_VENUE_MAX_BANDS ?? 4);
+
+/** PURE: the share cap for a venue, given how many venues hold bands now. */
+export function venueShareCapPct(distinctVenuesNow: number, base = VENUE_MAX_SHARE_PCT, solo = VENUE_SOLO_SHARE_PCT): number {
+  return distinctVenuesNow <= 1 ? Math.max(base, solo) : base;
+}
 
 /** The range buildNativeOnlyMint WOULD produce for these inputs. Pure, so the
  *  duplicate check tests the same arithmetic the mint uses. */
@@ -2002,7 +2031,8 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     // the duplicate-range test needs the live tick the mint will actually use.
     const hereBands = bands.filter((b) => b.poolId.toLowerCase() === targetPid);
     const planned = plannedRange(tick, target.tickSpacing, target.widthSpacings ?? 8, target.offsetAbove);
-    const admit = venueAdmits(hereBands, allowanceUsd, planned);
+    const distinctVenues = new Set(bands.map((b) => b.poolId.toLowerCase())).size;
+    const admit = venueAdmits(hereBands, allowanceUsd, planned, venueShareCapPct(distinctVenues));
     if (!admit.ok) {
       console.log(`[memeRotor] ${target.symbol} refused: ${admit.reason}`);
       return;
