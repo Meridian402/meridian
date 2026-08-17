@@ -52,6 +52,7 @@ const LP_POOLS: Record<string, { token: Address; fee: number; tickSpacing: numbe
   // them until an operator deliberately lands a mint. Their tokens are 18-decimal and
   // verified freely transferable on a fork (not restricted like SPCX).
   PONS: { token: "0x39dBED3a2bd333467115dE45665cC57F813C4571" as Address, fee: 3000, tickSpacing: 60 },
+  CASHCAT: { token: "0x020bfC650A365f8BB26819deAAbF3E21291018b4" as Address, fee: 2690, tickSpacing: 54 },
   TTWO: { token: "0x5e81213613b6B86EaB4c6c50d718d34359459786" as Address, fee: 40000, tickSpacing: 400 },
   STONKBROKER: { token: "0xe934e36A439C94017B64a3FecE66AF12099aBF50" as Address, fee: 9000, tickSpacing: 90 },
 };
