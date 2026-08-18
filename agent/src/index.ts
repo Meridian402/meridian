@@ -85,6 +85,8 @@ import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js"
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
 import { sellSymbolsOrEnqueue, pendingSellsNow } from "./pendingSells.js";
 import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
+import { readAttributionRows, aggregateAttribution, printAttributionReport } from "./attribution.js";
+import { runAttributionBackfill } from "./attributionBackfill.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
 
@@ -394,6 +396,43 @@ app.get("/api/lp-pnl", async (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
     res.json({ ok: true, ...(await lpProfit()) });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// The accountant's truth table (Phase 0 of the bleed program): per-venue
+// realized cash flow from the attribution ledger, worst venue first.
+// net = usdOut - usdIn - gas; over closed cycles that is exact realized
+// P&L per venue, no marks, no basis guesses. Read-only, open.
+app.get("/api/attribution", (req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    const raw = Number(req.query.days);
+    const days = Number.isFinite(raw) && raw > 0 ? Math.min(raw, 90) : 7;
+    const rows = readAttributionRows(Date.now() - days * 24 * 3600e3);
+    res.json({
+      ok: true,
+      days,
+      rowCount: rows.length,
+      ...aggregateAttribution(rows),
+      note: "net = usdOut - usdIn - gas per venue over the window; exact over closed cycles. Rows marked approx are backfilled history with known holes (see /api/admin/attribution-backfill output).",
+    });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Operator-only: emit attribution rows for the pre-accountant era from the
+// journals the desk already kept. Idempotent (tx+mech dedup); returns what
+// it wrote and the known holes it cannot recover.
+app.post("/api/admin/attribution-backfill", async (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  try {
+    res.json({ ok: true, ...(await runAttributionBackfill()) });
   } catch (err) {
     res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }
@@ -2132,7 +2171,7 @@ app.post("/api/lp-close", async (req: Request, res: Response) => {
       const closedSymbols = new Set<string>();
       for (const p of await openPositionsOnChain()) {
         if (only && !only.has(p.symbol.toUpperCase())) continue;
-        const r = await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
+        const r = await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "lp-close" });
         closed.push({ tokenId: p.tokenId, symbol: p.symbol, txHash: r.txHash });
         closedSymbols.add(p.symbol);
       }
@@ -2329,6 +2368,14 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
   startTreasurySkim();
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
+}
+// The accountant's daily print (Phase 0 of the bleed program): per-venue
+// realized flow to the log, worst first. File reads only, engine on or off,
+// so the ledger stays visible even while the desk stands down.
+{
+  const t = setInterval(() => printAttributionReport(1), 24 * 3600e3);
+  t.unref?.();
+  printAttributionReport(7);
 }
 // Which chain user-facing token launches land on. PONS only exists on mainnet,
 // so this is stated at boot rather than inferred from an env var.

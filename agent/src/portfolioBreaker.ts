@@ -184,7 +184,7 @@ async function flattenEverything(): Promise<void> {
     const { openPositionsOnChain, withdrawPosition } = await import("./venues/lpPositions.js");
     for (const p of await openPositionsOnChain()) {
       try {
-        await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
+        await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "breaker-flatten" });
         symbols.add(p.symbol);
         console.error(`[portfolioBreaker] closed seat #${p.tokenId} (${p.symbol})`);
       } catch (err) {

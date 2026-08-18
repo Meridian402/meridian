@@ -44,6 +44,7 @@ import { getPublicClient, getWalletClient, getAgentSigner, getAgentAddress } fro
 import { TREASURY_WALLET } from "./merd/wallets.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
+import { attribute } from "./attribution.js";
 import { discoverOwnedPositions } from "./venues/lpPositions.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { candidateVenues, analyzeEthPools, vetRow, type CandidateVenue } from "./signals/tokenAnalyst.js";
@@ -955,6 +956,7 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
 `,
       );
       console.log(`[memeRotor] capitulation catcher set on ${reg.symbol}: knife ${drift.toFixed(1)}%/hr, bid ${depth} spacings deep`);
+      void attribute({ sleeve: "meme", venue: reg.symbol, mech: "catch-mint", usdIn: (Number(mintWei) / 1e18) * ethUsd, usdOut: 0, feeUsd: 0, ethUsd, tx: h });
       return; // one catch per pass
     } catch (err) {
       console.error(`[memeRotor] catcher on ${reg.symbol} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
@@ -1338,6 +1340,7 @@ async function inventoryStopLoss(bands: MemeBand[], ethUsd: number): Promise<voi
         `${JSON.stringify({ ts: Date.now(), kind: "wallet-sweep", pool: reg.symbol, tokensSold: formatEther(sale.sold), tokensRemaining: formatEther(sale.remaining), ethRealized: formatEther(sale.ethRealized), txs: sale.txs })}\n`,
       );
       console.log(`[memeRotor] swept ${formatEther(sale.sold)} loose ${reg.symbol} to ${formatEther(sale.ethRealized)} ETH${sale.remaining > 0n ? ` (${formatEther(sale.remaining)} left for the next pass)` : ""}`);
+      void attribute({ sleeve: "meme", venue: reg.symbol, mech: "sweep", usdIn: 0, usdOut: (Number(sale.ethRealized) / 1e18) * ethUsd, feeUsd: 0, ethUsd, tx: sale.txs[0] });
     } catch (err) {
       console.error(`[memeRotor] wallet sweep of ${reg.symbol} failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
     }
@@ -1771,6 +1774,7 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
   console.log(
     `[memeRotor] STOP-LOSS ${reg.symbol} (${reason}): sold ${formatEther(bal - remaining)} tokens for ${formatEther(ethRealized)} ETH${remaining > 0n ? `, ${formatEther(remaining)} continues next pass` : ", flat"}`,
   );
+  void attribute({ sleeve: "meme", venue: reg.symbol, mech: "stop-exit", usdIn: 0, usdOut: (Number(ethRealized) / 1e18) * ethUsd, feeUsd: 0, ethUsd, tx: txs[0] });
 }
 
 // --- Expansion: breadth without waiting for failure --------------------------
@@ -2072,6 +2076,7 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
       })}\n`,
     );
     console.log(`[memeRotor] EXPANDED into ${target.symbol}: ${formatEther(mintWei)} ETH as #${newId}`);
+    void attribute({ sleeve: "meme", venue: target.symbol, tokenId: newId ?? undefined, mech: "band-mint", usdIn: (Number(mintWei) / 1e18) * ethUsd, usdOut: 0, feeUsd: 0, ethUsd, tx: h });
   } catch (err) {
     console.error(`[memeRotor] expansion into ${target.symbol} failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
   }
@@ -2204,6 +2209,8 @@ async function collectAndSkim(bands: MemeBand[], ethUsd: number): Promise<void> 
       console.log(
         `[memeRotor] collected ${formatEther(ethGain > 0n ? ethGain : 0n)} ETH fees from ${reg.symbol} #${b.tokenId}${skimTx ? `, banked ${formatEther(skim)} ETH to treasury (${skimTx})` : ""} (~$${(Number(ethGain) / 1e18 * ethUsd).toFixed(2)} ETH side)`,
       );
+      const collectedUsd = ethGain > 0n ? (Number(ethGain) / 1e18) * ethUsd : 0;
+      void attribute({ sleeve: "meme", venue: reg.symbol, tokenId: b.tokenId, mech: "collect", usdIn: 0, usdOut: collectedUsd, feeUsd: collectedUsd, ethUsd, tx: h });
     } catch (err) {
       console.error(`[memeRotor] fee collect on #${b.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
     }
@@ -2460,6 +2467,11 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
   };
   appendFileSync(ROTATION_JOURNAL, `${JSON.stringify(entry)}\n`);
   console.log(`[memeRotor] rotated ${reg.symbol} #${b.tokenId} -> ${newIds.join(",") || "(dust held)"} at spot ${tick}`);
+  // A rotate is cash-neutral when the withdrawn ETH re-mints; the row records
+  // the two legs so a skipped leg (ETH banked to float) shows as cash out.
+  const rotateOutUsd = ethDelta > 0n ? (Number(ethDelta) / 1e18) * ethUsd : 0;
+  const remintedUsd = newIds.length > 0 && ethDelta > 0n && (Number(ethDelta) / 1e18) * ethUsd >= MIN_LEG_USD ? rotateOutUsd : 0;
+  void attribute({ sleeve: "meme", venue: reg.symbol, tokenId: b.tokenId, mech: "rotate", usdIn: remintedUsd, usdOut: rotateOutUsd, feeUsd: 0, ethUsd, tx: txs[0] });
 }
 
 // --- Risk state persistence: a deploy must not lobotomize the desk -----------

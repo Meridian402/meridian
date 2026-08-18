@@ -25,6 +25,7 @@ import { guardWalletOp, recordWalletOp } from "../risk.js";
 import { INDEX_CONTRACTS } from "./indexContracts.js";
 import { fetchEthUsd } from "./uniswapV4.js";
 import { recordExecution, readAllExecutions } from "../executionsLog.js";
+import { attribute } from "../attribution.js";
 
 const NATIVE: Address = "0x0000000000000000000000000000000000000000";
 export const PERMIT2: Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
@@ -419,7 +420,7 @@ async function swapExactInPath(params: {
   currencyIn: Address;
   route: RouteHop[];
   amountIn: bigint;
-}): Promise<{ hash: Hex; amountOutReal: bigint }> {
+}): Promise<{ hash: Hex; amountOutReal: bigint; gasWei: bigint }> {
   const { currencyIn, route, amountIn } = params;
   const signer = getAgentSigner()!;
   const wallet = getWalletClient();
@@ -443,9 +444,9 @@ async function swapExactInPath(params: {
   const balanceBefore = await currencyBalance(outputCurrency, signer.address);
   const hash = await wallet.sendTransaction({ to, data, value });
   const client = getPublicClient();
-  await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
+  const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   const balanceAfter = await currencyBalance(outputCurrency, signer.address);
-  return { hash, amountOutReal: balanceAfter - balanceBefore };
+  return { hash, amountOutReal: balanceAfter - balanceBefore, gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n) };
 }
 
 const BRIDGE_HOP_TO_USDG: RouteHop = { outputCurrency: USDG, fee: BRIDGE_FEE, tickSpacing: BRIDGE_TICK_SPACING };
@@ -654,7 +655,7 @@ export async function realSellStockForUsdg(params: {
   let amountIn = params.amountTokens ? BigInt(Math.round(params.amountTokens * 1e18)) : held;
   if (amountIn > held) amountIn = held;
   if (amountIn === 0n) throw new Error(`wallet holds no ${params.fromSymbol}`);
-  const { hash, amountOutReal } = await swapExactInPath({
+  const { hash, amountOutReal, gasWei } = await swapExactInPath({
     currencyIn: entry.token,
     route: [{ outputCurrency: USDG, fee: entry.fee, tickSpacing: entry.tickSpacing }],
     amountIn,
@@ -669,6 +670,7 @@ export async function realSellStockForUsdg(params: {
     success: true,
     txHash: hash,
   });
+  void attribute({ sleeve: "usdg", venue: params.fromSymbol, mech: "sell", usdIn: 0, usdOut: usdgReceived, feeUsd: 0, gasWei, tx: hash });
   return { hash, usdgReceived, tokensSold: Number(amountIn) / 1e18 };
 }
 
@@ -699,7 +701,8 @@ export async function realBuyStockFromNative(params: {
     const wantedUsdgRaw = BigInt(Math.round(amountUsd * 1e6)); // USDG is 6 decimals, ~$1
     if (usdgBalance >= (wantedUsdgRaw * 95n) / 100n) {
       const amountIn = usdgBalance < wantedUsdgRaw ? usdgBalance : wantedUsdgRaw;
-      const { hash, amountOutReal } = await swapExactInPath({ currencyIn: USDG, route: [stockHop], amountIn });
+      const { hash, amountOutReal, gasWei } = await swapExactInPath({ currencyIn: USDG, route: [stockHop], amountIn });
+      void attribute({ sleeve: "usdg", venue: toSymbol, mech: "token-buy", usdIn: Number(amountIn) / 1e6, usdOut: 0, feeUsd: 0, gasWei, tx: hash });
       return { hash, amountReceived: Number(amountOutReal) / 1e18, hops: 1 };
     }
   }
@@ -707,7 +710,8 @@ export async function realBuyStockFromNative(params: {
   const ethUsd = await fetchEthUsd();
   const amountIn = BigInt(Math.round((amountUsd / ethUsd) * 1e18));
   const route: RouteHop[] = toEntry.quote === "NATIVE" ? [stockHop] : [BRIDGE_HOP_TO_USDG, stockHop];
-  const { hash, amountOutReal } = await swapExactInPath({ currencyIn: NATIVE, route, amountIn });
+  const { hash, amountOutReal, gasWei } = await swapExactInPath({ currencyIn: NATIVE, route, amountIn });
+  void attribute({ sleeve: "usdg", venue: toSymbol, mech: "token-buy", usdIn: amountUsd, usdOut: 0, feeUsd: 0, ethUsd, gasWei, tx: hash });
   return { hash, amountReceived: Number(amountOutReal) / 1e18, hops: route.length };
 }
 

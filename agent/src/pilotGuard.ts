@@ -135,7 +135,7 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   const floorUsd = effectiveFloorUsd(depositUsd);
   if (floorBreached(p.valueUsd, fees, floorUsd)) {
     console.error(`[pilotGuard] FLOOR: #${p.tokenId} (${p.symbol}) worth $${(p.valueUsd + fees).toFixed(2)} < $${floorUsd.toFixed(0)} — withdrawing to cash`);
-    await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
+    await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "floor-exit" });
     // Sell whatever token inventory the withdraw returned; USDG stays cash.
     // A failed sale is NOT done: it goes on the pending-sells queue and
     // retries every tick until the inventory is actually cash.
@@ -192,7 +192,7 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   }
   const budget = p.valueUsd + fees;
   console.error(`[pilotGuard] re-centering #${p.tokenId} (${p.symbol}): ${verdict.reason}; re-banding ~$${budget.toFixed(2)} at ±${REBAND_WIDTH_PCT / 2}%`);
-  await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
+  await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "recenter-close" });
   outSince.delete(key);
   try {
     const pos = await openInPool(p.symbol, REBAND_WIDTH_PCT, budget);

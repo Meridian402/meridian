@@ -20,6 +20,7 @@ import { guardWalletOp, recordWalletOp } from "../risk.js";
 import { INDEX_CONTRACTS } from "./indexContracts.js";
 import { cachedQualified } from "../signals/poolQualify.js";
 import { recordExecution } from "../executionsLog.js";
+import { attribute } from "../attribution.js";
 import { existsSync, readFileSync } from "node:fs";
 import { appendLedger } from "../ledger.js";
 import { dataPath } from "../dataDir.js";
@@ -294,6 +295,14 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
   };
   appendLedger("lp-positions.jsonl", record);
   recordExecution({ ts: Date.now(), kind: "lp-mint", fromSymbol: "USDG", toSymbol: symbol, amountUsd: usdgIn * 2, success: true, txHash: hash });
+  // Attribution: cash-boundary model counts only the USDG side as cash out.
+  // The token side was cash out when it was BOUGHT (its own token-buy row);
+  // counting it again here would double it.
+  {
+    const praw = (sqrtP / Q96) ** 2;
+    const tokenUsd = (usdgIsC0 ? 1 / praw : praw) * 1e12;
+    void attribute({ sleeve: "usdg", venue: symbol, tokenId, mech: "mint", usdIn: usdgIn, usdOut: 0, feeUsd: 0, tokenUsd, gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n), tx: hash });
+  }
   return record;
 }
 
@@ -668,6 +677,30 @@ export async function collectFees(params: { tokenId: string; symbol: string }): 
   const usdgCollected = Number(usdgAfter - usdgBefore) / 1e6;
   const tokenCollected = Number(tokenAfter - tokenBefore) / 1e18;
   recordExecution({ ts: Date.now(), kind: "lp-collect", fromSymbol: params.symbol, toSymbol: "USDG", amountUsd: usdgCollected, success: true, txHash: hash });
+  // Attribution: feeUsd is the INCOME truth (both sides at collection-time
+  // price); usdOut is the cash truth (USDG only; token fees are inventory
+  // until a sell row cashes them).
+  {
+    const tokenUsd = await slot0(params.symbol)
+      .then(({ sqrtP }) => {
+        const usdgIs0 = k.currency0.toLowerCase() === USDG.toLowerCase();
+        const praw = (sqrtP / Q96) ** 2;
+        return (usdgIs0 ? 1 / praw : praw) * 1e12;
+      })
+      .catch(() => 0);
+    void attribute({
+      sleeve: "usdg",
+      venue: params.symbol,
+      tokenId: params.tokenId,
+      mech: "collect",
+      usdIn: 0,
+      usdOut: usdgCollected,
+      feeUsd: usdgCollected + tokenCollected * tokenUsd,
+      tokenUsd,
+      gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n),
+      tx: hash,
+    });
+  }
   return { txHash: hash, usdgCollected, tokenCollected };
 }
 
@@ -714,10 +747,16 @@ export function lastMintedPosition(): { symbol: string; depositUsd: number } | n
   return last ? { symbol: last.symbol, depositUsd: last.usdgIn * 2 } : null; // balanced mint ≈ 2× the USDG side
 }
 
-/** Pull a position: remove all (or part of) its liquidity and take both currencies back to the wallet. */
-export async function withdrawPosition(params: { tokenId: string; symbol: string; liquidity: string }): Promise<{ txHash: Hex }> {
+/** Pull a position: remove all (or part of) its liquidity and take both
+ *  currencies back to the wallet. `mech` labels the attribution row with WHY
+ *  the withdraw happened (floor-exit, recenter-close, lp-close, ...) so the
+ *  nightly report can split protective exits from routine ones. */
+export async function withdrawPosition(params: { tokenId: string; symbol: string; liquidity: string; mech?: string }): Promise<{ txHash: Hex }> {
   const k = poolKeyOf(params.symbol);
   const signer = getAgentSigner()!;
+  const client = getPublicClient();
+  const bal = (t: Address) => client.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] });
+  const usdgBefore = await bal(USDG);
   const decreaseParams = encodeAbiParameters(
     parseAbiParameters("uint256, uint256, uint128, uint128, bytes"),
     [BigInt(params.tokenId), BigInt(params.liquidity), 0n, 0n, "0x"],
@@ -731,9 +770,26 @@ export async function withdrawPosition(params: { tokenId: string; symbol: string
     to: POSITION_MANAGER,
     data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
   });
-  const receipt = await getPublicClient().waitForTransactionReceipt({ hash, timeout: 90_000 });
+  const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`withdraw reverted: ${hash}`);
   appendLedger("lp-positions.jsonl", { tokenId: params.tokenId, closedAt: Date.now(), txHash: hash });
-  recordExecution({ ts: Date.now(), kind: "lp-exit", fromSymbol: params.symbol, toSymbol: "USDG", amountUsd: 0, success: true, txHash: hash });
+  // The audit's finding V5: this row used to say amountUsd 0, making the op
+  // most likely to realize a loss a zero-dollar event. Measure what came back.
+  const [usdgAfter] = await Promise.all([bal(USDG)]).catch(() => [usdgBefore]);
+  const usdgReturned = Number(usdgAfter - usdgBefore) / 1e6;
+  recordExecution({ ts: Date.now(), kind: "lp-exit", fromSymbol: params.symbol, toSymbol: "USDG", amountUsd: usdgReturned, success: true, txHash: hash });
+  // Cash model: the USDG side is cash now; the token side becomes loose
+  // inventory whose dollars arrive on its sell row.
+  void attribute({
+    sleeve: "usdg",
+    venue: params.symbol,
+    tokenId: params.tokenId,
+    mech: params.mech ?? "withdraw",
+    usdIn: 0,
+    usdOut: usdgReturned,
+    feeUsd: 0,
+    gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n),
+    tx: hash,
+  });
   return { txHash: hash };
 }
