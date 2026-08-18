@@ -78,10 +78,12 @@ test("the fast clock still refuses to chase a tape that is running away upward",
 
 // ── the floor: bounded worst case ────────────────────────────────────────────
 
-test("floor counts value plus uncollected fees, and trips strictly below", () => {
-  assert.equal(floorBreached(118, 1, 120), true, "$119 all-in is under a $120 floor");
-  assert.equal(floorBreached(118, 3, 120), false, "$121 all-in is not");
-  assert.equal(floorBreached(120, 0, 120), false, "exactly at the floor holds");
+test("floor bounds principal alone: fees no longer widen the tolerated loss", () => {
+  assert.equal(floorBreached(118, 120), true, "$118 of principal is under a $120 floor, whatever fees accrued");
+  assert.equal(floorBreached(121, 120), false);
+  assert.equal(floorBreached(120, 120), false, "exactly at the floor holds");
+  // The bleed-audit change: $118 principal with $3 of accrued fees used to
+  // read as $121 all-in and HOLD. Earned income no longer buys drawdown room.
 });
 
 test("the floor scales with the deposit, so bigger positions keep proportional protection", () => {

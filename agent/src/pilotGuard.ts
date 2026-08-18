@@ -22,6 +22,8 @@ import { withHouseWalletLock } from "./houseWallet.js";
 import { appendLedger } from "./ledger.js";
 import { enqueuePendingSell, retryPendingSells, sellSymbolsOrEnqueue } from "./pendingSells.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dataPath } from "./dataDir.js";
 
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
@@ -81,10 +83,13 @@ export function recenterVerdict(
   return { act: true, reason: `out ${Math.round(outFor / 60000)}m and the tape has settled (${awayPct >= 0 ? "-" : "+"}${Math.abs(awayPct).toFixed(1)}% window move)` };
 }
 
-/** PURE: has the floor been breached? Value INCLUDES uncollected fees: the
- *  floor bounds what we can lose, and fees owed are still ours. */
-export function floorBreached(valueUsd: number, feesUsd: number, floorUsd = FLOOR_USD): boolean {
-  return valueUsd + feesUsd < floorUsd;
+/** PURE: has the floor been breached? Fees are deliberately EXCLUDED
+ *  (bleed audit, 2026-08-18): counting fees toward the floor spent earned
+ *  income as extra drawdown room, so the better a seat had done, the deeper
+ *  its principal was allowed to fall before protection fired. The floor
+ *  bounds principal; income is income. */
+export function floorBreached(valueUsd: number, floorUsd = FLOOR_USD): boolean {
+  return valueUsd < floorUsd;
 }
 
 /** PURE: the floor for a position, SCALED to what actually went in. The env
@@ -98,6 +103,47 @@ export function effectiveFloorUsd(depositUsd: number, envFloorUsd = FLOOR_USD): 
 
 const outSince = new Map<string, number>();
 const tickHistory = new Map<string, TickSample[]>();
+
+// THE FLOOR LINEAGE (bleed audit, 2026-08-18). Each re-center used to mint
+// a fresh position whose recorded deposit was the depressed budget, and the
+// 80%-of-deposit floor reset from that lower basis: a stair-step decline
+// with one re-center did not floor until ~34% below the original mint. The
+// lineage carries the ORIGINAL deposit across re-centers, on disk so a
+// redeploy cannot amnesty it, and the floor bounds the SEAT, not the band.
+const LINEAGE_PATH = dataPath("pilot-lineage.json");
+function loadLineage(): Record<string, number> {
+  try {
+    return existsSync(LINEAGE_PATH) ? (JSON.parse(readFileSync(LINEAGE_PATH, "utf8")) as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+function setLineage(tokenId: string, depositUsd: number): void {
+  try {
+    const l = loadLineage();
+    l[tokenId] = depositUsd;
+    writeFileSync(LINEAGE_PATH, JSON.stringify(l, null, 2));
+  } catch (err) {
+    console.error(`[pilotGuard] lineage save failed: ${err instanceof Error ? err.message.slice(0, 100) : err}`);
+  }
+}
+function clearLineage(tokenId: string): void {
+  try {
+    const l = loadLineage();
+    if (!(tokenId in l)) return;
+    delete l[tokenId];
+    writeFileSync(LINEAGE_PATH, JSON.stringify(l, null, 2));
+  } catch {
+    /* a stale entry is harmless: it only ever RAISES a floor */
+  }
+}
+
+// THE BREAK EXIT (bleed audit, 2026-08-18). Between the band bottom (-7%)
+// and the floor (-22%) a below-band seat is 100% token, delta 1, earning
+// nothing: pure downside with no income. If the tape has refused to settle
+// for this long after the band broke down, the seat realizes ~-7% now
+// instead of -22% later; roughly two fee-days instead of five. 0 disables.
+const BREAK_EXIT_MS = Number(process.env.MERIDIAN_PILOT_BREAK_EXIT_MIN ?? 45) * 60 * 1000;
 
 async function runTick(): Promise<void> {
   // The sell queue first, before the position check can return early: a
@@ -130,11 +176,13 @@ async function managePosition(p: LpPositionValue): Promise<void> {
 
   // 3. THE FLOOR, checked first: a bleeding position does not get managed,
   // it gets closed. Worst case is bounded by construction. Deposit basis is
+  // the LINEAGE deposit when this band came from a re-center chain, else
   // ~2x the recorded USDG side (balanced mint); no basis falls back to env.
-  const depositUsd = p.hasCostBasis && p.usdgIn > 0 ? p.usdgIn * 2 : 0;
+  const mintDepositUsd = p.hasCostBasis && p.usdgIn > 0 ? p.usdgIn * 2 : 0;
+  const depositUsd = loadLineage()[key] ?? mintDepositUsd;
   const floorUsd = effectiveFloorUsd(depositUsd);
-  if (floorBreached(p.valueUsd, fees, floorUsd)) {
-    console.error(`[pilotGuard] FLOOR: #${p.tokenId} (${p.symbol}) worth $${(p.valueUsd + fees).toFixed(2)} < $${floorUsd.toFixed(0)} — withdrawing to cash`);
+  if (floorBreached(p.valueUsd, floorUsd)) {
+    console.error(`[pilotGuard] FLOOR: #${p.tokenId} (${p.symbol}) worth $${p.valueUsd.toFixed(2)} < $${floorUsd.toFixed(0)} — withdrawing to cash`);
     await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "floor-exit" });
     // Sell whatever token inventory the withdraw returned; USDG stays cash.
     // A failed sale is NOT done: it goes on the pending-sells queue and
@@ -146,6 +194,7 @@ async function managePosition(p: LpPositionValue): Promise<void> {
       enqueuePendingSell(p.symbol, "floor-exit sale failed");
     }
     appendLedger("pilot-guard.jsonl", { ts: now, kind: "floor-exit", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd, feesUsd: fees });
+    clearLineage(key);
     outSince.delete(key);
     return;
   }
@@ -182,6 +231,18 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   const window = belowBand ? STABILITY_WINDOW_MS : STABILITY_WINDOW_ABOVE_MS;
   const verdict = recenterVerdict(outSince.get(key), now, hist, awayIsTickDown, minOut, STABLE_DRIFT_PCT, window);
   if (!verdict.act) {
+    // The break exit: below the band, past the break window, and the tape
+    // STILL has not earned a re-center. Exits ignore the portfolio
+    // stand-down by design; selling is always allowed.
+    const outFor = now - (outSince.get(key) ?? now);
+    if (belowBand && BREAK_EXIT_MS > 0 && outFor >= BREAK_EXIT_MS) {
+      console.error(`[pilotGuard] BREAK EXIT: #${p.tokenId} (${p.symbol}) out below its band ${Math.round(outFor / 60000)}m with no stabilization (${verdict.reason}); realizing at ~the band edge instead of riding to the floor`);
+      await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "break-exit" });
+      const sold = await sellSymbolsOrEnqueue([p.symbol], "break-exit");
+      appendLedger("pilot-guard.jsonl", { ts: now, kind: "break-exit", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd, feesUsd: fees, soldUsd: sold[0]?.usdgReceived ?? 0 });
+      clearLineage(key);
+      outSince.delete(key);
+    }
     return; // quiet: the state line is logged on transitions, not every tick
   }
   // A re-center is a withdraw AND a re-open. During a portfolio stand-down
@@ -196,6 +257,10 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   outSince.delete(key);
   try {
     const pos = await openInPool(p.symbol, REBAND_WIDTH_PCT, budget);
+    // The new band inherits the ORIGINAL deposit: the floor keeps bounding
+    // the seat's cumulative loss, not each band's local one.
+    if (depositUsd > 0) setLineage(String(pos.tokenId), depositUsd);
+    clearLineage(key);
     appendLedger("pilot-guard.jsonl", { ts: now, kind: "recenter", closed: p.tokenId, opened: pos.tokenId, symbol: p.symbol, budgetUsd: budget });
     console.error(`[pilotGuard] ✓ ${p.symbol} re-centered as #${pos.tokenId}`);
   } catch (err) {
@@ -205,6 +270,7 @@ async function managePosition(p: LpPositionValue): Promise<void> {
     console.error(`[pilotGuard] re-center of ${p.symbol} could not re-open (${err instanceof Error ? err.message.slice(0, 120) : err}); liquidating the loose inventory`);
     const sold = await sellSymbolsOrEnqueue([p.symbol], "re-center re-open failed");
     appendLedger("pilot-guard.jsonl", { ts: now, kind: "recenter-abort", closed: p.tokenId, symbol: p.symbol, soldUsd: sold[0]?.usdgReceived ?? 0 });
+    clearLineage(key);
   }
 }
 

@@ -309,8 +309,26 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
       token ? client.readContract({ address: token, abi: balAbi, functionName: "balanceOf", args: [signer.address] }) : Promise.resolve(0n),
       poolPricesUsd(),
     ]);
-    const usdgHave = Number(usdgRaw) / 1e6;
-    const tokenHaveUsd = (Number(tokenRaw) / 1e18) * (prices[symbol] ?? 0);
+    let usdgHave = Number(usdgRaw) / 1e6;
+    let tokenHaveUsd = (Number(tokenRaw) / 1e18) * (prices[symbol] ?? 0);
+    // THE RE-CENTER REALIZATION FIX (bleed audit, 2026-08-18). A below-band
+    // re-center used to arrive here holding ~the whole budget in token, buy
+    // nothing, pull FRESH USDG in for the mint side, and leave half a budget
+    // of token loose and unfloored: token exposure unchanged, seat capital
+    // ~1.5x, nothing realized. Excess token above the mint's half-budget is
+    // now SOLD first, so the re-open funds its own USDG side and the drift
+    // the guard waited out is actually realized, not re-risked.
+    const excessTokenUsd = tokenHaveUsd - maxUsd / 2;
+    if (excessTokenUsd > 5 && (prices[symbol] ?? 0) > 0) {
+      try {
+        const sold = await realSellStockForUsdg({ fromSymbol: symbol, amountTokens: excessTokenUsd / prices[symbol] });
+        usdgHave += sold.usdgReceived;
+        tokenHaveUsd -= excessTokenUsd;
+        console.error(`[lpGuard] sold $${excessTokenUsd.toFixed(2)} excess ${symbol} before the open: realized, not re-risked`);
+      } catch (e) {
+        console.error(`[lpGuard] excess-token sell failed, opening with what we hold: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
+      }
+    }
     const buyUsd = Math.max(0, maxUsd / 2 - tokenHaveUsd);
     const usdgNeed = maxUsd / 2 + buyUsd; // mint side + what the token buy will spend
     if (usdgHave < usdgNeed * 0.99) {

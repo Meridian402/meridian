@@ -104,6 +104,25 @@ const PUMP_CHASE_MIN_MS = 3 * 60 * 1000;
 // pool recovered one at a time, leaving the whole venue earning nothing for
 // fifteen minutes or more while the market traded without us.
 const PUMP_CHASE_POOL_COOLDOWN_MS = 90 * 1000;
+// B1, THE BLEED AUDIT'S BIGGEST FINDING (2026-08-18). The chase condition
+// used to be "currentTick < tickLower", which is the RESTING state of every
+// unfilled bid (all bids mint above spot in tick space), not evidence of a
+// pump. So the fast clock ran in slow dumps too, re-centering bids to stay
+// one offset from a falling price every 90 seconds: the conveyor that
+// filled, stopped, and re-bid STONKBROKER eight times in sixteen minutes on
+// 08-18. A chase now requires a MEASURED pump (negative drift, price
+// rising) past a real bar, and gets a CEILING mirroring the knife bar:
+// a vertical pump is not chased to its top, because the retrace fills the
+// top-most bid at full size. Outside the window the slow persistence clock
+// still owns the band.
+const PUMP_CHASE_MIN_UP_DRIFT_PCT_PER_HR = 2;
+const PUMP_CHASE_MAX_UP_DRIFT_PCT_PER_HR = 8;
+
+/** PURE: does the measured tape justify the fast chase clock? Negative
+ *  drift = tick falling = price rising, in this file's convention. */
+export function pumpChaseQualifies(driftPctPerHr: number | null): boolean {
+  return driftPctPerHr != null && driftPctPerHr <= -PUMP_CHASE_MIN_UP_DRIFT_PCT_PER_HR && driftPctPerHr >= -PUMP_CHASE_MAX_UP_DRIFT_PCT_PER_HR;
+}
 // THERE IS NO DAILY MOVE CAP. DELETED 2026-08-09, WITH THE TWO MECHANISMS
 // THAT ONLY EXISTED TO ESCAPE IT.
 //
@@ -771,12 +790,12 @@ export async function memeRotorTick(): Promise<void> {
     // every sell-side flip of filled inventory, moves on the fast clock.
     const drift = tickDriftPctPerHour(poolTickHistory.get(b.poolId) ?? [], now);
     const knife = b.side === "eth" && drift != null && drift > DUMP_DRIFT_PCT_PER_HR;
-    // currentTick BELOW the bid's range = the price rose past it (tick down =
-    // pricier). That is the chase-up case: fast clock, pool-local cooldown.
-    // A chase must also have a tape worth chasing: following price around a
-    // pool doing under 25 swaps/hr pays the move cost to stand in an empty
-    // room. Below the bar the band stays put and the stop ladder owns exits.
-    const pumpChase = !knife && b.side === "eth" && b.currentTick < b.tickLower && poolPulse(b.poolId) >= CHASE_MIN_PULSE;
+    // The chase-up case: fast clock, pool-local cooldown. Requires a
+    // MEASURED pump within the chase window (B1 fix, see pumpChaseQualifies)
+    // and a tape worth chasing: following price around a pool doing under
+    // 25 swaps/hr pays the move cost to stand in an empty room. Below the
+    // bar the band stays put and the stop ladder owns exits.
+    const pumpChase = !knife && b.side === "eth" && b.currentTick < b.tickLower && pumpChaseQualifies(drift) && poolPulse(b.poolId) >= CHASE_MIN_PULSE;
     // The 5% rule: far-out ETH bands stop waiting on anything.
     const oorPct = b.inRange ? 0 : pctOutOfRange(b.currentTick, b.tickLower, b.tickUpper);
     const stale = b.side === "eth" && !knife && staleBandAction(oorPct, poolPulse(b.poolId)) !== "hold";
@@ -904,6 +923,12 @@ const CATCH_MIN_PULSE = 30;
 const CATCH_WIDTH_SPACINGS = 2;
 const CATCHERS_PER_DAY = 3;
 const CATCH_POOL_COOLDOWN_MS = 30 * 60 * 1000;
+// THE 51-SECOND LESSON (bleed audit, 2026-08-18): the stop ladder sold
+// 23,315 STONKBROKER at the bottom and the catcher bought back into the
+// same collapsing pool 51 seconds later, because the two actors shared no
+// view of risk. A venue the desk just stopped out of does not get caught
+// for a full hour, however pretty the knife.
+const CATCH_AFTER_STOP_MS = 60 * 60 * 1000;
 let catchDay = "";
 let catchesToday = 0;
 const lastCatchAt = new Map<string, number>();
@@ -928,6 +953,18 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
     const drift = tickDriftPctPerHour(poolTickHistory.get(pid) ?? [], now);
     if (drift == null || drift < CATCH_MIN_DRIFT_PCT_PER_HR) continue; // knives only
     if (poolPulse(pid) < CATCH_MIN_PULSE) continue; // a flush has volume; a dead slide does not
+    // B6 fixes (bleed audit): the catcher now respects the same risk state
+    // as every other entry. A benched venue is not caught, a fresh stop in
+    // the venue blocks a catch for an hour, and the mint spends inside the
+    // float allowance with the bench multiplier applied, not around them.
+    const stopTimes = poolStopTimes.get(pid);
+    if (now - (stopTimes?.[stopTimes.length - 1] ?? 0) < CATCH_AFTER_STOP_MS) continue;
+    const benchMult = entrySizeMultiplier(stopsInWindow(stopTimes, now));
+    if (benchMult === 0) continue;
+    const allowanceUsd = Number(process.env.MERIDIAN_MEME_FLOAT_CAP_USD ?? 150);
+    const workingNowUsd = bands.reduce((s, x) => s + x.valueUsd, 0);
+    const headroomUsd = allowanceUsd - workingNowUsd;
+    if (headroomUsd < 25) continue;
 
     try {
       const client = getPublicClient();
@@ -935,7 +972,8 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
       const bal = await client.getBalance({ address: signer.address });
       const available = bal - EXPAND_GAS_FLOOR_WEI;
       if (available < EXPAND_MIN_ENTRY_WEI) return;
-      const capWei = BigInt(Math.round((PROBATION_CAP_USD / 2 / ethUsd) * 1e18));
+      const catchCapUsd = Math.min(PROBATION_CAP_USD / 2, headroomUsd) * benchMult;
+      const capWei = BigInt(Math.round((catchCapUsd / ethUsd) * 1e18));
       const mintWei = available > capWei ? capWei : available;
       const depth = capitulationDepthSpacings(reg.tickSpacing);
       const deep: EthPool = { ...reg, offsetAbove: depth, widthSpacings: CATCH_WIDTH_SPACINGS };
@@ -976,6 +1014,43 @@ const CONCENTRATIONS_PER_DAY = 2;
 let concDay = "";
 let concToday = 0;
 
+/** THE ONE DOOR RULE (bleed audit B4, 2026-08-18). Expansion learned to
+ *  refuse a benched, trending, toxic, or crowded destination; migration and
+ *  concentration could still mint into exactly the venue expansion had just
+ *  refused, uncapped, including a fifth band or a duplicate range. Every
+ *  path that adds a band to a venue now walks through this gate. */
+async function destinationAdmits(dest: EthPool, bands: MemeBand[], label: string): Promise<boolean> {
+  const pid = poolId(dest).toLowerCase();
+  const now = Date.now();
+  if (poolBlockedForToxicity(pid)) {
+    console.log(`[memeRotor] ${label} into ${dest.symbol} refused: venue is toxicity-blocked`);
+    return false;
+  }
+  if (entrySizeMultiplier(stopsInWindow(poolStopTimes.get(pid), now)) === 0) {
+    console.log(`[memeRotor] ${label} into ${dest.symbol} refused: venue is benched on stops`);
+    return false;
+  }
+  if (process.env.MERIDIAN_MEME_REGIME_GATE !== "off") {
+    const drift = tickDriftPctPerHour(poolTickHistory.get(pid) ?? [], now);
+    if (drift == null || Math.abs(drift) >= 4) {
+      console.log(`[memeRotor] ${label} into ${dest.symbol} refused by the regime gate: drift ${drift == null ? "unknown" : `${drift.toFixed(1)}%/hr`} is not calm tape`);
+      return false;
+    }
+  }
+  const { tick, sqrtP } = await ethPoolSlot0(dest);
+  if (sqrtP === 0) return false;
+  const allowanceUsd = Number(process.env.MERIDIAN_MEME_FLOAT_CAP_USD ?? 150);
+  const hereBands = bands.filter((b) => b.poolId.toLowerCase() === pid);
+  const planned = plannedRange(tick, dest.tickSpacing, dest.widthSpacings ?? 8, dest.offsetAbove);
+  const distinctVenues = new Set(bands.map((b) => b.poolId.toLowerCase())).size;
+  const admit = venueAdmits(hereBands, allowanceUsd, planned, venueShareCapPct(distinctVenues));
+  if (!admit.ok) {
+    console.log(`[memeRotor] ${label} into ${dest.symbol} refused: ${admit.reason}`);
+    return false;
+  }
+  return true;
+}
+
 async function maybeConcentrate(bands: MemeBand[], ethUsd: number): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== concDay) {
@@ -1007,6 +1082,7 @@ async function maybeConcentrate(bands: MemeBand[], ethUsd: number): Promise<void
     try {
       const srcReg = venueByToken.get(b.token.toLowerCase());
       if (!srcReg) continue;
+      if (!(await destinationAdmits(leader.pool, bands, "concentration"))) return;
       await migrate([b], leader.pool, ethUsd, {
         capped: false,
         adopt: false,
@@ -2312,6 +2388,7 @@ async function maybeMigrate(bands: MemeBand[], ethUsd: number): Promise<void> {
     if (!dest || dest.token.toLowerCase() === movable[0].token.toLowerCase()) continue;
 
     try {
+      if (!(await destinationAdmits(dest, bands, "migration"))) continue;
       await migrate(movable, dest, ethUsd, { capped: !earner, adopt: !earner, reason: stuck ? "stuck 6h" : "below printing floor" });
       migrationsToday += 1;
       lastMoveAt = Date.now();

@@ -238,6 +238,12 @@ export function poolCandidates(): PoolCandidate[] {
 // live trade sizes is separately measured. Revisit downward per-pool once
 // that's done.
 const DEFAULT_SLIPPAGE_BPS = 800n; // 8%
+// Exits get a TIGHTER floor (bleed audit, 2026-08-18): an 8% tolerance on a
+// floor exit into a just-dumped book was up to a third of the whole event's
+// loss, used exactly when it hurts most. A sell that misses 3% reverts and
+// the pending-sells queue retries it from the new price with backoff, so a
+// tight floor no longer risks stranding inventory the way it once did.
+const EXIT_SLIPPAGE_BPS = BigInt(Math.min(2000, Math.max(50, Number(process.env.MERIDIAN_EXIT_SLIPPAGE_BPS ?? 300))));
 
 function quoteAddress(q: Quote): Address {
   return q === "NATIVE" ? NATIVE : USDG;
@@ -420,8 +426,10 @@ async function swapExactInPath(params: {
   currencyIn: Address;
   route: RouteHop[];
   amountIn: bigint;
+  slippageBps?: bigint;
 }): Promise<{ hash: Hex; amountOutReal: bigint; gasWei: bigint }> {
   const { currencyIn, route, amountIn } = params;
+  const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
   const signer = getAgentSigner()!;
   const wallet = getWalletClient();
   const outputCurrency = route[route.length - 1].outputCurrency;
@@ -432,7 +440,7 @@ async function swapExactInPath(params: {
   let cur = currencyIn;
   for (const h of route) {
     expected *= await hopRate(cur, h);
-    expected *= Number(10_000n - DEFAULT_SLIPPAGE_BPS) / 10_000;
+    expected *= Number(10_000n - slippageBps) / 10_000;
     cur = h.outputCurrency;
   }
   const amountOutMinimum = BigInt(Math.round(expected));
@@ -659,6 +667,7 @@ export async function realSellStockForUsdg(params: {
     currencyIn: entry.token,
     route: [{ outputCurrency: USDG, fee: entry.fee, tickSpacing: entry.tickSpacing }],
     amountIn,
+    slippageBps: EXIT_SLIPPAGE_BPS,
   });
   const usdgReceived = Number(amountOutReal) / 1e6;
   recordExecution({
