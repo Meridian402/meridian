@@ -43,6 +43,7 @@ import {
 import { getPublicClient, getWalletClient, getAgentSigner, getAgentAddress } from "./venues/signer.js";
 import { TREASURY_WALLET } from "./merd/wallets.js";
 import { withHouseWalletLock } from "./houseWallet.js";
+import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { discoverOwnedPositions } from "./venues/lpPositions.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { candidateVenues, analyzeEthPools, vetRow, type CandidateVenue } from "./signals/tokenAnalyst.js";
@@ -1461,7 +1462,11 @@ let breachStreak = 0;
 let haltUntil = 0;
 
 export function deskHalted(): boolean {
-  return Date.now() < haltUntil;
+  // The portfolio breaker's stand-down reads as a halt to every rotor path:
+  // one flag, every entry gate in this file already checks it. Exits do not
+  // go through deskHalted (stops, flattens and sells run through any halt),
+  // so the OR here can only stop the desk from buying, never from leaving.
+  return Date.now() < haltUntil || portfolioStoodDown();
 }
 
 /** Operator lever: clear a breaker halt after a KNOWN-benign trigger (an

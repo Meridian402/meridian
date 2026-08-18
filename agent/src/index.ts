@@ -83,6 +83,8 @@ import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
+import { sellSymbolsOrEnqueue, pendingSellsNow } from "./pendingSells.js";
+import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
 
@@ -1856,8 +1858,14 @@ app.post("/api/admin/record-payout", async (req: Request, res: Response) => {
 // never move a wall.
 app.post("/api/admin/clear-halt", (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) { res.status(401).json({ error: "unauthorized" }); return; }
-  if (!deskHalted()) { res.json({ cleared: false, note: "the desk is not halted" }); return; }
-  res.json(clearBreakerHalt());
+  // One lever clears both brakes: the rotor's halt and the portfolio
+  // stand-down. The operator clearing a halt means "I have looked, resume",
+  // and a desk half-resumed is a desk arguing with itself.
+  const wasPortfolio = portfolioStoodDown();
+  const rotor = deskHalted() ? clearBreakerHalt() : { cleared: false, wasHaltedUntil: 0 };
+  const portfolio = wasPortfolio ? clearPortfolioStandDown() : { cleared: false, wasStoodDownUntil: 0 };
+  if (!rotor.cleared && !portfolio.cleared) { res.json({ cleared: false, note: "the desk is not halted" }); return; }
+  res.json({ cleared: true, rotor, portfolio });
 });
 
 app.get("/api/admin/knobs", (req: Request, res: Response) => {
@@ -2109,30 +2117,45 @@ app.post("/api/lp-close", async (req: Request, res: Response) => {
     return;
   }
   const toCash = (req.body ?? {}).toCash === true;
+  // Optional surgical close: {symbols: ["MU"]} touches ONLY those seats. On
+  // 2026-08-18 this parameter was passed, silently ignored, and the endpoint
+  // closed two healthy seats along with the sick one. An unknown filter must
+  // narrow or fail, never widen.
+  const symbolsRaw = (req.body ?? {}).symbols;
+  const only =
+    Array.isArray(symbolsRaw) && symbolsRaw.length > 0 ? new Set(symbolsRaw.map((s: unknown) => String(s).toUpperCase())) : null;
   try {
     // Serialize against the LP guard's tick and any other operator action so a
     // close can't interleave with an autonomous retile on the same wallet.
     const { closed, sold } = await withHouseWalletLock("lp-close", async () => {
       const closed: Array<{ tokenId: string; symbol: string; txHash: string }> = [];
+      const closedSymbols = new Set<string>();
       for (const p of await openPositionsOnChain()) {
+        if (only && !only.has(p.symbol.toUpperCase())) continue;
         const r = await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
         closed.push({ tokenId: p.tokenId, symbol: p.symbol, txHash: r.txHash });
+        closedSymbols.add(p.symbol);
       }
       const sold: Array<{ symbol: string; usdgReceived: number; txHash: string }> = [];
       if (toCash) {
-        const addr = getAgentAddress();
-        const balances = addr ? await readStockBalances(addr) : {};
-        for (const [sym, qty] of Object.entries(balances)) {
-          if (qty > 1e-6 && isTradable(sym)) {
-            const r = await realSellStockForUsdg({ fromSymbol: sym });
-            sold.push({ symbol: sym, usdgReceived: r.usdgReceived, txHash: r.hash });
-          }
+        // Sell by CLOSED SYMBOL, not by index membership: the old index-only
+        // sweep could not see a seed pool's token and left 1,756 CASHCAT
+        // stranded on 2026-08-18. Failures go to the pending-sells queue.
+        sold.push(...(await sellSymbolsOrEnqueue([...closedSymbols], "lp-close toCash")));
+        if (!only) {
+          // A full close also sweeps any OTHER loose index inventory, as before.
+          const addr = getAgentAddress();
+          const balances = addr ? await readStockBalances(addr) : {};
+          const rest = Object.entries(balances)
+            .filter(([sym, qty]) => qty > 1e-6 && isTradable(sym) && !closedSymbols.has(sym))
+            .map(([sym]) => sym);
+          sold.push(...(await sellSymbolsOrEnqueue(rest, "lp-close sweep")));
         }
       }
       return { closed, sold };
     });
-    console.error(`[lp-close] closed ${closed.length} position(s)${toCash ? `, sold ${sold.length} holding(s) to USDG` : ""}`);
-    res.json({ ok: true, closed, sold });
+    console.error(`[lp-close] closed ${closed.length} position(s)${only ? ` (only ${[...only].join(", ")})` : ""}${toCash ? `, sold ${sold.length} holding(s) to USDG` : ""}`);
+    res.json({ ok: true, closed, sold, ...(only ? { only: [...only] } : {}), pendingSells: pendingSellsNow().map((e) => e.symbol) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }

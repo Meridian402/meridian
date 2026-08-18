@@ -14,6 +14,7 @@ import { dataPath } from "./dataDir.js";
 import { getPublicClient, getAgentSigner } from "./venues/signer.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { memeBandsLive, looseInventoryUsd, noteBookMark } from "./memeGuard.js";
+import { notePortfolioMark } from "./portfolioBreaker.js";
 import { lpPositionsWithValue, uncollectedFeesUsd } from "./venues/lpPositions.js";
 import { TREASURY_WALLET } from "./merd/wallets.js";
 
@@ -171,6 +172,7 @@ export function startBookSnapshotter(): NodeJS.Timeout | undefined {
       if (!p) return;
       appendLedger("book-snapshots.jsonl", p);
       noteBookMark(p.book); // the circuit breaker rides every good mark
+      notePortfolioMark(p.book, p.working); // and so does the portfolio breaker, scaled to total working
     } catch (err) {
       console.error(`[bookSnap] write failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
     }

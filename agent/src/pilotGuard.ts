@@ -20,6 +20,8 @@ import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
 import { getAgentSigner } from "./venues/signer.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { appendLedger } from "./ledger.js";
+import { enqueuePendingSell, retryPendingSells, sellSymbolsOrEnqueue } from "./pendingSells.js";
+import { portfolioStoodDown } from "./portfolioBreaker.js";
 
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
@@ -98,6 +100,10 @@ const outSince = new Map<string, number>();
 const tickHistory = new Map<string, TickSample[]>();
 
 async function runTick(): Promise<void> {
+  // The sell queue first, before the position check can return early: a
+  // stranded token is unhedged exposure whether or not any position is open.
+  // 6,329 PONS rode the 08-18 dump because the failed sale was only a log line.
+  await retryPendingSells();
   const positions = (await lpPositionsWithValue()).filter((p) => HANDS_OFF_SYMBOLS.has(p.symbol));
   if (positions.length === 0) {
     outSince.clear();
@@ -131,10 +137,13 @@ async function managePosition(p: LpPositionValue): Promise<void> {
     console.error(`[pilotGuard] FLOOR: #${p.tokenId} (${p.symbol}) worth $${(p.valueUsd + fees).toFixed(2)} < $${floorUsd.toFixed(0)} — withdrawing to cash`);
     await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
     // Sell whatever token inventory the withdraw returned; USDG stays cash.
+    // A failed sale is NOT done: it goes on the pending-sells queue and
+    // retries every tick until the inventory is actually cash.
     try {
       await realSellStockForUsdg({ fromSymbol: p.symbol });
     } catch (err) {
-      console.error(`[pilotGuard] floor exit: token sale failed (inventory stays in wallet): ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+      console.error(`[pilotGuard] floor exit: token sale failed, queueing for retry: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+      enqueuePendingSell(p.symbol, "floor-exit sale failed");
     }
     appendLedger("pilot-guard.jsonl", { ts: now, kind: "floor-exit", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd, feesUsd: fees });
     outSince.delete(key);
@@ -175,13 +184,28 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   if (!verdict.act) {
     return; // quiet: the state line is logged on transitions, not every tick
   }
+  // A re-center is a withdraw AND a re-open. During a portfolio stand-down
+  // the open half is blocked, so starting the withdraw half would only turn
+  // a position into loose inventory. Checked BEFORE the withdraw, on purpose.
+  if (portfolioStoodDown()) {
+    return;
+  }
   const budget = p.valueUsd + fees;
   console.error(`[pilotGuard] re-centering #${p.tokenId} (${p.symbol}): ${verdict.reason}; re-banding ~$${budget.toFixed(2)} at ±${REBAND_WIDTH_PCT / 2}%`);
   await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity });
   outSince.delete(key);
-  const pos = await openInPool(p.symbol, REBAND_WIDTH_PCT, budget);
-  appendLedger("pilot-guard.jsonl", { ts: now, kind: "recenter", closed: p.tokenId, opened: pos.tokenId, symbol: p.symbol, budgetUsd: budget });
-  console.error(`[pilotGuard] ✓ ${p.symbol} re-centered as #${pos.tokenId}`);
+  try {
+    const pos = await openInPool(p.symbol, REBAND_WIDTH_PCT, budget);
+    appendLedger("pilot-guard.jsonl", { ts: now, kind: "recenter", closed: p.tokenId, opened: pos.tokenId, symbol: p.symbol, budgetUsd: budget });
+    console.error(`[pilotGuard] ✓ ${p.symbol} re-centered as #${pos.tokenId}`);
+  } catch (err) {
+    // The withdraw already happened: the token side is loose in the wallet.
+    // Never leave it there (the PONS lesson): sell it back to cash now, or
+    // queue it if the sale fails too.
+    console.error(`[pilotGuard] re-center of ${p.symbol} could not re-open (${err instanceof Error ? err.message.slice(0, 120) : err}); liquidating the loose inventory`);
+    const sold = await sellSymbolsOrEnqueue([p.symbol], "re-center re-open failed");
+    appendLedger("pilot-guard.jsonl", { ts: now, kind: "recenter-abort", closed: p.tokenId, symbol: p.symbol, soldUsd: sold[0]?.usdgReceived ?? 0 });
+  }
 }
 
 /** One guard, 3-minute cadence, serialized with everything else on the house

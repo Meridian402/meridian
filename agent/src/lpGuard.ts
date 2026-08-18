@@ -32,6 +32,7 @@ import { latestScan, scanOpportunities } from "./lpAllocator.js";
 import { parseAbiItem, type Address } from "viem";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { memeRotorTick } from "./memeGuard.js";
+import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { readFileSync as _rf, writeFileSync as _wf, existsSync as _ex } from "node:fs";
 import { dataPath } from "./dataDir.js";
 
@@ -279,6 +280,14 @@ async function attemptRecovery(): Promise<void> {
  * a flat wallet (close the current position first); it deploys available USDG.
  */
 export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_PCT, maxUsd?: number): Promise<{ tokenId: string; symbol: string }> {
+  // Every seat entry funnels through here (operator lp-open, pilot re-center,
+  // open-deploy), so this is the one gate the portfolio breaker needs on the
+  // USDG side. A stand-down means the whole book just lost its limit with
+  // every sleeve guard working; re-entering is an operator decision, made
+  // deliberately via POST /api/admin/clear-halt, not a path a loop retries into.
+  if (portfolioStoodDown()) {
+    throw new Error("portfolio breaker stand-down is active: no new positions until the operator clears it (POST /api/admin/clear-halt)");
+  }
   // Size-capped entry (pilots): acquire ~half the budget in the token, then mint
   // a two-sided range hard-capped at maxUsd. Deliberately skips the full-balance
   // rebalanceSides and the dust-absorb so it can NEVER deploy more than the
