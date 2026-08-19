@@ -980,6 +980,7 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
       const catchCapUsd = Math.min(PROBATION_CAP_USD / 2, headroomUsd) * benchMult;
       const capWei = BigInt(Math.round((catchCapUsd / ethUsd) * 1e18));
       const mintWei = available > capWei ? capWei : available;
+      if ((Number(mintWei) / 1e18) * ethUsd < EXPAND_MIN_BAND_USD) continue; // a dust catch is noise, not a bid
       const depth = capitulationDepthSpacings(reg.tickSpacing);
       const deep: EthPool = { ...reg, offsetAbove: depth, widthSpacings: CATCH_WIDTH_SPACINGS };
       const { tick, sqrtP } = await ethPoolSlot0(deep);
@@ -1897,6 +1898,11 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
 // entered first; analyst candidates need a fresh scan. Same journal, same
 // rails posture: capped size, capped frequency, simulated before sending.
 const EXPAND_MIN_ENTRY_WEI = 30_000_000_000_000_000n; // 0.03 ETH: below this an entry is dust
+// The wei floor above bounds what the WALLET can afford; this one bounds
+// what the LADDER produces. The multipliers (bench x pulse x board) can
+// shrink a $250 probation cap to pocket change, and until 2026-08-19 the
+// desk would mint it ($12.45 of STONKBROKER, out of range within the hour).
+const EXPAND_MIN_BAND_USD = Number(process.env.MERIDIAN_MEME_MIN_ENTRY_USD ?? 40);
 const EXPAND_GAS_FLOOR_WEI = 4_000_000_000_000_000n; // 0.004 ETH always stays for gas
 // THERE IS NO DAILY CAP ON ENTRIES. DELETED 2026-08-09, ON PURPOSE.
 //
@@ -2142,6 +2148,13 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
       return;
     }
     capUsd = Math.min(capUsd, headroomUsd);
+    // THE ENTRY SIZE FLOOR (2026-08-19). The sizing ladder can multiply an
+    // entry down to dust: a $12.45 band went out on a thin tape the morning
+    // the desk resumed, out of range within the hour, earning nothing, and
+    // the operator asked the right question ("why do we have this position,
+    // it's insignificant"). Size is now itself a gate: if the tape prices
+    // an entry below the floor, the honest trade is NO trade, not a token
+    // gesture that pays gas to be noise.
     // Phase 2 gates: the board's median drift scales every entry (ten red
     // pools are one trade, not ten), and the venue's own measured record
     // has to clear the admission floor before it sees new capital.
@@ -2160,6 +2173,11 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     const wallet = getWalletClient();
     const capWei = BigInt(Math.round(((capUsd * mult) / ethUsd) * 1e18));
     const mintWei = available > capWei ? capWei : available;
+    const entryUsd = (Number(mintWei) / 1e18) * ethUsd;
+    if (entryUsd < EXPAND_MIN_BAND_USD) {
+      console.log(`[memeRotor] ${target.symbol} refused: the ladder priced this entry at $${entryUsd.toFixed(2)} (< $${EXPAND_MIN_BAND_USD} floor); a band that small is noise, not a quote`);
+      return;
+    }
 
     const { tick, sqrtP } = await ethPoolSlot0(target);
     if (sqrtP === 0) return;
