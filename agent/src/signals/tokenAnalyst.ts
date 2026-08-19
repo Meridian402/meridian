@@ -187,10 +187,20 @@ export async function analyzeEthPools(minSwaps = 50): Promise<{ ethUsd: number; 
       }
       if (!later) continue;
       const ret = (later.px - sw.px) / sw.px;
-      if (!Number.isFinite(ret) || Math.abs(ret) > 0.5) continue;
-      markout += sw.dir * ret * sw.usd;
+      if (!Number.isFinite(ret)) continue;
+      // Bleed program phase 2: a >50% post-swap move used to be DISCARDED as
+      // "a different regime", which excluded exactly the catastrophic dumps
+      // from the toxicity measure and let dump venues score clean. It now
+      // counts, clamped at 50% so one wick cannot own the whole window.
+      markout += sw.dir * Math.max(-0.5, Math.min(0.5, ret)) * sw.usd;
     }
-    const qStart = s[Math.floor(s.length * 0.75)];
+    // Time-based recent move (phase 2): the last quarter BY COUNT could span
+    // mere minutes in a busy pool, so calm-before-the-dump passed the arrival
+    // gate trivially. Read the last 30 minutes by the clock instead, falling
+    // back to the count quarter only when the tape is too sparse to slice.
+    const lastT = s[s.length - 1].t;
+    const recentWin = s.filter((x) => lastT - x.t <= 30 * 60);
+    const qStart = recentWin.length >= 2 ? recentWin[0] : s[Math.floor(s.length * 0.75)];
     const recentMovePct = qStart && qStart.px > 0 ? ((s[s.length - 1].px - qStart.px) / qStart.px) * 100 : 0;
     rows.push({
       poolId: id,

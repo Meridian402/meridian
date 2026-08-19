@@ -44,7 +44,7 @@ import { getPublicClient, getWalletClient, getAgentSigner, getAgentAddress } fro
 import { TREASURY_WALLET } from "./merd/wallets.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
-import { attribute } from "./attribution.js";
+import { attribute, venueEarnsAdmission } from "./attribution.js";
 import { discoverOwnedPositions } from "./venues/lpPositions.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { candidateVenues, analyzeEthPools, vetRow, type CandidateVenue } from "./signals/tokenAnalyst.js";
@@ -961,6 +961,11 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
     if (now - (stopTimes?.[stopTimes.length - 1] ?? 0) < CATCH_AFTER_STOP_MS) continue;
     const benchMult = entrySizeMultiplier(stopsInWindow(stopTimes, now));
     if (benchMult === 0) continue;
+    // Phase 2: a knife on a board that is red in the MEDIAN is the market
+    // going down, not a capitulation; and a venue whose measured record is
+    // under the admission floor does not get caught on top of it.
+    if (currentBoardMultiplier() === 0) continue;
+    if (!venueEarnsAdmission("meme", reg.symbol, 0).ok) continue;
     const allowanceUsd = Number(process.env.MERIDIAN_MEME_FLOAT_CAP_USD ?? 150);
     const workingNowUsd = bands.reduce((s, x) => s + x.valueUsd, 0);
     const headroomUsd = allowanceUsd - workingNowUsd;
@@ -1014,6 +1019,29 @@ const CONCENTRATIONS_PER_DAY = 2;
 let concDay = "";
 let concToday = 0;
 
+// THE BOARD GAUGE (bleed program phase 2). Every gate before this one was
+// keyed to a single pool, and all the memes on this chain are close to one
+// risk factor: the desk discovered that correlation on 08-18 as three
+// simultaneous stop-losses. The gauge takes the MEDIAN measured drift
+// across every pool the desk watches; a board that is red in the median
+// scales every entry down and, past the calm bar, to zero. Per-pool gates
+// still apply on top; this one just refuses to treat ten red pools as ten
+// independent opportunities.
+export function boardRegimeMultiplier(drifts: readonly (number | null)[]): number {
+  const valid = drifts.filter((d): d is number => d != null);
+  if (valid.length < 3) return 1; // not enough board to judge; per-pool gates stand alone
+  const sorted = [...valid].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  if (median <= 2) return 1;
+  if (median >= 4) return 0; // the whole board is dumping past the calm bar
+  return (4 - median) / 2;
+}
+
+function currentBoardMultiplier(): number {
+  const now = Date.now();
+  return boardRegimeMultiplier([...poolTickHistory.values()].map((h) => tickDriftPctPerHour(h, now)));
+}
+
 /** THE ONE DOOR RULE (bleed audit B4, 2026-08-18). Expansion learned to
  *  refuse a benched, trending, toxic, or crowded destination; migration and
  *  concentration could still mint into exactly the venue expansion had just
@@ -1037,10 +1065,19 @@ async function destinationAdmits(dest: EthPool, bands: MemeBand[], label: string
       return false;
     }
   }
+  if (currentBoardMultiplier() === 0) {
+    console.log(`[memeRotor] ${label} into ${dest.symbol} refused: the whole board is red (median drift past the calm bar)`);
+    return false;
+  }
   const { tick, sqrtP } = await ethPoolSlot0(dest);
   if (sqrtP === 0) return false;
   const allowanceUsd = Number(process.env.MERIDIAN_MEME_FLOAT_CAP_USD ?? 150);
   const hereBands = bands.filter((b) => b.poolId.toLowerCase() === pid);
+  const realized = venueEarnsAdmission("meme", dest.symbol, hereBands.reduce((s, b) => s + b.valueUsd, 0));
+  if (!realized.ok) {
+    console.log(`[memeRotor] ${label} into ${dest.symbol} refused by its own record: ${realized.reason}`);
+    return false;
+  }
   const planned = plannedRange(tick, dest.tickSpacing, dest.widthSpacings ?? 8, dest.offsetAbove);
   const distinctVenues = new Set(bands.map((b) => b.poolId.toLowerCase())).size;
   const admit = venueAdmits(hereBands, allowanceUsd, planned, venueShareCapPct(distinctVenues));
@@ -2105,7 +2142,21 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
       return;
     }
     capUsd = Math.min(capUsd, headroomUsd);
-    const mult = benchMult * pulseMult;
+    // Phase 2 gates: the board's median drift scales every entry (ten red
+    // pools are one trade, not ten), and the venue's own measured record
+    // has to clear the admission floor before it sees new capital.
+    const boardMult = currentBoardMultiplier();
+    if (boardMult === 0) {
+      console.log(`[memeRotor] expansion refused: the whole board is red (median drift past the calm bar)`);
+      return;
+    }
+    const hereNow = bands.filter((b) => b.poolId.toLowerCase() === targetPid).reduce((s, b) => s + b.valueUsd, 0);
+    const realized = venueEarnsAdmission("meme", target.symbol, hereNow);
+    if (!realized.ok) {
+      console.log(`[memeRotor] ${target.symbol} refused by its own record: ${realized.reason}`);
+      return;
+    }
+    const mult = benchMult * pulseMult * boardMult;
     const wallet = getWalletClient();
     const capWei = BigInt(Math.round(((capUsd * mult) / ethUsd) * 1e18));
     const mintWei = available > capWei ? capWei : available;
@@ -2575,6 +2626,7 @@ export function saveRotorState(): void {
       pulse: Object.fromEntries([...swapPulse].map(([k, v]) => [k, v.slice(-200)])),
       breaker: { bookHwm, bookHwmDay, haltUntil },
       stopTimes: Object.fromEntries(poolStopTimes),
+      toxicUntil: Object.fromEntries(poolToxicUntil),
       counters: {
         movesDay, moves: movesToday, chaseExtra: chaseExtraToday,
         expandDay, expands: expandsToday,
@@ -2603,9 +2655,20 @@ function loadRotorState(): void {
       breaker?: { bookHwm?: number; bookHwmDay?: string; haltDay?: string; haltUntil?: number };
       stopDecay?: { day?: string; counts?: Record<string, number> };
       stopTimes?: Record<string, number[]>;
+      toxicUntil?: Record<string, number>;
       counters?: { movesDay?: string; moves?: number; chaseExtra?: number; expandDay?: string; expands?: number; concDay?: string; conc?: number; migDay?: string; migs?: number };
       savedAt?: number;
     };
+    // Two tiers of state (bleed audit phase 2). SELF-EXPIRING state, keyed to
+    // absolute timestamps (toxicity blocks, stop strikes, the breaker halt),
+    // is loaded from a file of ANY age: a 4h toxicity block does not stop
+    // being true because the process idled 31 minutes, and a redeploy used to
+    // amnesty exactly the venues that had just been measured farming us.
+    // TAPE state (tick history, ref prices, earn windows) still ages out at
+    // 30 minutes: stale readings are worse than none.
+    const now = Date.now();
+    for (const [k, v] of Object.entries(s.toxicUntil ?? {})) if (v > now) poolToxicUntil.set(k, v);
+    if (s.stopTimes) for (const [k, v] of Object.entries(s.stopTimes)) poolStopTimes.set(k, v.filter((t) => now - t < BENCH_WINDOW_MS));
     if (!s.savedAt || Date.now() - s.savedAt > ROTOR_STATE_MAX_AGE_MS) return;
     for (const [k, v] of Object.entries(s.tickHistory ?? {})) poolTickHistory.set(k, v);
     for (const [k, v] of Object.entries(s.heldSince ?? {})) tokenHeldSince.set(k, v);

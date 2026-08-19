@@ -24,6 +24,7 @@ import { enqueuePendingSell, retryPendingSells, sellSymbolsOrEnqueue } from "./p
 import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
+import { venueEarnsAdmission } from "./attribution.js";
 
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
@@ -103,6 +104,29 @@ export function effectiveFloorUsd(depositUsd: number, envFloorUsd = FLOOR_USD): 
 
 const outSince = new Map<string, number>();
 const tickHistory = new Map<string, TickSample[]>();
+const USDG_ADDR = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+
+/** PURE: is the hands-off board falling together? (bleed program phase 2.)
+ *  On 08-18 every seat drifted down at once and each was judged alone. Two
+ *  or more pools falling past the bar over the window is one chain-wide
+ *  move, and re-centering into it is the bleed pattern this guard refuses. */
+export function sleeveBoardRed(priceDriftPcts: readonly number[], minPools = 2, dropPct = 2): boolean {
+  return priceDriftPcts.filter((d) => d <= -dropPct).length >= minPools;
+}
+
+/** Window price drift per hands-off pool, oriented so negative = falling. */
+function handsOffBoardDrifts(now: number): number[] {
+  const out: number[] = [];
+  for (const [symbol, hist] of tickHistory) {
+    const win = hist.filter((s) => now - s.t <= STABILITY_WINDOW_MS);
+    if (win.length < 2) continue;
+    const token = tokenAddressFor(symbol);
+    if (!token) continue;
+    const tokenIsC0 = token.toLowerCase() < USDG_ADDR.toLowerCase();
+    out.push((win[win.length - 1].tick - win[0].tick) * 0.01 * (tokenIsC0 ? 1 : -1));
+  }
+  return out;
+}
 
 // THE FLOOR LINEAGE (bleed audit, 2026-08-18). Each re-center used to mint
 // a fresh position whose recorded deposit was the depressed budget, and the
@@ -249,6 +273,19 @@ async function managePosition(p: LpPositionValue): Promise<void> {
   // the open half is blocked, so starting the withdraw half would only turn
   // a position into loose inventory. Checked BEFORE the withdraw, on purpose.
   if (portfolioStoodDown()) {
+    return;
+  }
+  // Phase 2 gates, also before the withdraw: a board falling together is one
+  // chain-wide move (this pool's local landing is not evidence), and a venue
+  // whose measured record is under the admission floor re-earns entry by
+  // time, not by looking settled for thirty minutes.
+  if (sleeveBoardRed(handsOffBoardDrifts(now))) {
+    console.error(`[pilotGuard] re-center of ${p.symbol} refused: the hands-off board is falling together; waiting out the chain-wide move`);
+    return;
+  }
+  const realized = venueEarnsAdmission("usdg", p.symbol, p.valueUsd + fees);
+  if (!realized.ok) {
+    console.error(`[pilotGuard] re-center of ${p.symbol} refused by its own record: ${realized.reason}`);
     return;
   }
   const budget = p.valueUsd + fees;

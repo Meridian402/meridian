@@ -169,6 +169,44 @@ export function aggregateAttribution(rows: readonly AttributionRow[]): {
   return { venues, totals };
 }
 
+// THE REALIZED-P&L ADMISSION GATE (bleed program phase 2). The audit's V4:
+// a venue could stop the desk out repeatedly and be re-admitted at full
+// size hours later, because nothing read our own results back. Admission
+// now consults this ledger: a venue whose measured record over the trailing
+// window is worse than the floor does not get new capital, whatever the
+// pool-level tape says. Two correctness rules learned before writing it:
+// backfilled rows are EXCLUDED (their documented holes would ban every
+// venue forever), and the caller passes the venue's OPEN exposure so
+// capital that is deployed-but-alive is not scored as lost.
+const REALIZED_FLOOR_USD = Number(process.env.MERIDIAN_VENUE_REALIZED_FLOOR_USD ?? 25);
+const REALIZED_DAYS = Number(process.env.MERIDIAN_VENUE_REALIZED_DAYS ?? 7);
+
+/** PURE: does a venue's measured record admit new capital? */
+export function venueRealizedAdmits(netUsd: number, floorUsd = REALIZED_FLOOR_USD): { ok: boolean; reason: string } {
+  if (netUsd >= -Math.abs(floorUsd)) return { ok: true, reason: "" };
+  return { ok: false, reason: `measured net $${netUsd.toFixed(2)} over the last ${REALIZED_DAYS}d is below the -$${Math.abs(floorUsd).toFixed(0)} admission floor; the window has to roll off before this venue sees new capital` };
+}
+
+let admissionCache: { at: number; byKey: Map<string, number> } | null = null;
+
+/** The gate itself: live-row cash flow for the venue over the window, plus
+ *  the caller's current open exposure there (flow alone reads an open
+ *  position as pure cash out). 60s cache: admission runs on every pass. */
+export function venueEarnsAdmission(sleeve: Sleeve, venue: string, openExposureUsd = 0): { ok: boolean; reason: string; netUsd: number } {
+  const now = Date.now();
+  if (!admissionCache || now - admissionCache.at > 60_000) {
+    const byKey = new Map<string, number>();
+    for (const r of readAttributionRows(now - REALIZED_DAYS * 24 * 3600e3)) {
+      if (r.backfilled || r.approx) continue;
+      const k = `${r.sleeve}:${r.venue}`;
+      byKey.set(k, (byKey.get(k) ?? 0) + r.usdOut - r.usdIn - r.gasUsd);
+    }
+    admissionCache = { at: now, byKey };
+  }
+  const netUsd = Math.round(((admissionCache.byKey.get(`${sleeve}:${venue}`) ?? 0) + Math.max(0, openExposureUsd)) * 100) / 100;
+  return { ...venueRealizedAdmits(netUsd), netUsd };
+}
+
 /** The nightly print: per-venue truth to the log, worst first. Wired to a
  *  24h interval at boot; also computable on demand via /api/attribution. */
 export function printAttributionReport(daysBack = 1): void {
