@@ -72,12 +72,16 @@ flowchart TB
         MCP["MCP server<br/>x402-metered tools"]
         CRED[Credits ledger]
         subgraph ENGINE["Market-making engine"]
-            SCORE[Discover + score pools]
-            GUARD[Rebalance phase machine]
+            SCORE[Discover + score venues]
+            GATES["Admission gates<br/>tape regime + board gauge<br/>+ each venue's own record"]
+            SEATS["USDG seats<br/>24/7 pilot guard"]
+            STOCK["Stock seats<br/>market-hours guard"]
+            ROTOR["Meme rotor<br/>hot-and-calm regime only"]
             EXEC[On-chain execution]
+            LEDGER[("Attribution ledger<br/>cash in/out, fees, gas<br/>per operation")]
         end
+        PB["Portfolio breaker<br/>book-level flatten + stand-down"]
         X402["x402 rail + revenue ledger"]
-        RISK[Risk + spend caps]
         ORCH[Research orchestration]
     end
 
@@ -113,8 +117,13 @@ flowchart TB
     X402 -->|revenue · USDG| TREAS
 
     API --> SCORE
-    SCORE --> GUARD --> EXEC
-    EXEC --> RISK --> SIGNER --> POOLS
+    SCORE --> GATES
+    GATES --> SEATS & STOCK & ROTOR
+    SEATS & STOCK & ROTOR --> EXEC
+    EXEC --> SIGNER --> POOLS
+    EXEC --> LEDGER
+    LEDGER -->|realized P&L feeds admission| GATES
+    PB -.watches every sleeve.-> ENGINE
 
     ORCH --> SWARM
     SWARM --> OR
@@ -146,6 +155,14 @@ Key pieces in `agent/src`:
 
 - `venues/` and `lp*.ts` — pool discovery, LP scoring, and the market-making
   engine (phase machine, cost-aware rebalancing, realized-net accounting).
+- `attribution.ts` — the accountant: one ledger row per money-moving
+  operation (cash in/out, fees, gas, mechanism), aggregated into per-venue
+  realized P&L that feeds venue admission back. `/api/attribution` serves it.
+- `pilotGuard.ts`, `memeGuard.ts`, `portfolioBreaker.ts`, `pendingSells.ts` —
+  the layered risk stack: per-seat floors and break exits, regime and
+  board-level entry gates, a book-level breaker that flattens everything and
+  stands down, and a sell-until-done queue so no failed exit strands
+  inventory.
 - `deploy/myAgent.ts` — provisions and drives each user's personal Merd.
 - `earn/` — the advise-then-approve earn surface: quotes and user-signed
   calldata for the carry and payout positions, plus scout-to-earn (agents hunt
