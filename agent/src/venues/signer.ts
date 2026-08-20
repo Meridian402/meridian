@@ -148,7 +148,20 @@ export function getPublicClient() {
 export function getWalletClient() {
   const signer = getAgentSigner();
   if (!signer) throw new Error("AGENT_SIGNER_PRIVATE_KEY not configured");
-  // WRITES go straight to the sequencer (robinhoodWriteRpcUrl) for the fewest
-  // hops to inclusion — not through a read provider that would relay to it.
-  return createWalletClient({ account: signer.account, chain: robinhoodChain, transport: http(config.robinhoodWriteRpcUrl) });
+  // WRITES prefer the sequencer-direct endpoint (fewest hops to inclusion),
+  // but no longer depend on it alone: the wallet client also runs gas
+  // estimation and nonce reads through this transport, and on 2026-08-19 the
+  // public endpoint 429'd exactly those calls mid-open (a seat entry failed
+  // and the fast watcher wedged the house lock retrying). The dedicated read
+  // provider now backs the write path; a relay hop on the fallback leg costs
+  // milliseconds, a throttled sequencer endpoint cost real executions.
+  // Same signed tx on a retry means the same hash: failover cannot double-send.
+  const writeLegs = [http(config.robinhoodWriteRpcUrl, { retryCount: 3, retryDelay: 400 })];
+  const backup = config.robinhoodReadRpcUrls.find((u) => u && u !== config.robinhoodWriteRpcUrl);
+  if (backup) writeLegs.push(http(backup, { retryCount: 3, retryDelay: 400 }));
+  return createWalletClient({
+    account: signer.account,
+    chain: robinhoodChain,
+    transport: writeLegs.length > 1 ? fallback(writeLegs) : writeLegs[0],
+  });
 }
