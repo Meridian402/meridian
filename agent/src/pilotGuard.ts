@@ -15,7 +15,8 @@
 // never chases venues. The stock guard's clock is US market hours and is
 // wrong for these 24/7 pools; that is why this file exists.
 import { lpPositionsWithValue, uncollectedFeesUsd, collectFees, withdrawPosition, poolTick, type LpPositionValue } from "./venues/lpPositions.js";
-import { realSellStockForUsdg, tokenAddressFor } from "./venues/stockPools.js";
+import { realSellStockForUsdg, tokenAddressFor, poolFeePct } from "./venues/stockPools.js";
+import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
 import { getAgentSigner } from "./venues/signer.js";
 import { withHouseWalletLock } from "./houseWallet.js";
@@ -24,7 +25,7 @@ import { enqueuePendingSell, retryPendingSells, sellSymbolsOrEnqueue } from "./p
 import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
-import { venueEarnsAdmission } from "./attribution.js";
+import { venueEarnsAdmission, venueFeeUsd24h } from "./attribution.js";
 
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
@@ -162,6 +163,21 @@ function clearLineage(tokenId: string): void {
   }
 }
 
+// THE PAYBACK GATE (2026-08-20). Churn became the desk's main cost once
+// the catastrophic losses were fixed: seats cycled 2-3 re-centers a day at
+// roughly 1-2% friction each, quietly eating the fees they were chasing.
+// The allocator prices its switches ("$24 cost, pays back in 0.7d"); the
+// re-center path never did. A re-center now has to show that the venue's
+// MEASURED hourly fee rate repays the churn inside the payback horizon, or
+// the seat stays where it is. A venue that banked nothing in 24h earns no
+// churn at all, which is the honest reading of a $0 fee line.
+const PAYBACK_HOURS = Number(process.env.MERIDIAN_RECENTER_PAYBACK_HOURS ?? 12);
+
+/** PURE: does a re-center's churn cost pay back within the horizon? */
+export function recenterPaysBack(costUsd: number, feePerHourUsd: number, horizonHours = PAYBACK_HOURS): boolean {
+  return feePerHourUsd * horizonHours >= costUsd;
+}
+
 // THE BREAK EXIT (bleed audit, 2026-08-18). Between the band bottom (-7%)
 // and the floor (-22%) a below-band seat is 100% token, delta 1, earning
 // nothing: pure downside with no income. If the tape has refused to settle
@@ -289,6 +305,23 @@ async function managePosition(p: LpPositionValue): Promise<void> {
     return;
   }
   const budget = p.valueUsd + fees;
+  // The payback gate: churn cost ~ one full budget through the pool fee
+  // plus a spread-and-gas allowance. The earn rate counts fees banked in
+  // 24h plus what this position has accrued uncollected (a young seat's
+  // only evidence), read pessimistically over a day.
+  const feePerHour = Math.max(venueFeeUsd24h("usdg", p.symbol), fees) / 24;
+  const costEstUsd = budget * ((poolFeePct(p.symbol) || 0.3) / 100) * 1.2 + 0.25;
+  if (!recenterPaysBack(costEstUsd, feePerHour)) {
+    console.error(`[pilotGuard] re-center of ${p.symbol} refused by the payback gate: ~$${costEstUsd.toFixed(2)} churn vs $${(feePerHour * PAYBACK_HOURS).toFixed(2)} expected fees in ${PAYBACK_HOURS}h`);
+    return;
+  }
+  // Never start what we cannot finish: a re-center is up to four wallet ops
+  // (withdraw, sell, buy, mint). If the whole sequence does not fit under
+  // the runaway-ops cap, none of it starts.
+  if (!walletOpsAvailable(4)) {
+    console.error(`[pilotGuard] re-center of ${p.symbol} deferred: not enough op budget for the full withdraw+reopen sequence`);
+    return;
+  }
   console.error(`[pilotGuard] re-centering #${p.tokenId} (${p.symbol}): ${verdict.reason}; re-banding ~$${budget.toFixed(2)} at ±${REBAND_WIDTH_PCT / 2}%`);
   await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "recenter-close" });
   outSince.delete(key);

@@ -31,6 +31,7 @@ import { readStockBalances } from "./venues/positionAccounting.js";
 import { latestScan, scanOpportunities } from "./lpAllocator.js";
 import { parseAbiItem, type Address } from "viem";
 import { withHouseWalletLock } from "./houseWallet.js";
+import { walletOpsAvailable } from "./risk.js";
 import { memeRotorTick } from "./memeGuard.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { readFileSync as _rf, writeFileSync as _wf, existsSync as _ex } from "node:fs";
@@ -287,6 +288,11 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
   // deliberately via POST /api/admin/clear-halt, not a path a loop retries into.
   if (portfolioStoodDown()) {
     throw new Error("portfolio breaker stand-down is active: no new positions until the operator clears it (POST /api/admin/clear-halt)");
+  }
+  // Never start what we cannot finish: an open is up to three wallet ops
+  // (funding swap, token buy, mint). Whole sequence fits or none of it runs.
+  if (!walletOpsAvailable(3)) {
+    throw new Error("not enough op budget under the runaway-ops cap for a full open (funding + buy + mint); retry after the rolling window clears");
   }
   // Size-capped entry (pilots): acquire ~half the budget in the token, then mint
   // a two-sided range hard-capped at maxUsd. Deliberately skips the full-balance

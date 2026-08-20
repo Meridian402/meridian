@@ -187,24 +187,37 @@ export function venueRealizedAdmits(netUsd: number, floorUsd = REALIZED_FLOOR_US
   return { ok: false, reason: `measured net $${netUsd.toFixed(2)} over the last ${REALIZED_DAYS}d is below the -$${Math.abs(floorUsd).toFixed(0)} admission floor; the window has to roll off before this venue sees new capital` };
 }
 
-let admissionCache: { at: number; byKey: Map<string, number> } | null = null;
+let admissionCache: { at: number; net: Map<string, number>; fee24: Map<string, number> } | null = null;
+
+function ensureAdmissionCache(): NonNullable<typeof admissionCache> {
+  const now = Date.now();
+  if (!admissionCache || now - admissionCache.at > 60_000) {
+    const net = new Map<string, number>();
+    const fee24 = new Map<string, number>();
+    for (const r of readAttributionRows(now - REALIZED_DAYS * 24 * 3600e3)) {
+      if (r.backfilled || r.approx) continue;
+      const k = `${r.sleeve}:${r.venue}`;
+      net.set(k, (net.get(k) ?? 0) + r.usdOut - r.usdIn - r.gasUsd);
+      if (now - r.ts <= 24 * 3600e3) fee24.set(k, (fee24.get(k) ?? 0) + r.feeUsd);
+    }
+    admissionCache = { at: now, net, fee24 };
+  }
+  return admissionCache;
+}
 
 /** The gate itself: live-row cash flow for the venue over the window, plus
  *  the caller's current open exposure there (flow alone reads an open
  *  position as pure cash out). 60s cache: admission runs on every pass. */
 export function venueEarnsAdmission(sleeve: Sleeve, venue: string, openExposureUsd = 0): { ok: boolean; reason: string; netUsd: number } {
-  const now = Date.now();
-  if (!admissionCache || now - admissionCache.at > 60_000) {
-    const byKey = new Map<string, number>();
-    for (const r of readAttributionRows(now - REALIZED_DAYS * 24 * 3600e3)) {
-      if (r.backfilled || r.approx) continue;
-      const k = `${r.sleeve}:${r.venue}`;
-      byKey.set(k, (byKey.get(k) ?? 0) + r.usdOut - r.usdIn - r.gasUsd);
-    }
-    admissionCache = { at: now, byKey };
-  }
-  const netUsd = Math.round(((admissionCache.byKey.get(`${sleeve}:${venue}`) ?? 0) + Math.max(0, openExposureUsd)) * 100) / 100;
+  const c = ensureAdmissionCache();
+  const netUsd = Math.round(((c.net.get(`${sleeve}:${venue}`) ?? 0) + Math.max(0, openExposureUsd)) * 100) / 100;
   return { ...venueRealizedAdmits(netUsd), netUsd };
+}
+
+/** Fees this venue actually banked in the trailing 24h, live rows only.
+ *  The re-center payback gate divides this by 24 for an hourly earn rate. */
+export function venueFeeUsd24h(sleeve: Sleeve, venue: string): number {
+  return Math.round((ensureAdmissionCache().fee24.get(`${sleeve}:${venue}`) ?? 0) * 100) / 100;
 }
 
 /** The nightly print: per-venue truth to the log, worst first. Wired to a

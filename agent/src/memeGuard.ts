@@ -946,6 +946,7 @@ async function maybeCatchCapitulation(bands: MemeBand[], ethUsd: number): Promis
 
   for (const reg of venueByToken.values()) {
     const pid = poolId(reg).toLowerCase();
+    if (venueDenied(reg.symbol)) continue; // operator denylist: no knives from banned venues either
     if (bands.some((b) => b.poolId.toLowerCase() === pid)) continue; // only where we stand aside
     if (poolBlockedForToxicity(pid)) continue; // a farm's climax wick is bait
     const now = Date.now();
@@ -1043,6 +1044,23 @@ function currentBoardMultiplier(): number {
   return boardRegimeMultiplier([...poolTickHistory.values()].map((h) => tickDriftPctPerHour(h, now)));
 }
 
+// THE DENYLIST (2026-08-20). Some verdicts predate the live ledger: POOLS
+// took 48 band-mints of gross deployment over the engine's life and paid
+// $0.49 of fees, but that record is backfilled history the admission gate
+// rightly ignores, so the rotor re-adopted it the day the regime warmed.
+// What we know but cannot prove to the gate goes here, the same standing
+// the UNIFROG unpin had, as an operator lever instead of a code edit.
+const VENUE_DENYLIST = new Set(
+  (process.env.MERIDIAN_MEME_VENUE_DENYLIST ?? "POOLS")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean),
+);
+
+export function venueDenied(symbol: string): boolean {
+  return VENUE_DENYLIST.has(symbol.toUpperCase());
+}
+
 /** THE ONE DOOR RULE (bleed audit B4, 2026-08-18). Expansion learned to
  *  refuse a benched, trending, toxic, or crowded destination; migration and
  *  concentration could still mint into exactly the venue expansion had just
@@ -1051,6 +1069,10 @@ function currentBoardMultiplier(): number {
 async function destinationAdmits(dest: EthPool, bands: MemeBand[], label: string): Promise<boolean> {
   const pid = poolId(dest).toLowerCase();
   const now = Date.now();
+  if (venueDenied(dest.symbol)) {
+    console.log(`[memeRotor] ${label} into ${dest.symbol} refused: operator denylist`);
+    return false;
+  }
   if (poolBlockedForToxicity(pid)) {
     console.log(`[memeRotor] ${label} into ${dest.symbol} refused: venue is toxicity-blocked`);
     return false;
@@ -2098,6 +2120,10 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
 
   try {
     const targetPid = poolId(target).toLowerCase();
+    if (venueDenied(target.symbol)) {
+      console.log(`[memeRotor] ${target.symbol} refused: operator denylist`);
+      return;
+    }
     const stopsHere = stopsInWindow(poolStopTimes.get(targetPid), Date.now());
     const benchMult = entrySizeMultiplier(stopsHere);
     if (benchMult === 0) {

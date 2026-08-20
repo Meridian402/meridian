@@ -134,6 +134,20 @@ export function recordWalletOp(usd: number, kind = "lp"): void {
   append(usd, kind);
 }
 
+/** NEVER START WHAT YOU CANNOT FINISH (2026-08-20). The breaker caught the
+ *  stock guard mid-operation that evening: withdraw done, re-mint refused,
+ *  the worst possible stopping point. A multi-step operation checks its
+ *  WHOLE op budget here before the first leg; if the sequence cannot fit
+ *  under the cap, none of it starts. Fail-open on read errors, same as the
+ *  breaker itself. */
+export function walletOpsAvailable(n: number): boolean {
+  try {
+    return readWindow().length + n <= MAX_DAILY_WALLET_OPS;
+  } catch {
+    return true;
+  }
+}
+
 /** Live view for /api/ops and the console. */
 export function walletOps24h(): { count: number; notionalUsd: number; maxOps: number; maxNotionalUsd: number } {
   const rows = readWindow();
