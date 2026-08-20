@@ -30,7 +30,7 @@ import { getAgentSigner, getPublicClient } from "./venues/signer.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { latestScan, scanOpportunities } from "./lpAllocator.js";
 import { parseAbiItem, type Address } from "viem";
-import { withHouseWalletLock } from "./houseWallet.js";
+import { withHouseWalletLock, operatorWaiting } from "./houseWallet.js";
 import { walletOpsAvailable } from "./risk.js";
 import { memeRotorTick } from "./memeGuard.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
@@ -516,6 +516,13 @@ export function startLpGuard(): NodeJS.Timeout {
   let checking = false;
   let checkingSince = 0;
   const check = async () => {
+    // Operator priority: never START a multi-minute hold while a human's
+    // request is queued. The tick fires again in 5 minutes; the operator's
+    // HTTP edge does not wait that politely.
+    if (operatorWaiting()) {
+      console.error("[lpGuard] yielding this tick: an operator request is waiting on the house lock");
+      return;
+    }
     if (checking) {
       const ageMin = Math.round((Date.now() - checkingSince) / 60000);
       console.error(`[lpGuard] previous tick still in flight (${ageMin}m) — skipping this one`);
@@ -639,7 +646,10 @@ export function startLpGuard(): NodeJS.Timeout {
   // only paces how often it LOOKS. The house lock serializes it with the
   // legacy tick, and the legacy stock checks stay at CHECK_MS untouched.
   const memeTimer = setInterval(
-    () => void withHouseWalletLock("memeRotor.fastTick", () => memeRotorTick()).catch(() => {}),
+    () => {
+      if (operatorWaiting()) return; // yield to the human
+      void withHouseWalletLock("memeRotor.fastTick", () => memeRotorTick()).catch(() => {});
+    },
     90 * 1000,
   );
   memeTimer.unref?.();

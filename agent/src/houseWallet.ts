@@ -79,7 +79,22 @@ setInterval(() => {
   }
 }, 60 * 1000).unref?.();
 
-export function withHouseWalletLock<T>(label: string, fn: () => Promise<T>): Promise<T> {
+// OPERATOR PRIORITY (2026-08-21, built at the operator's midnight question
+// "why do we always wait"). The lock is FIFO, and the guards' ticks hold it
+// for minutes of RPC-heavy scanning, so an operator's lp-open kept queueing
+// behind them until Railway's HTTP edge gave up. Operator-tagged acquisitions
+// raise a flag while they wait; every guard checks the flag BEFORE starting
+// its next tick and yields the turn. Nothing about safety changes: the FIFO
+// chain still serializes every wallet op, the guards just stop starting
+// multi-minute holds in front of a queued human.
+let operatorWaitingCount = 0;
+
+/** True while an operator-priority request is queued for or holding the lock. */
+export function operatorWaiting(): boolean {
+  return operatorWaitingCount > 0;
+}
+
+export function withHouseWalletLock<T>(label: string, fn: () => Promise<T>, opts?: { operator?: boolean }): Promise<T> {
   const outer = inLock.getStore();
   if (outer) {
     // Called from within an already-locked operation: this would deadlock
@@ -90,6 +105,7 @@ export function withHouseWalletLock<T>(label: string, fn: () => Promise<T>): Pro
       ),
     );
   }
+  if (opts?.operator) operatorWaitingCount += 1;
   const run = tail.then(() =>
     inLock.run(label, async () => {
       holder = label;
@@ -98,6 +114,7 @@ export function withHouseWalletLock<T>(label: string, fn: () => Promise<T>): Pro
         return await fn();
       } finally {
         holder = null;
+        if (opts?.operator) operatorWaitingCount -= 1;
       }
     }),
   );

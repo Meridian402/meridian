@@ -2124,7 +2124,7 @@ app.post("/api/sell-surplus", async (req: Request, res: Response) => {
     return;
   }
   try {
-    const r = await withHouseWalletLock("sell-surplus", () => realSellStockForUsdg({ fromSymbol: symbol }));
+    const r = await withHouseWalletLock("sell-surplus", () => realSellStockForUsdg({ fromSymbol: symbol }), { operator: true });
     console.error(`[sell-surplus] sold ${r.tokensSold} ${symbol} for $${r.usdgReceived.toFixed(2)} USDG`);
     res.json({ ok: true, symbol, tokensSold: r.tokensSold, usdgReceived: r.usdgReceived, txHash: r.hash });
   } catch (err) {
@@ -2142,7 +2142,7 @@ app.post("/api/meme-flatten", async (req: Request, res: Response) => {
     return;
   }
   try {
-    const result = await withHouseWalletLock("meme-flatten", () => operatorFlattenMeme());
+    const result = await withHouseWalletLock("meme-flatten", () => operatorFlattenMeme(), { operator: true });
     console.error(`[meme-flatten] flattened ${result.bandsSeen} band(s) (~$${result.workingUsdBefore.toFixed(2)} working)`);
     res.json({ ok: true, ...result });
   } catch (err) {
@@ -2192,7 +2192,7 @@ app.post("/api/lp-close", async (req: Request, res: Response) => {
         }
       }
       return { closed, sold };
-    });
+    }, { operator: true });
     console.error(`[lp-close] closed ${closed.length} position(s)${only ? ` (only ${[...only].join(", ")})` : ""}${toCash ? `, sold ${sold.length} holding(s) to USDG` : ""}`);
     res.json({ ok: true, closed, sold, ...(only ? { only: [...only] } : {}), pendingSells: pendingSellsNow().map((e) => e.symbol) });
   } catch (err) {
@@ -2236,12 +2236,15 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
     return;
   }
   try {
-    const pos = await withHouseWalletLock("lp-open", () =>
-      openInPool(
-        symbol,
-        Number.isFinite(widthPct) && widthPct > 0 ? widthPct : undefined,
-        Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : undefined,
-      ),
+    const pos = await withHouseWalletLock(
+      "lp-open",
+      () =>
+        openInPool(
+          symbol,
+          Number.isFinite(widthPct) && widthPct > 0 ? widthPct : undefined,
+          Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : undefined,
+        ),
+      { operator: true },
     );
     console.error(`[lp-open] opened #${pos.tokenId} in ${pos.symbol}`);
     res.json({ ok: true, ...pos });

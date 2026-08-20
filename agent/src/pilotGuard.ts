@@ -19,7 +19,7 @@ import { realSellStockForUsdg, tokenAddressFor, poolFeePct } from "./venues/stoc
 import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
 import { getAgentSigner } from "./venues/signer.js";
-import { withHouseWalletLock } from "./houseWallet.js";
+import { withHouseWalletLock, operatorWaiting } from "./houseWallet.js";
 import { appendLedger } from "./ledger.js";
 import { enqueuePendingSell, retryPendingSells, sellSymbolsOrEnqueue } from "./pendingSells.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
@@ -351,6 +351,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   let running = false;
   const tickFn = async () => {
     if (running) return;
+    if (operatorWaiting()) return; // yield to the human; next tick is 3 minutes away
     running = true;
     try {
       await withHouseWalletLock("pilotGuard.tick", runTick);
