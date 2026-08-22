@@ -47,7 +47,7 @@ import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { attribute, venueEarnsAdmission } from "./attribution.js";
 import { discoverOwnedPositions } from "./venues/lpPositions.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
-import { candidateVenues, analyzeEthPools, vetRow, type CandidateVenue } from "./signals/tokenAnalyst.js";
+import { candidateVenues, analyzeEthPools, vetRow, type CandidateVenue, type AnalystRow } from "./signals/tokenAnalyst.js";
 import { sellTokenForEth } from "./venues/ethSwap.js";
 import { dataPath } from "./dataDir.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -733,7 +733,7 @@ const mintedIdFrom = (logs: { address: string; topics: readonly (string | undefi
  * house-wallet lock; must never throw (a meme error must not cost an equity
  * tick, and vice versa is handled by the caller's ordering).
  */
-export async function memeRotorTick(): Promise<void> {
+export async function memeRotorTick(opts?: { fast?: boolean }): Promise<void> {
   if (process.env.MERIDIAN_MEME_ROTATOR === "off") return;
   const signer = getAgentSigner();
   if (!signer) return;
@@ -840,6 +840,15 @@ export async function memeRotorTick(): Promise<void> {
       errorBackoffUntil.set(b.tokenId, Date.now() + ERROR_BACKOFF_MS);
       console.error(`[memeRotor] rotation of #${b.tokenId} failed (backing off 1h): ${err instanceof Error ? err.message.slice(0, 160) : err}`);
     }
+  }
+
+  // The 90-second clock exists to decide fast about OPEN bands. Flat, the
+  // whole tail below is discovery and inventory work the 5-minute tick
+  // already covers; running it every 90s held the house lock for nothing
+  // and starved every other wallet user (2026-08-22 crash loop).
+  if (opts?.fast && bands.length === 0) {
+    saveRotorState();
+    return;
   }
 
   await inventoryStopLoss(bands, ethUsd);
@@ -2059,10 +2068,18 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
     // entrable STONKBROKER all morning). A failed scan means no probe this
     // pass, not a free pass.
     if (probes.length) {
-      try {
-        const scan = await analyzeEthPools();
+      refreshProbeScanDetached();
+      if (Date.now() - probeScan.at > PROBE_SCAN_TTL_MS) {
+        // Cache cold or stale: the detached sweep is (or is now) running.
+        // Skipping the probe this pass costs at most one refresh interval;
+        // awaiting here is what wedged the lock.
+        if (Date.now() - lastProbeWaitLogAt > 5 * 60 * 1000) {
+          lastProbeWaitLogAt = Date.now();
+          console.log(`[memeRotor] probe vetting waits on the detached analyst sweep; no probe this pass`);
+        }
+      } else {
         for (const probe of probes) {
-          const row = scan.rows.find((r) => r.poolId.toLowerCase() === poolId(probe).toLowerCase());
+          const row = probeScan.rows.find((r) => r.poolId.toLowerCase() === poolId(probe).toLowerCase());
           const vet = row ? vetRow(row) : { ok: false, reason: "no analyst row (too quiet to scan)" };
           if (vet.ok) {
             target = probe;
@@ -2091,8 +2108,6 @@ async function maybeExpand(bands: MemeBand[], ethUsd: number): Promise<void> {
           }
           console.error(`[memeRotor] pinned probe ${probe.symbol} refused: ${vet.reason}`);
         }
-      } catch (err) {
-        console.error(`[memeRotor] pinned probe scan failed, no entry this pass: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
       }
     }
   }
@@ -2410,6 +2425,30 @@ let migrationsDay = "";
 let migrationsToday = 0;
 
 let prevScanIds = new Set<string>();
+
+// The probe-vetting sweep reads a full day of swap logs; awaiting it inside
+// the rotor tick held the house lock past the 15-minute ceiling on a slow
+// RPC and crash-looped the desk (2026-08-22). Same treatment as the
+// candidate sweep below: the scan runs detached, the tick vets against the
+// cache, and a stale cache means no probe this pass, not a wait.
+const PROBE_SCAN_REFRESH_MS = 10 * 60 * 1000;
+const PROBE_SCAN_TTL_MS = 15 * 60 * 1000;
+let probeScan: { at: number; rows: AnalystRow[] } = { at: 0, rows: [] };
+let probeScanInFlight = false;
+let lastProbeWaitLogAt = 0;
+
+function refreshProbeScanDetached(): void {
+  if (probeScanInFlight || Date.now() - probeScan.at < PROBE_SCAN_REFRESH_MS) return;
+  probeScanInFlight = true;
+  analyzeEthPools()
+    .then((scan) => {
+      probeScan = { at: Date.now(), rows: scan.rows };
+    })
+    .catch((err) => console.error(`[memeRotor] probe scan failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`))
+    .finally(() => {
+      probeScanInFlight = false;
+    });
+}
 
 function refreshCandidatesDetached(): void {
   if (candidateRefreshInFlight || Date.now() - candidates.at < CANDIDATE_REFRESH_MS) return;

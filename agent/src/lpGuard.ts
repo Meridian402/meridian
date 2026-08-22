@@ -648,7 +648,7 @@ export function startLpGuard(): NodeJS.Timeout {
   const memeTimer = setInterval(
     () => {
       if (operatorWaiting()) return; // yield to the human
-      void withHouseWalletLock("memeRotor.fastTick", () => memeRotorTick()).catch(() => {});
+      void withHouseWalletLock("memeRotor.fastTick", () => memeRotorTick({ fast: true })).catch(() => {});
     },
     90 * 1000,
   );
