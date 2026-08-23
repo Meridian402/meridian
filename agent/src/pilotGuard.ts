@@ -195,16 +195,24 @@ async function runTick(): Promise<void> {
     outSince.clear();
     return;
   }
+  // The admission gate credits a venue's OPEN exposure against its cash-out
+  // flow (mints read as pure cash out until they close). With several bands in
+  // one pool, crediting only the single position being re-centered under-counts
+  // the venue's committed capital and reads a roughly-flat venue as a deep
+  // loss, wrongly blocking re-centers (2026-08-23: PONS showed -$724 with ~$888
+  // open). Credit the venue's TOTAL open value instead.
+  const venueOpenUsd = new Map<string, number>();
+  for (const p of positions) venueOpenUsd.set(p.symbol, (venueOpenUsd.get(p.symbol) ?? 0) + p.valueUsd);
   for (const p of positions) {
     try {
-      await managePosition(p);
+      await managePosition(p, venueOpenUsd.get(p.symbol) ?? p.valueUsd);
     } catch (err) {
       console.error(`[pilotGuard] #${p.tokenId} (${p.symbol}) check failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
     }
   }
 }
 
-async function managePosition(p: LpPositionValue): Promise<void> {
+async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise<void> {
   const key = String(p.tokenId);
   const now = Date.now();
   const tick = await poolTick(p.symbol);
@@ -299,7 +307,7 @@ async function managePosition(p: LpPositionValue): Promise<void> {
     console.error(`[pilotGuard] re-center of ${p.symbol} refused: the hands-off board is falling together; waiting out the chain-wide move`);
     return;
   }
-  const realized = venueEarnsAdmission("usdg", p.symbol, p.valueUsd + fees);
+  const realized = venueEarnsAdmission("usdg", p.symbol, venueOpenUsd + fees);
   if (!realized.ok) {
     console.error(`[pilotGuard] re-center of ${p.symbol} refused by its own record: ${realized.reason}`);
     return;
