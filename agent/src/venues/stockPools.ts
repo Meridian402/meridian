@@ -194,6 +194,22 @@ export function poolFeePct(symbol: string): number {
   return entry ? entry.fee / 10_000 : 1;
 }
 
+/** The v4 pool id for a symbol's USDG seat pool, or null if it isn't a USDG
+ *  pool. Used by the dump watcher to scan the exact pool's swap flow. */
+export function usdgPoolIdFor(symbol: string): Hex | null {
+  const p = poolEntryFor(symbol);
+  if (!p || p.quote !== "USDG") return null;
+  return poolId(sortedPoolKey(p.token, USDG, p.fee, p.tickSpacing));
+}
+
+/** Is the seat's meme token currency0 in its USDG pool? (Orients swap flow:
+ *  the token going INTO the pool is a sell of it.) */
+export function tokenIsCurrency0(symbol: string): boolean {
+  const p = poolEntryFor(symbol);
+  if (!p) return true;
+  return p.token.toLowerCase() < USDG.toLowerCase();
+}
+
 // The four standard Uniswap fee tiers (fee, tickSpacing) we probe for a USDG
 // pool. Discovery reads pool state + flow across every ticker × tier, so a pool
 // that has GAINED depth/volume since the last manual census surfaces on its own.

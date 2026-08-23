@@ -89,6 +89,7 @@ import { readAttributionRows, aggregateAttribution, printAttributionReport } fro
 import { runAttributionBackfill } from "./attributionBackfill.js";
 import { submitProposal, previewProposal, listProposals, getProposal, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
 import { INTEGRATION_DOC } from "./integrationDoc.js";
+import { startDumpWatch, dumpWatchState } from "./dumpWatch.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
 
@@ -2215,6 +2216,16 @@ app.post("/api/lp-close", async (req: Request, res: Response) => {
   }
 });
 
+// The live dump early-warning reading per held seat pool (leading sell-flow
+// signal). Open read; alert-only — surfaced so the operator/UI can watch it.
+app.get("/api/dump-watch", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({
+    readings: dumpWatchState(),
+    note: "Leading sell-flow signal over held seat pools: recent sell-share, sell-volume acceleration, and price velocity. 'pressure' fires only when selling is dominant AND accelerating AND price is rolling over. Alert-only; it does not move funds (absorbed selling is a common false positive).",
+  });
+});
+
 // The integration guide as plain markdown, so an agent can fetch and parse
 // it without a browser. Same substance as the Agents tab renders for humans.
 app.get("/integrate.md", (_req: Request, res: Response) => {
@@ -2542,6 +2553,10 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
   // signer-gated, both on the house lock.
   startPilotGuard();
   startTreasurySkim();
+  // Leading dump early-warning over the held seat pools: reads recent swap
+  // flow and logs an alert when one-sided selling accelerates with price
+  // rolling over, minutes ahead of the reactive break-exit. Alert-only.
+  startDumpWatch();
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
 }
