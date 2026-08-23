@@ -46,6 +46,10 @@ export interface Proposal {
 export const PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;
 export const MAX_PENDING_PER_PROPOSER = 2;
 export const MAX_PER_DAY_PER_PROPOSER = 10;
+// A global pending ceiling that the per-proposer caps cannot: an MCP caller
+// mints a fresh proposerId per claimed name, so the per-proposer limits alone
+// do not bound the board. This does, whatever names are used.
+export const MAX_PENDING_GLOBAL = 40;
 export const MAX_OPEN_USD = 500;
 export const MIN_OPEN_USD = 25;
 export const MIN_WIDTH_PCT = 4;
@@ -67,8 +71,8 @@ export function validateProposalInput(input: {
   rationale: string;
 }): { ok: true; params: ProposalParams } | { ok: false; error: string } {
   const symbol = String(input.symbol ?? "").toUpperCase().trim();
-  if (!symbol || !/^[A-Z0-9]{1,12}$/.test(symbol)) return { ok: false, error: "symbol must be 1-12 alphanumeric characters" };
-  const rationale = String(input.rationale ?? "").trim();
+  if (!symbol || !/^[A-Z]{1,12}$/.test(symbol)) return { ok: false, error: "symbol must be 1-12 letters" };
+  const rationale = sanitizeText(input.rationale ?? "");
   if (rationale.length < 20) return { ok: false, error: "rationale must argue the case in at least 20 characters" };
   if (rationale.length > 600) return { ok: false, error: "rationale must fit in 600 characters" };
   if (input.kind === "lp-open") {
@@ -88,12 +92,28 @@ export function validateProposalInput(input: {
 
 /** Pure rate limiting, exported for tests. */
 export function canPropose(all: readonly Proposal[], proposerId: string, now: number): { ok: true } | { ok: false; error: string } {
+  if (all.filter((p) => p.status === "pending").length >= MAX_PENDING_GLOBAL)
+    return { ok: false, error: "the proposal board is full while the operator works through it; try again shortly" };
   const mine = all.filter((p) => p.proposerId === proposerId);
   if (mine.filter((p) => p.status === "pending").length >= MAX_PENDING_PER_PROPOSER)
     return { ok: false, error: `you already have ${MAX_PENDING_PER_PROPOSER} pending proposals; the operator decides at their own pace` };
   if (mine.filter((p) => now - p.at < 24 * 60 * 60 * 1000).length >= MAX_PER_DAY_PER_PROPOSER)
     return { ok: false, error: `daily proposal limit reached (${MAX_PER_DAY_PER_PROPOSER})` };
   return { ok: true };
+}
+
+/** Strip control, zero-width, and bidirectional-override codepoints and
+ *  collapse whitespace. These fields are published on a public page, echoed
+ *  into logs, and read by other agents; a name must not be able to carry an
+ *  invisible reversal or a forged newline. Exported for tests. */
+export function sanitizeText(s: string): string {
+  return String(s ?? "")
+    // C0/C1 control chars -> space (newlines/tabs collapse below)
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+    // zero-width, BOM, and bidi embedding/override/isolate controls -> removed
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 interface Store {
@@ -167,7 +187,7 @@ export function previewProposal(input: {
   if (!input.tradable(v.params.symbol)) return { ok: false, error: `${v.params.symbol} is not a tradable pool here` };
   const gate = canPropose(store.proposals, input.proposerId, now);
   if (!gate.ok) return gate;
-  return { ok: true, wouldPublish: { kind: input.kind, params: v.params, rationale: String(input.rationale).trim() } };
+  return { ok: true, wouldPublish: { kind: input.kind, params: v.params, rationale: sanitizeText(input.rationale) } };
 }
 
 export function submitProposal(input: {
@@ -192,10 +212,10 @@ export function submitProposal(input: {
   const proposal: Proposal = {
     id: `pr-${now.toString(36)}-${Math.abs(hash32(input.proposerId + input.rationale + now)).toString(36)}`,
     proposerId: input.proposerId,
-    proposerName: String(input.proposerName ?? "").trim().slice(0, 40) || "unnamed agent",
+    proposerName: sanitizeText(input.proposerName ?? "").slice(0, 40) || "unnamed agent",
     kind: input.kind as ProposalKind,
     params: v.params,
-    rationale: String(input.rationale).trim(),
+    rationale: sanitizeText(input.rationale),
     at: now,
     status: "pending",
   };

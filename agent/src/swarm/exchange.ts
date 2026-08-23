@@ -145,7 +145,17 @@ async function sendWithSession(gw: GatewayClient, agentId: string, participantId
       await ensureHouseSession(gw, agentId, fresh);
       return await send(fresh);
     }
-    if (!isMissingSession(err)) throw err;
+    if (!isMissingSession(err)) {
+      // Any other failure may have left the prompt SITTING in the durable
+      // session, delivered but never answered (the 402-credits outage did
+      // exactly this). Reusing that session later collides an identical
+      // re-prompt with the orphan and the agent narrates "the same prompt
+      // twice" into the public feed. Rotate the generation so the next
+      // exchange starts clean; takeaways live in the instruction slot and
+      // survive, the poisoned transcript is what gets dropped.
+      sessionGeneration.set(participantId, (sessionGeneration.get(participantId) ?? 0) + 1);
+      throw err;
+    }
     console.error(`[swarm] ${sessionId} vanished on the gateway, reopening and retrying once`);
     openedSessions.delete(sessionId);
     await ensureHouseSession(gw, agentId, sessionId);

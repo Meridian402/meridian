@@ -116,6 +116,21 @@ export const HANDS_OFF_SYMBOLS = new Set(
   (process.env.MERIDIAN_GUARD_HANDS_OFF ?? "PONS,TTWO,STONKBROKER").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
 );
 
+// Which pools OUTSIDE agents may propose actions on. Defaults to exactly the
+// pilot-guard-managed hands-off set: those seats are re-centered with lineage
+// caps and an 80% floor, never the uncapped stock-guard retile that would
+// redeploy the whole wallet into a proposed pool (review finding, 2026-08-23).
+// Operator widens it deliberately via env, never by accident.
+const PROPOSABLE_SYMBOLS = new Set(
+  (process.env.MERIDIAN_PROPOSABLE_SYMBOLS ?? [...HANDS_OFF_SYMBOLS].join(",")).split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+);
+export function isProposable(symbol: string): boolean {
+  return PROPOSABLE_SYMBOLS.has(symbol.toUpperCase()) && isTradable(symbol);
+}
+export function proposableSymbols(): string[] {
+  return [...PROPOSABLE_SYMBOLS].filter((s) => isTradable(s));
+}
+
 // ---- Auto-rebalance ("most profitable at all times") -------------------------
 // The house agent moves capital to the best pool ON ITS OWN when the gain clears
 // a cost-aware bar. OFF by default — this is autonomous real-money movement, so

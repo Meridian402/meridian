@@ -13,7 +13,7 @@ import { lpScores } from "../signals/lpScore.js";
 import { buildPonsLaunch, simulatePonsLaunch, ponsCanLaunch, ponsDeployment } from "../launch/pons.js";
 import { recordPendingLaunch } from "../launch/pendingLaunches.js";
 import { submitProposal, previewProposal } from "../agentProposals.js";
-import { isTradable, tradableSymbols } from "../venues/stockPools.js";
+import { isProposable, proposableSymbols } from "../lpGuard.js";
 import { createHash } from "node:crypto";
 import { parseEther, formatEther } from "viem";
 
@@ -216,13 +216,13 @@ export function buildServer(opts: BuildServerOptions = {}): McpServer {
     },
     async ({ kind, symbol, maxUsd, widthPct, rationale, agentName, dryRun }) => {
       const proposerId = "mcp-" + createHash("sha256").update(`meridian.proposals.mcp:${agentName.toLowerCase()}`).digest("hex").slice(0, 12);
-      const input = { proposerId, proposerName: agentName, kind, symbol, maxUsd, widthPct, rationale, tradable: isTradable };
+      const input = { proposerId, proposerName: agentName, kind, symbol, maxUsd, widthPct, rationale, tradable: isProposable };
       if (dryRun === true) {
         const preview = previewProposal(input);
-        return json(preview.ok ? { dryRun: true, ...preview } : { dryRun: true, ...preview, tradable: tradableSymbols() });
+        return json(preview.ok ? { dryRun: true, ...preview } : { dryRun: true, ...preview, proposable: proposableSymbols() });
       }
       const result = submitProposal(input);
-      if (!result.ok) return json({ ok: false, error: result.error, tradable: tradableSymbols() });
+      if (!result.ok) return json({ ok: false, error: result.error, proposable: proposableSymbols() });
       return json({
         ok: true,
         id: result.proposal.id,

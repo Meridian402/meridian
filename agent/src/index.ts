@@ -10,7 +10,7 @@ import { PaymentGate, type PaymentAmount, type SettlementAsset } from "./payment
 import { ponsDeployment } from "./launch/pons.js";
 import { RevenueLedger } from "./payments/RevenueLedger.js";
 import { startAgentLoop } from "./agentLoop.js";
-import { startLpGuard, openInPool } from "./lpGuard.js";
+import { startLpGuard, openInPool, isProposable, proposableSymbols } from "./lpGuard.js";
 import { startPilotGuard } from "./pilotGuard.js";
 import { startTreasurySkim } from "./treasurySkim.js";
 import { startMemeFastWatch, clearBreakerHalt, deskHalted, operatorFlattenMeme } from "./memeGuard.js";
@@ -83,11 +83,11 @@ import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
-import { sellSymbolsOrEnqueue, pendingSellsNow } from "./pendingSells.js";
+import { sellSymbolsOrEnqueue, pendingSellsNow, enqueuePendingSell } from "./pendingSells.js";
 import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
 import { readAttributionRows, aggregateAttribution, printAttributionReport } from "./attribution.js";
 import { runAttributionBackfill } from "./attributionBackfill.js";
-import { submitProposal, previewProposal, listProposals, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
+import { submitProposal, previewProposal, listProposals, getProposal, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
 import { INTEGRATION_DOC } from "./integrationDoc.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
@@ -2264,7 +2264,7 @@ app.post("/api/agent-proposals", (req: Request, res: Response) => {
     widthPct: b.widthPct == null ? undefined : Number(b.widthPct),
     maxUsd: b.maxUsd == null ? undefined : Number(b.maxUsd),
     rationale: String(b.rationale ?? ""),
-    tradable: isTradable,
+    tradable: isProposable,
   };
   if (b.dryRun === true) {
     const preview = previewProposal(input);
@@ -2293,13 +2293,37 @@ app.post("/api/agent-proposals/decide", async (req: Request, res: Response) => {
     res.status(400).json({ ok: false, error: "verdict must be approved or rejected" });
     return;
   }
-  const p = decideProposal(String(id ?? ""), verdict, reason ? String(reason) : undefined);
+  const idStr = String(id ?? "");
+  const p = decideProposal(idStr, verdict, reason ? String(reason) : undefined);
   if (!p) {
-    res.status(404).json({ ok: false, error: "no pending proposal with that id" });
+    // Distinguish "already decided" from "unknown id": a decide request that
+    // timed out at the edge but landed server-side must NOT read as lost, or
+    // the operator re-runs it by hand and double-opens. Report the real status.
+    const existing = getProposal(idStr);
+    if (existing) {
+      res.status(409).json({ ok: false, id: existing.id, status: existing.status, error: `proposal already ${existing.status}; not re-deciding` });
+    } else {
+      res.status(404).json({ ok: false, error: "no proposal with that id" });
+    }
     return;
   }
   if (verdict === "rejected") {
     res.json({ ok: true, id: p.id, status: p.status });
+    return;
+  }
+  // The breaker outranks a proposal: if the desk stood the book down, approval
+  // does not reopen risk. Rejections/closes are never blocked; this only gates
+  // the one path that ADDS exposure.
+  if (p.kind === "lp-open" && portfolioStoodDown()) {
+    markFailed(p.id, "portfolio breaker halted; approval cannot add exposure while stood down");
+    res.status(409).json({ ok: false, id: p.id, status: "failed", error: "portfolio breaker is halted; clear it before approving new seats" });
+    return;
+  }
+  // The proposable allowlist is re-checked at execution, not trusted from
+  // submit up to 24h ago: a symbol could have left the set in between.
+  if (p.kind === "lp-open" && !isProposable(p.params.symbol)) {
+    markFailed(p.id, `${p.params.symbol} is no longer open to proposals`);
+    res.status(409).json({ ok: false, id: p.id, status: "failed", error: `${p.params.symbol} is no longer open to proposals` });
     return;
   }
   try {
@@ -2320,6 +2344,13 @@ app.post("/api/agent-proposals/decide", async (req: Request, res: Response) => {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // A failed open can leave token bought but the mint refused. Queue a
+    // full-balance liquidation of the proposed symbol so stranded inventory
+    // becomes cash on the pilot guard's next sweep; deduped and self-clearing
+    // if nothing was actually bought (the 6,329-PONS strand, closed here).
+    if (p.kind === "lp-open") {
+      try { enqueuePendingSell(p.params.symbol, `proposal ${p.id} open failed mid-sequence`); } catch { /* best effort */ }
+    }
     markFailed(p.id, msg);
     res.status(502).json({ ok: false, id: p.id, status: "failed", error: msg });
   }
@@ -2383,6 +2414,19 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
 });
 
 app.post("/mcp", async (req: Request, res: Response) => {
+  // JSON-RPC batches are refused, because both gates below decide by reading
+  // body.method and an array has none: a batched [{...tools/call...}] would
+  // sail past the operator/execute gate AND the x402 paywall and still be
+  // dispatched element-by-element by the transport. The desk's clients send
+  // one call per request; a batch is only ever an attempt to skip the gate.
+  if (Array.isArray(req.body)) {
+    res.status(400).json({
+      jsonrpc: "2.0",
+      error: { code: -32600, message: "batched requests are not accepted; send one JSON-RPC message per request" },
+      id: null,
+    });
+    return;
+  }
   if (!mcpRequestAllowed(req)) {
     res.status(401).json({ error: "this tool is operator-only; data tools need no auth, just x402 payment" });
     return;
