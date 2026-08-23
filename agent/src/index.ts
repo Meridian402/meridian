@@ -90,6 +90,7 @@ import { runAttributionBackfill } from "./attributionBackfill.js";
 import { submitProposal, previewProposal, listProposals, getProposal, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
 import { INTEGRATION_DOC } from "./integrationDoc.js";
 import { startDumpWatch, dumpWatchState } from "./dumpWatch.js";
+import { startDailyReconcile, dailyReconcileState } from "./dailyReconcile.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
 
@@ -2226,6 +2227,13 @@ app.get("/api/dump-watch", (_req: Request, res: Response) => {
   });
 });
 
+// The daily profit-reconciliation state: last ET day close, profit split to
+// treasury vs compounded, and any carried compound. Open read for visibility.
+app.get("/api/daily-reconcile", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({ ...dailyReconcileState(), note: "At each ET day close, half the day's collected fees are skimmed to the treasury (locked) and half compounded into the lighter seat. Realized fees only; principal is never skimmed." });
+});
+
 // The integration guide as plain markdown, so an agent can fetch and parse
 // it without a browser. Same substance as the Agents tab renders for humans.
 app.get("/integrate.md", (_req: Request, res: Response) => {
@@ -2557,6 +2565,10 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
   // flow and logs an alert when one-sided selling accelerates with price
   // rolling over, minutes ahead of the reactive break-exit. Alert-only.
   startDumpWatch();
+  // Daily profit reconciliation: at each ET day close, skim half the day's
+  // collected fees to the treasury (locked) and compound the rest. Locks the
+  // gains; never redeploys intraday, never touches principal.
+  startDailyReconcile();
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
 }
