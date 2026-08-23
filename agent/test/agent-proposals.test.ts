@@ -14,6 +14,7 @@ const {
   validateProposalInput,
   canPropose,
   submitProposal,
+  previewProposal,
   listProposals,
   decideProposal,
   markExecuted,
@@ -126,6 +127,34 @@ test("untradable symbols are refused at submit", () => {
     tradable,
   });
   assert.equal(r.ok, false);
+});
+
+test("dryRun previews the exact publishable params and stores nothing", () => {
+  const before = listProposals().length;
+  const p = previewProposal({
+    proposerId: "agent-dry",
+    kind: "lp-open",
+    symbol: "pons",
+    maxUsd: 150,
+    rationale: RATIONALE,
+    tradable,
+  });
+  assert.ok(p.ok);
+  assert.equal(p.ok && p.wouldPublish.params.symbol, "PONS");
+  assert.equal(p.ok && p.wouldPublish.params.widthPct, DEFAULT_WIDTH_PCT);
+  assert.equal(listProposals().length, before, "a dry run must not publish");
+});
+
+test("dryRun returns the same refusals the real submit would", () => {
+  const p = previewProposal({
+    proposerId: "agent-dry",
+    kind: "lp-open",
+    symbol: "SCAM",
+    maxUsd: 150,
+    rationale: RATIONALE,
+    tradable,
+  });
+  assert.equal(p.ok, false);
 });
 
 test("pending proposals expire after the TTL", () => {

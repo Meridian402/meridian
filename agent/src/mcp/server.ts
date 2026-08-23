@@ -12,7 +12,7 @@ import { perpSnapshot } from "../signals/perpFeed.js";
 import { lpScores } from "../signals/lpScore.js";
 import { buildPonsLaunch, simulatePonsLaunch, ponsCanLaunch, ponsDeployment } from "../launch/pons.js";
 import { recordPendingLaunch } from "../launch/pendingLaunches.js";
-import { submitProposal } from "../agentProposals.js";
+import { submitProposal, previewProposal } from "../agentProposals.js";
 import { isTradable, tradableSymbols } from "../venues/stockPools.js";
 import { createHash } from "node:crypto";
 import { parseEther, formatEther } from "viem";
@@ -203,7 +203,7 @@ export function buildServer(opts: BuildServerOptions = {}): McpServer {
     {
       title: "Propose an LP action to the operator",
       description:
-        "Argue for one bounded action on Meridian's live LP desk: open a market-making seat (lp-open, $25-$500, widthPct is TOTAL band width, 20 = the proven ±10%) or close one (lp-close). Your rationale is published verbatim on the public Agents board; the human operator approves or rejects, and approval executes through the desk's own risk guards. Nothing you submit here moves funds on its own. Check meridian_lp_score first: proposals that cite measured fee flow get judged on evidence.",
+        "Argue for one bounded action on Meridian's live LP desk: open a market-making seat (lp-open, $25-$500, widthPct is TOTAL band width, 20 = the proven ±10%) or close one (lp-close). Your rationale is published verbatim on the public Agents board; the human operator approves or rejects, and approval executes through the desk's own risk guards. Nothing you submit here moves funds on its own. Pass dryRun: true to validate and see exactly what would publish without publishing. Check meridian_lp_score first: proposals that cite measured fee flow get judged on evidence. Full guide: GET /integrate.md on this host.",
       inputSchema: {
         kind: z.enum(["lp-open", "lp-close"]),
         symbol: z.string().min(1).max(12),
@@ -211,20 +211,17 @@ export function buildServer(opts: BuildServerOptions = {}): McpServer {
         widthPct: z.number().min(4).max(40).optional(),
         rationale: z.string().min(20).max(600),
         agentName: z.string().min(1).max(40),
+        dryRun: z.boolean().optional(),
       },
     },
-    async ({ kind, symbol, maxUsd, widthPct, rationale, agentName }) => {
+    async ({ kind, symbol, maxUsd, widthPct, rationale, agentName, dryRun }) => {
       const proposerId = "mcp-" + createHash("sha256").update(`meridian.proposals.mcp:${agentName.toLowerCase()}`).digest("hex").slice(0, 12);
-      const result = submitProposal({
-        proposerId,
-        proposerName: agentName,
-        kind,
-        symbol,
-        maxUsd,
-        widthPct,
-        rationale,
-        tradable: isTradable,
-      });
+      const input = { proposerId, proposerName: agentName, kind, symbol, maxUsd, widthPct, rationale, tradable: isTradable };
+      if (dryRun === true) {
+        const preview = previewProposal(input);
+        return json(preview.ok ? { dryRun: true, ...preview } : { dryRun: true, ...preview, tradable: tradableSymbols() });
+      }
+      const result = submitProposal(input);
       if (!result.ok) return json({ ok: false, error: result.error, tradable: tradableSymbols() });
       return json({
         ok: true,

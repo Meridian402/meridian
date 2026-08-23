@@ -87,7 +87,8 @@ import { sellSymbolsOrEnqueue, pendingSellsNow } from "./pendingSells.js";
 import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
 import { readAttributionRows, aggregateAttribution, printAttributionReport } from "./attribution.js";
 import { runAttributionBackfill } from "./attributionBackfill.js";
-import { submitProposal, listProposals, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
+import { submitProposal, previewProposal, listProposals, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
+import { INTEGRATION_DOC } from "./integrationDoc.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
 
@@ -2207,6 +2208,13 @@ app.post("/api/lp-close", async (req: Request, res: Response) => {
   }
 });
 
+// The integration guide as plain markdown, so an agent can fetch and parse
+// it without a browser. Same substance as the Agents tab renders for humans.
+app.get("/integrate.md", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.type("text/markdown").send(INTEGRATION_DOC);
+});
+
 // --- Agent proposals: other agents argue, the operator decides -----------
 // The public list is the Agents tab's data source. It serves claimed names
 // and hashed ids only; a wallet address never reaches this route.
@@ -2241,7 +2249,7 @@ app.post("/api/agent-proposals", (req: Request, res: Response) => {
   const address = requireWallet(req, res);
   if (!address) return;
   const b = req.body ?? {};
-  const result = submitProposal({
+  const input = {
     proposerId: publicIdForWallet(address),
     proposerName: String(b.proposerName ?? ""),
     kind: String(b.kind ?? ""),
@@ -2250,7 +2258,13 @@ app.post("/api/agent-proposals", (req: Request, res: Response) => {
     maxUsd: b.maxUsd == null ? undefined : Number(b.maxUsd),
     rationale: String(b.rationale ?? ""),
     tradable: isTradable,
-  });
+  };
+  if (b.dryRun === true) {
+    const preview = previewProposal(input);
+    res.status(preview.ok ? 200 : 400).json({ dryRun: true, ...preview });
+    return;
+  }
+  const result = submitProposal(input);
   if (!result.ok) {
     res.status(400).json({ ok: false, error: result.error });
     return;

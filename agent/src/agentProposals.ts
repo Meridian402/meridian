@@ -146,6 +146,30 @@ function sweep(now: number): void {
   if (changed) saveStore();
 }
 
+/** The rehearsal path: everything submitProposal checks, nothing it stores.
+ *  A first integration should not have to perform in public to find out
+ *  whether its request parses; dryRun answers with the exact params that
+ *  WOULD be published, or the exact refusal. */
+export function previewProposal(input: {
+  proposerId: string;
+  kind: string;
+  symbol: string;
+  widthPct?: number;
+  maxUsd?: number;
+  rationale: string;
+  tradable: (symbol: string) => boolean;
+  now?: number;
+}): { ok: true; wouldPublish: { kind: string; params: ProposalParams; rationale: string } } | { ok: false; error: string } {
+  ensureStore();
+  const now = input.now ?? Date.now();
+  const v = validateProposalInput(input);
+  if (!v.ok) return v;
+  if (!input.tradable(v.params.symbol)) return { ok: false, error: `${v.params.symbol} is not a tradable pool here` };
+  const gate = canPropose(store.proposals, input.proposerId, now);
+  if (!gate.ok) return gate;
+  return { ok: true, wouldPublish: { kind: input.kind, params: v.params, rationale: String(input.rationale).trim() } };
+}
+
 export function submitProposal(input: {
   proposerId: string;
   proposerName: string;
