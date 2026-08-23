@@ -19,7 +19,7 @@
 // markout uses only RELATIVE price change so the token's decimals cancel out.
 import { parseAbiItem, type Address, type Hex } from "viem";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { getPublicClient } from "../venues/signer.js";
+import { getScanClient } from "../venues/signer.js";
 import { dataPath } from "../dataDir.js";
 
 const POOL_MANAGER: Address = "0x8366a39CC670B4001A1121B8F6A443A643e40951";
@@ -93,7 +93,7 @@ async function scanLogs<T>(from: bigint, to: bigint, fetch: (a: bigint, b: bigin
 /** Incrementally index every hookless pool with USDG on one side. Durable and
  *  resumable; a delete just means a slower first rebuild. */
 export async function updateUsdgPoolIndex(): Promise<{ known: number; added: number }> {
-  const client = getPublicClient();
+  const client = getScanClient();
   const head = await client.getBlockNumber();
   const idx = loadIndex();
   const from = BigInt(idx.lastBlock) + 1n;
@@ -219,7 +219,7 @@ export function swapToSample(
 
 /** Rank the last 24h of USDG-pool flow, markout-scored. Read-only. */
 export async function analyzeUsdgPools(minSwaps = 30): Promise<{ scanned: number; rows: FlowRow[] }> {
-  const client = getPublicClient();
+  const client = getScanClient();
   const idx = loadIndex();
   const ids = Object.keys(idx.pools);
   if (ids.length === 0) throw new Error("USDG pool index empty; run updateUsdgPoolIndex() first");

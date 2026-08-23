@@ -15,7 +15,7 @@
 // to delete (a delete just means a slow first rebuild).
 import { parseAbiItem, type Address, type Hex } from "viem";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { getPublicClient } from "../venues/signer.js";
+import { getScanClient } from "../venues/signer.js";
 import { fetchEthUsd } from "../venues/uniswapV4.js";
 import { dataPath } from "../dataDir.js";
 
@@ -73,7 +73,7 @@ async function scanLogs<T>(from: bigint, to: bigint, fetch: (a: bigint, b: bigin
 
 /** Pass 1: bring the ETH-quoted pool index up to head. Resumable, incremental. */
 export async function updatePoolIndex(): Promise<{ known: number; added: number }> {
-  const client = getPublicClient();
+  const client = getScanClient();
   const head = await client.getBlockNumber();
   const idx = loadIndex();
   const from = BigInt(idx.lastBlock) + 1n;
@@ -131,7 +131,7 @@ export interface AnalystRow {
 
 /** Passes 2+3: rank last-24h flow across the whole index, markout-score everything with real activity. */
 export async function analyzeEthPools(minSwaps = 50): Promise<{ ethUsd: number; scanned: number; rows: AnalystRow[] }> {
-  const client = getPublicClient();
+  const client = getScanClient();
   const idx = loadIndex();
   const ids = Object.keys(idx.pools);
   if (ids.length === 0) throw new Error("pool index empty; run updatePoolIndex() first");
@@ -248,7 +248,7 @@ const initEventForAge = parseAbiItem(
  *  snapshots lie. */
 export async function poolAgeHours(id: string): Promise<number | null> {
   try {
-    const client = getPublicClient();
+    const client = getScanClient();
     const logs = await client.getLogs({
       address: POOL_MANAGER,
       event: initEventForAge,
@@ -294,7 +294,7 @@ export async function candidateVenues(excludePoolIds: Set<string>): Promise<Cand
   const cleared = rows.filter((r) => !excludePoolIds.has(r.poolId.toLowerCase()) && vetRow(r).ok).slice(0, 8);
   if (cleared.length === 0) return [];
 
-  const client = getPublicClient();
+  const client = getScanClient();
   const slot0Abi = [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")];
   const liqAbi = [parseAbiItem("function getLiquidity(bytes32) view returns (uint128)")];
   const STATE_VIEW: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
@@ -369,7 +369,7 @@ export async function analyzeByToken(minSwaps = 50): Promise<{ ethUsd: number; t
   }
   // Resolve symbols in one multicall; a token that reverts stays addressed.
   const addrs = [...byToken.keys()] as Address[];
-  const client = getPublicClient();
+  const client = getScanClient();
   const symAbi = [parseAbiItem("function symbol() view returns (string)")];
   const syms = await client.multicall({
     contracts: addrs.map((a) => ({ address: a, abi: symAbi, functionName: "symbol" }) as const),

@@ -2161,7 +2161,10 @@ async function closeSeats(only: Set<string> | null, toCash: boolean, lockLabel: 
     const closed: Array<{ tokenId: string; symbol: string; txHash: string }> = [];
     const closedSymbols = new Set<string>();
     for (const p of await openPositionsOnChain()) {
-      if (only && !only.has(p.symbol.toUpperCase())) continue;
+      // The filter matches by symbol OR tokenId, so one band of several in the
+      // same pool can finally be closed alone (needed three times before it
+      // got built: 08-22 duplicate CASHCAT, 08-23 wrong-width PONS, twice).
+      if (only && !only.has(p.symbol.toUpperCase()) && !only.has(String(p.tokenId))) continue;
       const r = await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "lp-close" });
       closed.push({ tokenId: p.tokenId, symbol: p.symbol, txHash: r.txHash });
       closedSymbols.add(p.symbol);
@@ -2197,8 +2200,12 @@ app.post("/api/lp-close", async (req: Request, res: Response) => {
   // closed two healthy seats along with the sick one. An unknown filter must
   // narrow or fail, never widen.
   const symbolsRaw = (req.body ?? {}).symbols;
-  const only =
-    Array.isArray(symbolsRaw) && symbolsRaw.length > 0 ? new Set(symbolsRaw.map((s: unknown) => String(s).toUpperCase())) : null;
+  const tokenIdsRaw = (req.body ?? {}).tokenIds;
+  const filterItems = [
+    ...(Array.isArray(symbolsRaw) ? symbolsRaw.map((s: unknown) => String(s).toUpperCase()) : []),
+    ...(Array.isArray(tokenIdsRaw) ? tokenIdsRaw.map((t: unknown) => String(t)) : []),
+  ];
+  const only = filterItems.length > 0 ? new Set(filterItems) : null;
   try {
     const { closed, sold } = await closeSeats(only, toCash, "lp-close");
     console.error(`[lp-close] closed ${closed.length} position(s)${only ? ` (only ${[...only].join(", ")})` : ""}${toCash ? `, sold ${sold.length} holding(s) to USDG` : ""}`);
@@ -2354,12 +2361,16 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
     return;
   }
   try {
+    // An omitted width means the PROVEN seat width (20 total = ±10%), never
+    // openInPool's internal ±1% default: that default belongs to the stock
+    // guard's tight re-tiled bands, and inheriting it here opened two CASHCAT
+    // bands ten times narrower than every seat on the board (2026-08-22).
     const pos = await withHouseWalletLock(
       "lp-open",
       () =>
         openInPool(
           symbol,
-          Number.isFinite(widthPct) && widthPct > 0 ? widthPct : undefined,
+          Number.isFinite(widthPct) && widthPct > 0 ? widthPct : 20,
           Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : undefined,
         ),
       { operator: true },

@@ -145,6 +145,26 @@ export function getPublicClient() {
   return publicClient;
 }
 
+// The scan client: same endpoints, NO request coalescing. Log sweeps return
+// megabyte responses, and when one shared an http batch with an innocent read
+// (a bookSnap mark, a pilot position check, a wallet sweep's balanceOf), the
+// combined response blew the 10MB body cap and every call in the batch died
+// with "HTTP response body exceeded the size limit" (2026-08-22/23). Giant
+// responses get their own HTTP round trips; nothing else shares their pipe.
+let scanClient: ReturnType<typeof createPublicClient> | null = null;
+export function getScanClient() {
+  if (!scanClient) {
+    const legs = (config.robinhoodReadRpcUrls.length ? config.robinhoodReadRpcUrls : ["https://rpc.mainnet.chain.robinhood.com"]).map(
+      (url) => http(url, { retryCount: 4, retryDelay: 250 }),
+    );
+    scanClient = createPublicClient({
+      chain: robinhoodChain,
+      transport: legs.length > 1 ? fallback(legs) : legs[0],
+    });
+  }
+  return scanClient;
+}
+
 export function getWalletClient() {
   const signer = getAgentSigner();
   if (!signer) throw new Error("AGENT_SIGNER_PRIVATE_KEY not configured");
