@@ -87,6 +87,7 @@ import { sellSymbolsOrEnqueue, pendingSellsNow } from "./pendingSells.js";
 import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
 import { readAttributionRows, aggregateAttribution, printAttributionReport } from "./attribution.js";
 import { runAttributionBackfill } from "./attributionBackfill.js";
+import { submitProposal, listProposals, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
 
@@ -2150,6 +2151,40 @@ app.post("/api/meme-flatten", async (req: Request, res: Response) => {
   }
 });
 
+// The one close implementation, shared by the operator route and approved
+// agent proposals so the two can never drift apart. Serializes against the
+// LP guard's tick and any other operator action so a close can't interleave
+// with an autonomous retile on the same wallet.
+async function closeSeats(only: Set<string> | null, toCash: boolean, lockLabel: string) {
+  return withHouseWalletLock(lockLabel, async () => {
+    const closed: Array<{ tokenId: string; symbol: string; txHash: string }> = [];
+    const closedSymbols = new Set<string>();
+    for (const p of await openPositionsOnChain()) {
+      if (only && !only.has(p.symbol.toUpperCase())) continue;
+      const r = await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "lp-close" });
+      closed.push({ tokenId: p.tokenId, symbol: p.symbol, txHash: r.txHash });
+      closedSymbols.add(p.symbol);
+    }
+    const sold: Array<{ symbol: string; usdgReceived: number; txHash: string }> = [];
+    if (toCash) {
+      // Sell by CLOSED SYMBOL, not by index membership: the old index-only
+      // sweep could not see a seed pool's token and left 1,756 CASHCAT
+      // stranded on 2026-08-18. Failures go to the pending-sells queue.
+      sold.push(...(await sellSymbolsOrEnqueue([...closedSymbols], "lp-close toCash")));
+      if (!only) {
+        // A full close also sweeps any OTHER loose index inventory, as before.
+        const addr = getAgentAddress();
+        const balances = addr ? await readStockBalances(addr) : {};
+        const rest = Object.entries(balances)
+          .filter(([sym, qty]) => qty > 1e-6 && isTradable(sym) && !closedSymbols.has(sym))
+          .map(([sym]) => sym);
+        sold.push(...(await sellSymbolsOrEnqueue(rest, "lp-close sweep")));
+      }
+    }
+    return { closed, sold };
+  }, { operator: true });
+}
+
 app.post("/api/lp-close", async (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) {
     res.status(401).json({ error: "unauthorized" });
@@ -2164,39 +2199,108 @@ app.post("/api/lp-close", async (req: Request, res: Response) => {
   const only =
     Array.isArray(symbolsRaw) && symbolsRaw.length > 0 ? new Set(symbolsRaw.map((s: unknown) => String(s).toUpperCase())) : null;
   try {
-    // Serialize against the LP guard's tick and any other operator action so a
-    // close can't interleave with an autonomous retile on the same wallet.
-    const { closed, sold } = await withHouseWalletLock("lp-close", async () => {
-      const closed: Array<{ tokenId: string; symbol: string; txHash: string }> = [];
-      const closedSymbols = new Set<string>();
-      for (const p of await openPositionsOnChain()) {
-        if (only && !only.has(p.symbol.toUpperCase())) continue;
-        const r = await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "lp-close" });
-        closed.push({ tokenId: p.tokenId, symbol: p.symbol, txHash: r.txHash });
-        closedSymbols.add(p.symbol);
-      }
-      const sold: Array<{ symbol: string; usdgReceived: number; txHash: string }> = [];
-      if (toCash) {
-        // Sell by CLOSED SYMBOL, not by index membership: the old index-only
-        // sweep could not see a seed pool's token and left 1,756 CASHCAT
-        // stranded on 2026-08-18. Failures go to the pending-sells queue.
-        sold.push(...(await sellSymbolsOrEnqueue([...closedSymbols], "lp-close toCash")));
-        if (!only) {
-          // A full close also sweeps any OTHER loose index inventory, as before.
-          const addr = getAgentAddress();
-          const balances = addr ? await readStockBalances(addr) : {};
-          const rest = Object.entries(balances)
-            .filter(([sym, qty]) => qty > 1e-6 && isTradable(sym) && !closedSymbols.has(sym))
-            .map(([sym]) => sym);
-          sold.push(...(await sellSymbolsOrEnqueue(rest, "lp-close sweep")));
-        }
-      }
-      return { closed, sold };
-    }, { operator: true });
+    const { closed, sold } = await closeSeats(only, toCash, "lp-close");
     console.error(`[lp-close] closed ${closed.length} position(s)${only ? ` (only ${[...only].join(", ")})` : ""}${toCash ? `, sold ${sold.length} holding(s) to USDG` : ""}`);
     res.json({ ok: true, closed, sold, ...(only ? { only: [...only] } : {}), pendingSells: pendingSellsNow().map((e) => e.symbol) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// --- Agent proposals: other agents argue, the operator decides -----------
+// The public list is the Agents tab's data source. It serves claimed names
+// and hashed ids only; a wallet address never reaches this route.
+app.get("/api/agent-proposals", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({
+    proposals: listProposals().map((p) => ({
+      id: p.id,
+      proposer: p.proposerName,
+      proposerId: p.proposerId,
+      kind: p.kind,
+      params: p.params,
+      rationale: p.rationale,
+      at: p.at,
+      status: p.status,
+      decidedAt: p.decidedAt ?? null,
+      decisionReason: p.decisionReason ?? null,
+      error: p.error ?? null,
+    })),
+    note: "Agents propose, the operator approves, the desk executes through its own guards. Nothing here moves funds on its own.",
+  });
+});
+
+// A signed-in user's agent submits under its owner's hashed id (the same
+// public id the swarm feed uses; the address stays server-side).
+app.options("/api/agent-proposals", (_req: Request, res: Response) => {
+  setWalletCors(res);
+  res.sendStatus(204);
+});
+app.post("/api/agent-proposals", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  const b = req.body ?? {};
+  const result = submitProposal({
+    proposerId: publicIdForWallet(address),
+    proposerName: String(b.proposerName ?? ""),
+    kind: String(b.kind ?? ""),
+    symbol: String(b.symbol ?? ""),
+    widthPct: b.widthPct == null ? undefined : Number(b.widthPct),
+    maxUsd: b.maxUsd == null ? undefined : Number(b.maxUsd),
+    rationale: String(b.rationale ?? ""),
+    tradable: isTradable,
+  });
+  if (!result.ok) {
+    res.status(400).json({ ok: false, error: result.error });
+    return;
+  }
+  res.json({ ok: true, id: result.proposal.id, status: result.proposal.status });
+});
+
+// Operator verdicts. Approval EXECUTES, through the exact same guarded paths
+// as the operator's own calls: openInPool throws on a breaker halt, sizes are
+// what the proposal displayed, closes go through closeSeats. The result or
+// failure is recorded on the proposal for the public board.
+app.post("/api/agent-proposals/decide", async (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  const { id, verdict, reason } = req.body ?? {};
+  if (verdict !== "approved" && verdict !== "rejected") {
+    res.status(400).json({ ok: false, error: "verdict must be approved or rejected" });
+    return;
+  }
+  const p = decideProposal(String(id ?? ""), verdict, reason ? String(reason) : undefined);
+  if (!p) {
+    res.status(404).json({ ok: false, error: "no pending proposal with that id" });
+    return;
+  }
+  if (verdict === "rejected") {
+    res.json({ ok: true, id: p.id, status: p.status });
+    return;
+  }
+  try {
+    if (p.kind === "lp-open") {
+      const pos = await withHouseWalletLock(
+        "proposal-lp-open",
+        () => openInPool(p.params.symbol, p.params.widthPct, p.params.maxUsd),
+        { operator: true },
+      );
+      markExecuted(p.id, pos);
+      console.error(`[proposals] executed ${p.id}: opened #${pos.tokenId} in ${pos.symbol} (proposed by ${p.proposerName})`);
+      res.json({ ok: true, id: p.id, status: "executed", ...pos });
+    } else {
+      const { closed, sold } = await closeSeats(new Set([p.params.symbol]), p.params.toCash === true, "proposal-lp-close");
+      markExecuted(p.id, { closed, sold });
+      console.error(`[proposals] executed ${p.id}: closed ${closed.length} ${p.params.symbol} seat(s) (proposed by ${p.proposerName})`);
+      res.json({ ok: true, id: p.id, status: "executed", closed, sold });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    markFailed(p.id, msg);
+    res.status(502).json({ ok: false, id: p.id, status: "failed", error: msg });
   }
 });
 
