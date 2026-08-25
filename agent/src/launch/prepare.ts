@@ -7,7 +7,7 @@
 // deployed splitter factory in SPLITTER_FACTORY_ADDRESS.
 import { encodeFunctionData, keccak256, encodeAbiParameters, parseAbiParameters, type Address, type Hex } from "viem";
 import { getPublicClient } from "../venues/signer.js";
-import { PONS_V2, USDG_PAIR, factoryAbi, splitterFactoryAbi, validateLaunchInput, buildLaunchTokenTx, type LaunchInput } from "./ponsV2.js";
+import { PONS_V2, USDG_PAIR, PAIR_CANDIDATES, factoryAbi, splitterFactoryAbi, validateLaunchInput, buildLaunchTokenTx, type LaunchInput } from "./ponsV2.js";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -26,7 +26,27 @@ export function launchSalt(team: Address, symbol: string, nowMs: number): Hex {
   return keccak256(encodeAbiParameters(parseAbiParameters("address, string, uint256"), [team, symbol, BigInt(nowMs)]));
 }
 
-export async function prepareLaunchSteps(team: Address, input: LaunchInput, nowMs: number): Promise<Record<string, unknown> | { error: string; status: number }> {
+/** The pair assets the factory approves RIGHT NOW, from our candidate set.
+ *  Cached briefly; the Launch form lists exactly this. */
+let pairsCache: { at: number; pairs: { symbol: string; address: Address }[] } | null = null;
+export async function approvedPairs(): Promise<{ symbol: string; address: Address }[]> {
+  if (pairsCache && Date.now() - pairsCache.at < 10 * 60_000) return pairsCache.pairs;
+  const client = getPublicClient();
+  const checks = await Promise.all(
+    PAIR_CANDIDATES.map((c) =>
+      client
+        .readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "approvedPairTokens", args: [c.address] })
+        .then((ok) => (ok ? c : null))
+        .catch(() => null),
+    ),
+  );
+  const pairs = checks.filter((c): c is { symbol: string; address: Address } => c !== null);
+  // Never serve an empty list on a bad read: USDG is chain-verified approved.
+  pairsCache = { at: Date.now(), pairs: pairs.length ? pairs : [{ symbol: "USDG", address: USDG_PAIR }] };
+  return pairsCache.pairs;
+}
+
+export async function prepareLaunchSteps(team: Address, input: LaunchInput & { pairToken?: string }, nowMs: number): Promise<Record<string, unknown> | { error: string; status: number }> {
   const v = validateLaunchInput(input);
   if (!v.ok) return { error: v.error, status: 400 };
   if (!routerOpen()) {
@@ -35,11 +55,20 @@ export async function prepareLaunchSteps(team: Address, input: LaunchInput, nowM
   const factory = splitterFactoryAddress()!;
   const client = getPublicClient();
 
+  // The pair asset: default USDG; anything else must be approved by the
+  // factory right now, read live, never assumed.
+  const pairRaw = (input.pairToken ?? "").trim();
+  const pair = (ADDRESS_RE.test(pairRaw) ? pairRaw : USDG_PAIR) as Address;
+  if (pair.toLowerCase() !== USDG_PAIR.toLowerCase()) {
+    const pairOk = await client.readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "approvedPairTokens", args: [pair] }).catch(() => false);
+    if (!pairOk) return { error: "that pair asset isn't approved on PONS v2 right now", status: 400 };
+  }
+
   const [can, feeWei, maxTax, economics] = await Promise.all([
     client.readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "canLaunch", args: [team] }),
     client.readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "launchFee" }),
     client.readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "maxCreatorTaxBps" }),
-    client.readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "previewLaunchEconomics", args: [0n, USDG_PAIR] }),
+    client.readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "previewLaunchEconomics", args: [0n, pair] }),
   ]);
   if (!can) return { error: "PONS v2 is not accepting launches from this wallet right now", status: 403 };
   if (BigInt(v.clean.creatorTaxBps) > maxTax) return { error: `creator tax is capped at ${maxTax} bps on-chain`, status: 400 };
@@ -58,10 +87,11 @@ export async function prepareLaunchSteps(team: Address, input: LaunchInput, nowM
       value: "0",
     });
   }
-  const launch = buildLaunchTokenTx({ clean: v.clean, team, splitter, launchFeeWei: feeWei, expectedEconomics: economics, salt });
+  const pairSymbol = PAIR_CANDIDATES.find((c) => c.address.toLowerCase() === pair.toLowerCase())?.symbol ?? "USDG";
+  const launch = buildLaunchTokenTx({ clean: v.clean, team, splitter, launchFeeWei: feeWei, expectedEconomics: economics, salt, pairToken: pair });
   steps.push({
     kind: "launch",
-    description: `Launch ${v.clean.symbol} on PONS v2, paired in USDG`,
+    description: `Launch ${v.clean.symbol} on PONS v2, paired in ${pairSymbol}`,
     to: launch.to,
     data: launch.data,
     value: launch.value.toString(),

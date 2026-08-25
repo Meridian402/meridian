@@ -84,7 +84,7 @@ import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { planOpenSteps, ENGINE_SYMBOLS, positionsWithValueFor, ownerOfPosition, positionOnChain, computeDecreasePlan } from "./venues/lpPositions.js";
 import { hasEngineAccess } from "./engine/access.js";
-import { prepareLaunchSteps, routerOpen } from "./launch/prepare.js";
+import { prepareLaunchSteps, routerOpen, approvedPairs } from "./launch/prepare.js";
 import { registerLaunchFromTx, launchesForWallet, startGraduationWatch } from "./launch/registry.js";
 import { sniffImage, saveLogo, logoDiskPath, logoPublicUrl, contentTypeFor, LOGO_MAX_BYTES } from "./launch/logos.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
@@ -2677,6 +2677,17 @@ app.get("/api/launch/logo/:name", (req: Request, res: Response) => {
   res.setHeader("Content-Type", contentTypeFor(path));
   res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
   res.sendFile(path);
+});
+
+// The pair assets teams can launch against: exactly what the PONS factory
+// approves right now, read live and cached briefly. The form lists this.
+app.get("/api/launch/pairs", async (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    res.json({ ok: true, pairs: await approvedPairs() });
+  } catch {
+    res.status(502).json({ ok: false, error: "could not read the approved pair assets" });
+  }
 });
 
 app.options("/api/launch/mine", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });

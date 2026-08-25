@@ -11,10 +11,21 @@ export const PONS_V2 = {
   feeEscrow: "0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e" as Address,
 } as const;
 
-/** USDG on Robinhood Chain: the pair token for routed launches, verified as an
- *  approved pair token on-chain 2026-08-26. Graduated pools land in the same
- *  USDG shape the engine already trades. */
+/** USDG on Robinhood Chain: the default and recommended pair for routed
+ *  launches (graduated pools land in the same USDG shape the engine already
+ *  trades). Verified approved on-chain 2026-08-26. */
 export const USDG_PAIR: Address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+
+/** Every pair asset we are willing to offer IF the PONS factory approves it.
+ *  The live list is whatever approvedPairTokens() says at read time, so the
+ *  Launch form can never offer a pair the factory would revert on. Checked
+ *  2026-08-26: only USDG is approved; the rest wait on PONS flipping them. */
+export const PAIR_CANDIDATES: { symbol: string; address: Address }[] = [
+  { symbol: "USDG", address: USDG_PAIR },
+  { symbol: "ETH", address: "0x0000000000000000000000000000000000000000" },
+  { symbol: "WETH", address: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" },
+  { symbol: "PONS", address: "0x39dBED3a2bd333467115dE45665cC57F813C4571" },
+];
 
 export const factoryAbi = parseAbi([
   "struct Socials { string twitter; string telegram; string discord; string website; string farcaster; }",
