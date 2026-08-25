@@ -2451,9 +2451,7 @@ app.get("/api/engine/access", async (req: Request, res: Response) => {
   const address = requireWallet(req, res);
   if (!address) return;
   try {
-    // A Meridian holder points at the seat to verify (?seatId=N) until the
-    // contract grows its per-owner active view.
-    const access = await hasEngineAccess(address, { seatId: typeof req.query.seatId === "string" ? req.query.seatId : undefined });
+    const access = await hasEngineAccess(address);
     // Envelope `ok` = the request succeeded; `hasAccess` = the gate verdict.
     // Keep them separate: a no-access wallet is a successful request, not an error.
     res.json({ ok: true, hasAccess: access.ok, via: access.via, paths: access.paths, detail: access.detail, pools: ENGINE_SYMBOLS });
@@ -2469,7 +2467,7 @@ app.post("/api/engine/plan", async (req: Request, res: Response) => {
   const address = requireWallet(req, res);
   if (!address) return;
   try {
-    const access = await hasEngineAccess(address, { seatId: typeof (req.body ?? {}).seatId === "string" ? (req.body ?? {}).seatId : undefined });
+    const access = await hasEngineAccess(address);
     if (!access.ok) {
       res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
       return;
@@ -2494,7 +2492,7 @@ app.get("/api/engine/positions", async (req: Request, res: Response) => {
   const address = requireWallet(req, res);
   if (!address) return;
   try {
-    const access = await hasEngineAccess(address, { seatId: typeof (req.body ?? {}).seatId === "string" ? (req.body ?? {}).seatId : undefined });
+    const access = await hasEngineAccess(address);
     if (!access.ok) {
       res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
       return;
@@ -2564,7 +2562,7 @@ for (const mode of ["collect", "close"] as const) {
     const address = requireWallet(req, res);
     if (!address) return;
     try {
-      const access = await hasEngineAccess(address, { seatId: typeof (req.body ?? {}).seatId === "string" ? (req.body ?? {}).seatId : undefined });
+      const access = await hasEngineAccess(address);
       if (!access.ok) {
         res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
         return;

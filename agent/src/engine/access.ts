@@ -110,25 +110,22 @@ async function hasStake(wallet: Address): Promise<boolean> {
 }
 
 /**
- * The Meridian path (operator decision 2026-08-25): the key is an ACTIVATED
- * seat, not a raw hold. Minting is free; activate() burns ~$25 of MERD and
- * clears on transfer; the 30 raffle seats activate free forever. The contract
- * has no per-owner enumeration yet, so the caller passes the seat id to check
- * (the mint ladder caps a wallet at 3 seats). When the pre-audit contract
- * additions land (per-owner active counter alongside the raffle module), this
- * upgrades to a hint-free read.
+ * The Meridian path (amendment v2, 2026-08-26): the MINT BURN IS THE KEY.
+ * Every seat costs a real burn or payment at the door (no free mint), so
+ * holding any Meridian is holding a live engine key: balanceOf > 0 is the
+ * whole verdict. No activation state, no seat-id hint, no enumeration needed.
  */
-async function hasMeridian(wallet: Address, seatId?: string): Promise<boolean> {
+async function hasMeridian(wallet: Address): Promise<boolean> {
   const addr = meridiansNftAddress();
-  if (!addr || !seatId || !/^\d{1,6}$/.test(seatId)) return false;
+  if (!addr) return false;
   try {
-    const id = BigInt(seatId);
-    const client = getPublicClient();
-    const [owner, active] = await Promise.all([
-      client.readContract({ address: addr, abi: [parseAbiItem("function ownerOf(uint256) view returns (address)")], functionName: "ownerOf", args: [id] }) as Promise<Address>,
-      client.readContract({ address: addr, abi: [parseAbiItem("function isActive(uint256) view returns (bool)")], functionName: "isActive", args: [id] }) as Promise<boolean>,
-    ]);
-    return owner.toLowerCase() === wallet.toLowerCase() && active === true;
+    const bal = (await getPublicClient().readContract({
+      address: addr,
+      abi: [parseAbiItem("function balanceOf(address owner) view returns (uint256)")],
+      functionName: "balanceOf",
+      args: [wallet],
+    })) as bigint;
+    return bal > 0n;
   } catch {
     return false; // fail closed
   }
@@ -145,14 +142,13 @@ async function hasTokenizedAgent(wallet: Address): Promise<boolean> {
 /**
  * The gate. Reads chain state to decide access; never signs or moves funds.
  * Fails CLOSED on a malformed address, any read error, or a dormant path.
- * `opts.seatId` lets a Meridian holder point at the seat to verify.
  */
-export async function hasEngineAccess(wallet: string, opts?: { seatId?: string }): Promise<AccessResult> {
+export async function hasEngineAccess(wallet: string): Promise<AccessResult> {
   if (!ADDRESS_RE.test(wallet.trim())) return decideAccess([]);
   const w = wallet.trim() as Address;
   const paths: AccessVia[] = [];
   if (isAllowlisted(w)) paths.push("allowlist");
-  const [staked, meridian, agent] = await Promise.all([hasStake(w), hasMeridian(w, opts?.seatId), hasTokenizedAgent(w)]);
+  const [staked, meridian, agent] = await Promise.all([hasStake(w), hasMeridian(w), hasTokenizedAgent(w)]);
   if (staked) paths.push("stake");
   if (meridian) paths.push("meridian");
   if (agent) paths.push("agent");

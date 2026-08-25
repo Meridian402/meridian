@@ -1,5 +1,30 @@
 # The Meridians — locked specification
 
+## AMENDMENT v2 (operator, 2026-08-26) — supersedes the mint ladder and activation sections below
+
+- **The mint ladder is repriced and extended.** Per wallet: mints 1-3 cost
+  $10 each, mint 4 costs $30, mint 5 and EVERY mint after costs $100. No
+  per-wallet cap beyond pricing; the 1,000 supply is the ceiling. There is
+  NO free mint.
+- **Where payments go.** The $10 tier BURNS MERD to the dead address (entry
+  is deflationary). The $30 and $100 tiers PAY THE TREASURY as mint revenue.
+  Denomination: MERD for all tiers (one asset, one repeg cadence); prices
+  remain owner-set MERD amounts re-pegged to dollar targets off-chain, no
+  oracle. (ETH for the upper tiers stays an amendable alternative.)
+- **The mint burn IS the engine key. The activation mechanic is REMOVED**
+  (activate(), activatedAt, deactivate-on-transfer all come out of the
+  contract). Every seat cost real burn at the door, so holding a Meridian is
+  holding a live key; secondary buyers inherit it. The engine gate reads
+  balanceOf(wallet) > 0 and nothing else, which also removes the need for
+  the per-owner active-seat view.
+- **OPEN ITEM: the raffle 30's edge must be redefined** (free-forever
+  activation is meaningless without activation). Candidates: exclusive
+  Depth 3 autonomous-executor path, engine capital priority, pure prestige
+  trait. The raffle module itself (commit-reveal) is still to be built.
+- Everything else below (6551 accounts, AgentTreasury custody, audit-before-
+  mint, deployer-key isolation) stands unchanged.
+
+
 Locked by the operator on 2026-08-15. Changes to this spec are deliberate,
 versioned decisions, not drift. Contract state as of this writing: drafted and
 tested (102 seat-surface tests green), UNAUDITED, UNDEPLOYED.
