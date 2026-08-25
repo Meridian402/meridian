@@ -26,7 +26,18 @@ No contract exists yet. This supersedes the revenue-share design
   distributes to stakers via per-share accumulators (accWethPerShare,
   accMerdPerShare), MasterChef-debt style, exactly like the v1 accumulator.
 - `claim()`: pays accrued WETH + MERD without unstaking.
-- `unstake(amount)`: returns principal MERD (see the scale rule below).
+- `unstake(amount)`: returns principal (see the scale rule below), and it is
+  SELF-SERVE AND FLUID by operator requirement (2026-08-26): one transaction,
+  any time, no lock, no cooldown, no queue, no exit fee, no manager in the
+  loop. If the idle buffer cannot cover the withdrawal, the unstake call
+  itself decreases the ladder position's liquidity to free the funds, inside
+  the same transaction. A staker's exit can never depend on anyone else
+  showing up.
+- Exit payout is in kind. The ladder sits above spot, so it is normally pure
+  MERD; when price is trading INSIDE the band, the withdrawn slice comes back
+  as it currently exists (MERD plus that slice's WETH), with the same scale
+  and accumulator accounting applied so the exit is exactly fair to everyone
+  who stays. Nothing is ever force-sold to shape the payout.
 
 ## The one hard problem, and the chosen solve
 
@@ -70,7 +81,9 @@ Someone must place and re-place the ladder as price moves. The manager role
   realized conversion, matched 1:1 by WETH credited to the distributor.
 - Manager cannot place liquidity at or below spot (no principal conversion
   by repositioning).
-- Unstake is never pausable.
+- Unstake is never pausable, never queued, never fee'd, never time-locked,
+  and never requires the manager: the exit path must be able to pull
+  liquidity out of the position by itself, in the caller's own transaction.
 - Contract holds no swap code and reads no prices.
 
 ## Knock-on changes when this ships
@@ -86,8 +99,8 @@ Someone must place and re-place the ladder as price moves. The manager role
 ## Open items before code
 
 - Ladder placement policy (band width, distance above spot, single band vs
-  laddered rungs) and how much idle MERD buffers unstakes without burning
-  the position every time.
+  laddered rungs). The idle buffer is now an OPTIMIZATION only (it saves exit
+  gas), never a requirement: exits self-serve from the position regardless.
 - Whether `principalScale` floors (e.g. stake pauses when scale < X) or runs
   unbounded.
 - Manager cadence and its own anti-churn gates (the desk's payback logic
