@@ -19,16 +19,23 @@
   Denomination: MERD for all tiers (one asset, one repeg cadence); prices
   remain owner-set MERD amounts re-pegged to dollar targets off-chain, no
   oracle. (ETH for the upper tiers stays an amendable alternative.)
-- **The mint burn IS the engine key. The activation mechanic is REMOVED**
-  (activate(), activatedAt, deactivate-on-transfer all come out of the
-  contract). Every seat cost real burn at the door, so holding a Meridian is
-  holding a live key; secondary buyers inherit it. The engine gate reads
-  balanceOf(wallet) > 0 and nothing else, which also removes the need for
-  the per-owner active-seat view.
-- **OPEN ITEM: the raffle 30's edge must be redefined** (free-forever
-  activation is meaningless without activation). Candidates: exclusive
-  Depth 3 autonomous-executor path, engine capital priority, pure prestige
-  trait. The raffle module itself (commit-reveal) is still to be built.
+- **v2.2 (operator, 2026-08-26): EXECUTION FOR 20, THE MIND FOR ALL.**
+  The operator judged all-seats-execution too many engine keys. The split:
+  - **20 EXECUTION SEATS**, raffle-drawn after mint-out (count changes from
+    30 to 20). These alone carry the engine's hands: the execution surface
+    (open/collect/close), the vault path, and the future bounded autonomous
+    executor. On-chain trait assigned by the raffle module; the execution
+    gate reads a per-owner view (`hasEngineSeat(address)`) and NOTHING
+    weaker. This resolves the raffle-edge open item: the edge IS the engine.
+  - **THE OTHER 980: the engine's mind for their own agents.** Every seat
+    grants its holder's agent the live intelligence Merd trades on (flow
+    scans, LP scores, allocator rankings, the signals feed; natural
+    delivery: seat-gated free access to the priced MCP data tools). Their
+    agents act on Merd's brain with their own hands; no execution surface.
+  - The activation mechanic stays REMOVED (v2 stands); the mint burn is the
+    price of the seat and its intelligence access, not an execution key.
+  - Engine execution population: ~230 stake keys + 20 seats + graduated
+    launch teams. Exclusivity is arithmetic on every path.
 - Everything else below (6551 accounts, AgentTreasury custody, audit-before-
   mint, deployer-key isolation) stands unchanged.
 

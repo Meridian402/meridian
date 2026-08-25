@@ -110,24 +110,27 @@ async function hasStake(wallet: Address): Promise<boolean> {
 }
 
 /**
- * The Meridian path (amendment v2, 2026-08-26): the MINT BURN IS THE KEY.
- * Every seat costs a real burn or payment at the door (no free mint), so
- * holding any Meridian is holding a live engine key: balanceOf > 0 is the
- * whole verdict. No activation state, no seat-id hint, no enumeration needed.
+ * The Meridian path (amendment v2.2, 2026-08-26): EXECUTION FOR 20, THE MIND
+ * FOR ALL. This gate protects the engine's HANDS, so it accepts only the 20
+ * raffle-drawn execution seats via the contract's per-owner trait view.
+ * Holding any other seat grants the intelligence tier (the engine's mind for
+ * the holder's own agent), which is a separate, lighter surface and is NOT
+ * this gate. Fails closed until the v2.2 contract deploys and the raffle has
+ * assigned the trait: pre-raffle, no seat is an execution seat.
  */
 async function hasMeridian(wallet: Address): Promise<boolean> {
   const addr = meridiansNftAddress();
   if (!addr) return false;
   try {
-    const bal = (await getPublicClient().readContract({
+    const engineSeat = (await getPublicClient().readContract({
       address: addr,
-      abi: [parseAbiItem("function balanceOf(address owner) view returns (uint256)")],
-      functionName: "balanceOf",
+      abi: [parseAbiItem("function hasEngineSeat(address owner) view returns (bool)")],
+      functionName: "hasEngineSeat",
       args: [wallet],
-    })) as bigint;
-    return bal > 0n;
+    })) as boolean;
+    return engineSeat === true;
   } catch {
-    return false; // fail closed
+    return false; // fail closed (pre-v2.2 contract has no such view)
   }
 }
 
