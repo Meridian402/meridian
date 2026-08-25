@@ -15,6 +15,7 @@ import { parseAbiItem, type Address } from "viem";
 import { getPublicClient } from "../venues/signer.js";
 import { stakingAddress, stakingEnabled } from "../earn/staking.js";
 import { merdUsdSpot } from "../merd/merdSpot.js";
+import { hasGraduatedLaunch } from "../launch/registry.js";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -133,12 +134,12 @@ async function hasMeridian(wallet: Address, seatId?: string): Promise<boolean> {
   }
 }
 
-// The tokenized-agent path lights up with the launchpad (phase 2). Router
-// economics decided 2026-08-25: Meridian takes a share of the agent token's
-// trading tax, no supply take, no flat fee. Until the router exists and
-// registers deployers, this stays dormant.
-async function hasTokenizedAgent(_wallet: Address): Promise<boolean> {
-  return false;
+// The tokenized-agent path: true when this wallet routed an agent launch
+// through Meridian onto PONS v2 AND that launch graduated (operator decision
+// 2026-08-26: access arrives at graduation, never at launch). Backed by the
+// on-chain-verified launch registry; empty registry fails closed.
+async function hasTokenizedAgent(wallet: Address): Promise<boolean> {
+  return hasGraduatedLaunch(wallet);
 }
 
 /**

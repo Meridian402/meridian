@@ -84,6 +84,8 @@ import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { planOpenSteps, ENGINE_SYMBOLS, positionsWithValueFor, ownerOfPosition, positionOnChain, computeDecreasePlan } from "./venues/lpPositions.js";
 import { hasEngineAccess } from "./engine/access.js";
+import { prepareLaunchSteps, routerOpen } from "./launch/prepare.js";
+import { registerLaunchFromTx, launchesForWallet, startGraduationWatch } from "./launch/registry.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
 import { sellSymbolsOrEnqueue, pendingSellsNow, enqueuePendingSell } from "./pendingSells.js";
 import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
@@ -2583,6 +2585,63 @@ for (const mode of ["collect", "close"] as const) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// AGENT LAUNCHES (the router). Teams launch tokenized agents through Meridian
+// onto PONS v2: prepare returns the unsigned two-step flow (splitter, then
+// launchToken) the TEAM signs; register verifies a confirmed launch on-chain
+// and starts graduation tracking; engine access flips on at graduation via
+// the gate's tokenized-agent path. Dormant until MERIDIAN_LAUNCH_ROUTER=on
+// and the splitter factory is deployed.
+// ---------------------------------------------------------------------------
+app.options("/api/launch/prepare", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post("/api/launch/prepare", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  try {
+    const out = await prepareLaunchSteps(address as `0x${string}`, req.body ?? {}, Date.now());
+    if ("error" in out) {
+      res.status(out.status as number).json({ ok: false, error: out.error });
+      return;
+    }
+    res.json(out);
+  } catch (err) {
+    console.error("[launch] prepare failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: "could not prepare the launch — try again shortly" });
+  }
+});
+
+app.options("/api/launch/register", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post("/api/launch/register", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  const txHash = String((req.body ?? {}).txHash ?? "").trim();
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+    res.status(400).json({ ok: false, error: "txHash is required" });
+    return;
+  }
+  try {
+    const out = await registerLaunchFromTx(txHash as `0x${string}`, address as `0x${string}`);
+    if (!out.ok) {
+      res.status(400).json(out);
+      return;
+    }
+    res.json(out);
+  } catch (err) {
+    console.error("[launch] register failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: "could not verify the launch — try again shortly" });
+  }
+});
+
+app.options("/api/launch/mine", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/launch/mine", (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  res.json({ ok: true, open: routerOpen(), launches: launchesForWallet(address) });
+});
+
 app.post("/mcp", async (req: Request, res: Response) => {
   // JSON-RPC batches are refused, because both gates below decide by reading
   // body.method and an array has none: a batched [{...tools/call...}] would
@@ -2723,6 +2782,10 @@ if (process.env.MERIDIAN_LP_ENGINE === "on") {
 } else {
   console.log("[boot] LP engine off (set MERIDIAN_LP_ENGINE=on to enable autonomous liquidity management)");
 }
+// Graduation watch for routed agent launches. Independent of the LP engine:
+// it only reads the PONS factory for registered launches (no-op while the
+// registry is empty) and flips engine access on at graduation.
+startGraduationWatch();
 // The accountant's daily print (Phase 0 of the bleed program): per-venue
 // realized flow to the log, worst first. File reads only, engine on or off,
 // so the ledger stays visible even while the desk stands down.
