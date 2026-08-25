@@ -39,6 +39,24 @@
     (the engine vault, future bounded autonomy).
   - The activation mechanic stays REMOVED (v2 stands); the mint burn is the
     price of the seat and its intelligence access, not an execution key.
+- **v2.4 (operator, 2026-08-26): SECONDARY ROYALTIES + the fast-mint-out
+  strategy.** The collection mints out as fast as the cheap ladder allows,
+  and the business is the SECONDARY volume: pre-reveal, every seat trades
+  as a 1-in-50 ticket to a direct Meridian402 seat, and that churn pays.
+  - **ERC-2981 royalty: 5% to the treasury**, owner-adjustable in bps under
+    an IMMUTABLE 10% ceiling baked at deployment, so buyers know the worst
+    case forever. Receiver: the treasury, immutable.
+  - **Honest mechanics note: 2981 is a signal, not an enforcement.**
+    Marketplaces choose to honor it, and Robinhood Chain's marketplace
+    landscape is young. If no royalty-honoring venue exists at mint time,
+    the delivery vehicle is a MINIMAL NATIVE MARKET shipped with the mint
+    page: fixed-price list/buy escrow on the collection itself, royalty
+    taken in settlement where it cannot be skipped. Small contract, same
+    audit envelope. Peer-to-peer wallet transfers stay free and unblocked:
+    we tax markets, not moves.
+  - Royalty disclosure appears on the site and mint page in plain words.
+  - The raffle's commit-reveal already makes pre-reveal trading fair:
+    nobody, including us, can know which 20 win while the tickets trade.
   - Engine execution population: ~230 stake keys + 20 seats + graduated
     launch teams. Exclusivity is arithmetic on every path.
 - Everything else below (6551 accounts, AgentTreasury custody, audit-before-
