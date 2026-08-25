@@ -181,25 +181,46 @@ export interface LpPositionRecord {
  * wallet's ACTUAL balances of both currencies (deploys the largest liquidity
  * both sides can support). widthPct is total width, e.g. 4 => ±2%.
  */
-export async function mintRange(params: { symbol: string; widthPct: number; maxUsd?: number }): Promise<LpPositionRecord> {
-  const { symbol, widthPct, maxUsd } = params;
-  guardWalletOp(`lp-mint ${symbol}`); // global runaway breaker (counts every deploy attempt)
-  recordWalletOp(0, "lp-mint");
-  const k = poolKeyOf(symbol);
-  const signer = getAgentSigner()!;
-  const client = getPublicClient();
-  const { sqrtP, tick } = await slot0(symbol);
+export interface MintPlan {
+  tickLower: number;
+  tickUpper: number;
+  liquidity: bigint;
+  /** amountMax caps encoded into the mint = the owner's real balances. */
+  amountMax0: bigint;
+  amountMax1: bigint;
+  unlockData: Hex;
+  deadline: bigint;
+  /** The exact modifyLiquidities call. The desk signs it; a self-serve user signs the same bytes. */
+  tx: { to: Address; data: Hex; value: bigint };
+}
+
+/**
+ * ONE BRAIN. PURE: build the mint — range, amounts, liquidity, and the exact
+ * modifyLiquidities calldata — for `recipient`, from a spot reading and the
+ * owner's on-chain balances. No chain reads, no signing. This is the SINGLE
+ * source of both the mint the desk executes AND the mint a gated self-serve
+ * user signs, so the customer path can never drift from Merd's own path: any
+ * upgrade here reaches both at once. `mintRange` is the desk's execution
+ * wrapper around it; the engine advice API returns `tx` for the user to sign.
+ */
+export function computeMintPlan(args: {
+  key: { currency0: Address; currency1: Address; fee: number; tickSpacing: number };
+  sqrtP: number;
+  tick: number;
+  widthPct: number;
+  bal0Raw: bigint;
+  bal1Raw: bigint;
+  recipient: Address;
+  maxUsd?: number;
+  nowMs: number;
+}): MintPlan {
+  const { key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient, maxUsd, nowMs } = args;
 
   const halfTicks = Math.log(1 + widthPct / 200) / Math.log(1.0001);
   const ts = k.tickSpacing;
   const tickLower = Math.floor((tick - halfTicks) / ts) * ts;
   const tickUpper = Math.ceil((tick + halfTicks) / ts) * ts;
 
-  const [bal0Raw, bal1Raw] = await Promise.all(
-    [k.currency0, k.currency1].map((c) =>
-      client.readContract({ address: c, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
-    ),
-  );
   // Keep a whisper of headroom so maxes never bind on rounding.
   let amt0 = Number(bal0Raw) * 0.995;
   let amt1 = Number(bal1Raw) * 0.995;
@@ -234,9 +255,6 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
   const liquidity = BigInt(Math.floor(Math.min(lFrom0, lFrom1) * 0.99));
   if (liquidity <= 0n) throw new Error("insufficient balances for any liquidity in this range");
 
-  await ensureApprovedForPM(k.currency0);
-  await ensureApprovedForPM(k.currency1);
-
   const mintParams = encodeAbiParameters(
     parseAbiParameters("(address,address,uint24,int24,address), int24, int24, uint256, uint128, uint128, address, bytes"),
     [
@@ -244,22 +262,59 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
       tickLower,
       tickUpper,
       liquidity,
-      bal0Raw, // amountMax caps: never spend beyond the wallet's real balances
+      bal0Raw, // amountMax caps: never spend beyond the owner's real balances
       bal1Raw,
-      signer.address,
+      recipient,
       "0x",
     ],
   );
   const settleParams = encodeAbiParameters(parseAbiParameters("address, address"), [k.currency0, k.currency1]);
   const actions = encodePacked(["bytes1", "bytes1"], [MINT_POSITION, SETTLE_PAIR]);
   const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, [mintParams, settleParams]]);
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  const deadline = BigInt(Math.floor(nowMs / 1000) + 300);
+
+  return {
+    tickLower,
+    tickUpper,
+    liquidity,
+    amountMax0: bal0Raw,
+    amountMax1: bal1Raw,
+    unlockData,
+    deadline,
+    tx: {
+      to: POSITION_MANAGER,
+      data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
+      value: 0n,
+    },
+  };
+}
+
+export async function mintRange(params: { symbol: string; widthPct: number; maxUsd?: number }): Promise<LpPositionRecord> {
+  const { symbol, widthPct, maxUsd } = params;
+  guardWalletOp(`lp-mint ${symbol}`); // global runaway breaker (counts every deploy attempt)
+  recordWalletOp(0, "lp-mint");
+  const k = poolKeyOf(symbol);
+  const signer = getAgentSigner()!;
+  const client = getPublicClient();
+  const { sqrtP, tick } = await slot0(symbol);
+
+  const [bal0Raw, bal1Raw] = await Promise.all(
+    [k.currency0, k.currency1].map((c) =>
+      client.readContract({ address: c, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+    ),
+  );
+
+  // ONE BRAIN: the desk mints through the exact same planner a gated self-serve
+  // user signs, so the customer path can never drift from Merd's own. Recipient
+  // is the desk signer here; the advice API passes the user's wallet instead.
+  const plan = computeMintPlan({ key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient: signer.address, maxUsd, nowMs: Date.now() });
+  const { tickLower, tickUpper, liquidity } = plan;
+
+  await ensureApprovedForPM(k.currency0);
+  await ensureApprovedForPM(k.currency1);
 
   const wallet = getWalletClient();
-  const hash = await wallet.sendTransaction({
-    to: POSITION_MANAGER,
-    data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
-  });
+  const hash = await wallet.sendTransaction({ to: plan.tx.to, data: plan.tx.data });
   const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`mint reverted: ${hash}`);
 
@@ -304,6 +359,115 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
     void attribute({ sleeve: "usdg", venue: symbol, tokenId, mech: "mint", usdIn: usdgIn, usdOut: 0, feeUsd: 0, tokenUsd, gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n), tx: hash });
   }
   return record;
+}
+
+// ---------------------------------------------------------------------------
+// SELF-SERVE ENGINE (non-custodial). Build the UNSIGNED steps a gated user signs
+// from their OWN wallet to open a position, using computeMintPlan — the exact
+// planner the desk mints through (ONE BRAIN). Nothing here signs or holds a key.
+// ---------------------------------------------------------------------------
+
+/** The pools the engine offers to self-serve users: the desk's proven live
+ *  earners. Curated on purpose (not every configured pool) so a user can't open
+ *  a dead one; expand as pools prove out. */
+export const ENGINE_SYMBOLS = ["PONS", "CASHCAT"] as const;
+const ENGINE_MIN_USD = 25;
+const ENGINE_MAX_USD = 5000;
+const ENGINE_WIDTH_PCT = 20; // ±10%, the proven width the desk itself uses
+
+export interface EngineStep {
+  kind: string;
+  description: string;
+  to: Address;
+  data: Hex;
+  value: string;
+}
+
+/**
+ * PURE: the approval steps `owner` still needs before the position manager can
+ * pull `token`, from their current allowances. Mirrors ensureApprovedForPM
+ * exactly (ERC20 -> Permit2, then Permit2 -> PositionManager) but returns
+ * UNSIGNED steps instead of signing. Exported for tests.
+ */
+export function approvalStepsFor(
+  token: Address,
+  label: string,
+  erc20AllowanceToPermit2: bigint,
+  permit2AllowanceToPM: bigint,
+  nowMs: number,
+): EngineStep[] {
+  const steps: EngineStep[] = [];
+  if (erc20AllowanceToPermit2 < 1n << 128n) {
+    steps.push({
+      kind: "approve-erc20",
+      description: `Approve ${label} for Permit2`,
+      to: token,
+      data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [PERMIT2, (1n << 256n) - 1n] }),
+      value: "0",
+    });
+  }
+  if (permit2AllowanceToPM < 1n << 100n) {
+    const expiration = Math.floor(nowMs / 1000) + 60 * 60 * 24 * 30;
+    steps.push({
+      kind: "approve-permit2",
+      description: `Enable ${label} for the position manager`,
+      to: PERMIT2,
+      data: encodeFunctionData({ abi: permit2Abi, functionName: "approve", args: [token, POSITION_MANAGER, (1n << 160n) - 1n, expiration] }),
+      value: "0",
+    });
+  }
+  return steps;
+}
+
+/**
+ * Build the unsigned open (approvals as needed, then the mint) for a self-serve
+ * user. Sizes to `capitalUsd` via the same width and math the desk uses; the
+ * position mints to the USER, who signs every step. Throws a clear message when
+ * a side is missing (a two-sided range needs both USDG and the token).
+ */
+export async function planOpenSteps(args: { owner: Address; symbol: string; capitalUsd: number }): Promise<Record<string, unknown>> {
+  const { owner, symbol } = args;
+  const capitalUsd = Number(args.capitalUsd);
+  if (!Number.isFinite(capitalUsd) || capitalUsd < ENGINE_MIN_USD) throw new Error(`the minimum is $${ENGINE_MIN_USD}`);
+  if (capitalUsd > ENGINE_MAX_USD) throw new Error(`the maximum per position is $${ENGINE_MAX_USD}`);
+  if (!(ENGINE_SYMBOLS as readonly string[]).includes(symbol)) throw new Error(`${symbol} is not an engine pool`);
+
+  const k = poolKeyOf(symbol);
+  const client = getPublicClient();
+  const { sqrtP, tick } = await slot0(symbol);
+
+  const [bal0Raw, bal1Raw] = (await Promise.all(
+    [k.currency0, k.currency1].map((c) => client.readContract({ address: c, abi: erc20Abi, functionName: "balanceOf", args: [owner] })),
+  )) as [bigint, bigint];
+  if (bal0Raw === 0n || bal1Raw === 0n) {
+    throw new Error(`opening a ${symbol} range needs both sides: hold some USDG and some ${symbol} in your wallet first.`);
+  }
+
+  const plan = computeMintPlan({ key: k, sqrtP, tick, widthPct: ENGINE_WIDTH_PCT, bal0Raw, bal1Raw, recipient: owner, maxUsd: capitalUsd, nowMs: Date.now() });
+
+  const usdgIsC0 = k.currency0.toLowerCase() === USDG.toLowerCase();
+  const labelFor = (isUsdg: boolean) => (isUsdg ? "USDG" : symbol);
+  const steps: EngineStep[] = [];
+  for (const [cur, isUsdg] of [[k.currency0, usdgIsC0], [k.currency1, !usdgIsC0]] as const) {
+    const [erc20A, p2] = await Promise.all([
+      client.readContract({ address: cur, abi: erc20Abi, functionName: "allowance", args: [owner, PERMIT2] }),
+      client.readContract({ address: PERMIT2, abi: permit2Abi, functionName: "allowance", args: [owner, cur, POSITION_MANAGER] }),
+    ]);
+    steps.push(...approvalStepsFor(cur, labelFor(isUsdg), erc20A as bigint, BigInt((p2 as readonly [bigint, number, number])[0]), Date.now()));
+  }
+  steps.push({ kind: "mint", description: `Open a ±${ENGINE_WIDTH_PCT / 2}% ${symbol} range`, to: plan.tx.to, data: plan.tx.data, value: "0" });
+
+  return {
+    ok: true,
+    kind: "engine-open",
+    chainId: 4663,
+    symbol,
+    widthPct: ENGINE_WIDTH_PCT,
+    tickLower: plan.tickLower,
+    tickUpper: plan.tickUpper,
+    steps,
+    note: "Opens a concentrated range with Merd's own engine math, on your wallet. You sign every step; Meridian never holds your funds.",
+  };
 }
 
 /**
@@ -497,6 +661,17 @@ export async function discoverOwnedPositions(wallet: Address): Promise<ChainPosi
 export async function lpPositionsWithValue(): Promise<LpPositionValue[]> {
   const wallet = getAgentAddress();
   if (!wallet) return [];
+  return positionsWithValueFor(wallet);
+}
+
+/**
+ * ONE BRAIN: the same discovery + marking, for ANY wallet. The desk's book
+ * view above is this with the desk's own address; the engine API serves a
+ * gated user their positions through the identical code path. Cost-basis
+ * metadata comes from the desk's file registry and simply never matches a
+ * user's tokenIds, which is correct: we do not hold their history.
+ */
+export async function positionsWithValueFor(wallet: Address): Promise<LpPositionValue[]> {
   const positions = await discoverOwnedPositions(wallet);
   const meta = new Map(openPositions().map((p) => [String(p.tokenId), p]));
 
@@ -650,6 +825,69 @@ export async function uncollectedFeesUsd(p: LpPositionRecord): Promise<number> {
   return (usdgIs0 ? fee0 : fee1) / 1e6 + ((usdgIs0 ? fee1 : fee0) / 1e18) * tokenUsd;
 }
 
+/**
+ * ONE BRAIN. PURE: the decrease-and-take calldata both the desk and a gated
+ * self-serve user execute. liquidity 0n collects fees only (a decrease of
+ * nothing still sweeps what is owed); the position's full liquidity closes it.
+ * The recipient is whoever owns the position: the desk signs this for its own
+ * book, the engine API returns the same bytes unsigned for the user's wallet,
+ * so the two paths can never drift.
+ */
+export function computeDecreasePlan(args: {
+  currency0: Address;
+  currency1: Address;
+  tokenId: string;
+  liquidity: bigint;
+  recipient: Address;
+  nowMs: number;
+}): { unlockData: Hex; deadline: bigint; tx: { to: Address; data: Hex; value: bigint } } {
+  const decreaseParams = encodeAbiParameters(
+    parseAbiParameters("uint256, uint256, uint128, uint128, bytes"),
+    [BigInt(args.tokenId), args.liquidity, 0n, 0n, "0x"],
+  );
+  const takeParams = encodeAbiParameters(parseAbiParameters("address, address, address"), [args.currency0, args.currency1, args.recipient]);
+  const actions = encodePacked(["bytes1", "bytes1"], [DECREASE_LIQUIDITY, TAKE_PAIR]);
+  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, [decreaseParams, takeParams]]);
+  const deadline = BigInt(Math.floor(args.nowMs / 1000) + 300);
+  return {
+    unlockData,
+    deadline,
+    tx: {
+      to: POSITION_MANAGER,
+      data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
+      value: 0n,
+    },
+  };
+}
+
+/** The position NFT's current owner, from chain. The engine API builds plans
+ *  only for positions the requesting wallet actually owns. */
+export async function ownerOfPosition(tokenId: string): Promise<Address> {
+  return (await getPublicClient().readContract({
+    address: POSITION_MANAGER,
+    abi: [parseAbiItem("function ownerOf(uint256) view returns (address)")],
+    functionName: "ownerOf",
+    args: [BigInt(tokenId)],
+  })) as Address;
+}
+
+/** One position's pool key + live liquidity, straight from chain by tokenId. */
+export async function positionOnChain(tokenId: string): Promise<{ currency0: Address; currency1: Address; liquidity: bigint; symbol: string }> {
+  const client = getPublicClient();
+  const [liq, poolAndInfo] = await Promise.all([
+    client.readContract({ address: POSITION_MANAGER, abi: liqByIdAbi, functionName: "getPositionLiquidity", args: [BigInt(tokenId)] }),
+    client.readContract({ address: POSITION_MANAGER, abi: poolAndInfoAbi, functionName: "getPoolAndPositionInfo", args: [BigInt(tokenId)] }),
+  ]);
+  const [poolKey] = poolAndInfo;
+  const stock = [poolKey.currency0, poolKey.currency1].find((c) => c.toLowerCase() !== USDG.toLowerCase()) ?? poolKey.currency1;
+  return {
+    currency0: poolKey.currency0,
+    currency1: poolKey.currency1,
+    liquidity: liq as bigint,
+    symbol: SYMBOL_BY_TOKEN[stock.toLowerCase()] ?? stock,
+  };
+}
+
 export async function collectFees(params: { tokenId: string; symbol: string }): Promise<{ txHash: Hex; usdgCollected: number; tokenCollected: number }> {
   const k = poolKeyOf(params.symbol);
   const signer = getAgentSigner()!;
@@ -657,19 +895,10 @@ export async function collectFees(params: { tokenId: string; symbol: string }): 
   const bal = (t: Address) => client.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] });
   const [usdgBefore, tokenBefore] = await Promise.all([bal(USDG), bal(k.token)]);
 
-  const decreaseParams = encodeAbiParameters(
-    parseAbiParameters("uint256, uint256, uint128, uint128, bytes"),
-    [BigInt(params.tokenId), 0n, 0n, 0n, "0x"], // 0 liquidity removed → only fees move
-  );
-  const takeParams = encodeAbiParameters(parseAbiParameters("address, address, address"), [k.currency0, k.currency1, signer.address]);
-  const actions = encodePacked(["bytes1", "bytes1"], [DECREASE_LIQUIDITY, TAKE_PAIR]);
-  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, [decreaseParams, takeParams]]);
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  // ONE BRAIN: liquidity 0n removes nothing and sweeps only the owed fees.
+  const plan = computeDecreasePlan({ currency0: k.currency0, currency1: k.currency1, tokenId: params.tokenId, liquidity: 0n, recipient: signer.address, nowMs: Date.now() });
   const wallet = getWalletClient();
-  const hash = await wallet.sendTransaction({
-    to: POSITION_MANAGER,
-    data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
-  });
+  const hash = await wallet.sendTransaction({ to: plan.tx.to, data: plan.tx.data });
   const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`collect reverted: ${hash}`);
 
@@ -757,19 +986,11 @@ export async function withdrawPosition(params: { tokenId: string; symbol: string
   const client = getPublicClient();
   const bal = (t: Address) => client.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] });
   const usdgBefore = await bal(USDG);
-  const decreaseParams = encodeAbiParameters(
-    parseAbiParameters("uint256, uint256, uint128, uint128, bytes"),
-    [BigInt(params.tokenId), BigInt(params.liquidity), 0n, 0n, "0x"],
-  );
-  const takeParams = encodeAbiParameters(parseAbiParameters("address, address, address"), [k.currency0, k.currency1, signer.address]);
-  const actions = encodePacked(["bytes1", "bytes1"], [DECREASE_LIQUIDITY, TAKE_PAIR]);
-  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, [decreaseParams, takeParams]]);
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  // ONE BRAIN: full-liquidity decrease closes the position; same builder the
+  // engine API hands unsigned to a self-serve user closing their own band.
+  const plan = computeDecreasePlan({ currency0: k.currency0, currency1: k.currency1, tokenId: params.tokenId, liquidity: BigInt(params.liquidity), recipient: signer.address, nowMs: Date.now() });
   const wallet = getWalletClient();
-  const hash = await wallet.sendTransaction({
-    to: POSITION_MANAGER,
-    data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
-  });
+  const hash = await wallet.sendTransaction({ to: plan.tx.to, data: plan.tx.data });
   const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`withdraw reverted: ${hash}`);
   appendLedger("lp-positions.jsonl", { tokenId: params.tokenId, closedAt: Date.now(), txHash: hash });

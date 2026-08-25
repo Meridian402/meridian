@@ -82,6 +82,8 @@ import { knobsState, setKnob } from "./platformKnobs.js";
 import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
+import { planOpenSteps, ENGINE_SYMBOLS, positionsWithValueFor, ownerOfPosition, positionOnChain, computeDecreasePlan } from "./venues/lpPositions.js";
+import { hasEngineAccess } from "./engine/access.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
 import { sellSymbolsOrEnqueue, pendingSellsNow, enqueuePendingSell } from "./pendingSells.js";
 import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
@@ -89,7 +91,7 @@ import { readAttributionRows, aggregateAttribution, printAttributionReport } fro
 import { runAttributionBackfill } from "./attributionBackfill.js";
 import { submitProposal, previewProposal, listProposals, getProposal, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
 import { INTEGRATION_DOC } from "./integrationDoc.js";
-import { startDumpWatch, dumpWatchState } from "./dumpWatch.js";
+import { startDumpWatch, dumpWatchState, bleedWatchState } from "./dumpWatch.js";
 import { startDailyReconcile, dailyReconcileState } from "./dailyReconcile.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
@@ -2223,7 +2225,8 @@ app.get("/api/dump-watch", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.json({
     readings: dumpWatchState(),
-    note: "Leading sell-flow signal over held seat pools: recent sell-share, sell-volume acceleration, and price velocity. 'pressure' fires only when selling is dominant AND accelerating AND price is rolling over. Alert-only; it does not move funds (absorbed selling is a common false positive).",
+    bleed: bleedWatchState(),
+    note: "Two layers, both alert-only. 'readings' is the minutes-scale sharp-dump signal: pressure fires only when selling is dominant AND accelerating AND price is rolling over (absorbed selling is a common false positive). 'bleed' is the hours-scale grind signal: bleeding fires on a sustained drawdown from the window peak with mostly-negative steps and sellers persistently present — the pattern the sharp signal deliberately skips. Neither moves funds.",
   });
 });
 
@@ -2431,6 +2434,154 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
     res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }
 });
+
+// ---------------------------------------------------------------------------
+// SELF-SERVE ENGINE (non-custodial, gated). These differ from /api/lp-open
+// (operator-only, house book): they are wallet-authenticated (SIWE) and
+// access-gated (stake / Meridian / tokenized agent), and they NEVER sign — they
+// return unsigned steps the user signs from their OWN wallet. Zero fund risk to
+// the house desk; a gated user runs the same engine math on their own capital.
+// ---------------------------------------------------------------------------
+app.options("/api/engine/access", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/engine/access", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  try {
+    // A Meridian holder points at the seat to verify (?seatId=N) until the
+    // contract grows its per-owner active view.
+    const access = await hasEngineAccess(address, { seatId: typeof req.query.seatId === "string" ? req.query.seatId : undefined });
+    // Envelope `ok` = the request succeeded; `hasAccess` = the gate verdict.
+    // Keep them separate: a no-access wallet is a successful request, not an error.
+    res.json({ ok: true, hasAccess: access.ok, via: access.via, paths: access.paths, detail: access.detail, pools: ENGINE_SYMBOLS });
+  } catch (err) {
+    console.error("[engine] access check failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: "could not check access — try again shortly" });
+  }
+});
+
+app.options("/api/engine/plan", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post("/api/engine/plan", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  try {
+    const access = await hasEngineAccess(address, { seatId: typeof (req.body ?? {}).seatId === "string" ? (req.body ?? {}).seatId : undefined });
+    if (!access.ok) {
+      res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
+      return;
+    }
+    const symbol = String((req.body ?? {}).symbol ?? "").toUpperCase().trim();
+    const capitalUsd = Number((req.body ?? {}).capitalUsd);
+    const plan = await planOpenSteps({ owner: address as `0x${string}`, symbol, capitalUsd });
+    res.json(plan);
+  } catch (err) {
+    // 400: these are user-facing input problems (bad symbol, too small, missing
+    // a side), not server faults. The message is written to be shown as-is.
+    res.status(400).json({ ok: false, error: err instanceof Error ? err.message : "could not build the plan" });
+  }
+});
+
+// The user's own positions, valued and flagged by the same code that values
+// the desk's book. Advice is honest and stateless: range status and what the
+// position holds, never a pretend copy of the desk's stateful timers.
+app.options("/api/engine/positions", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/engine/positions", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  try {
+    const access = await hasEngineAccess(address, { seatId: typeof (req.body ?? {}).seatId === "string" ? (req.body ?? {}).seatId : undefined });
+    if (!access.ok) {
+      res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
+      return;
+    }
+    const positions = await positionsWithValueFor(address as `0x${string}`);
+    res.json({
+      ok: true,
+      positions: positions.map((p) => ({
+        tokenId: p.tokenId,
+        symbol: p.symbol,
+        valueUsd: p.valueUsd,
+        inRange: p.inRange,
+        usdgAmount: p.usdgAmount,
+        tokenAmount: p.tokenAmount,
+        rangePct: p.rangePct,
+        advice: p.inRange
+          ? "in range and earning; collect anytime"
+          : p.tokenAmount === 0
+            ? "above range: parked in USDG; re-enters if price comes back, or close and reopen"
+            : "below range: holding the token; wait for recovery or close to cash",
+      })),
+    });
+  } catch (err) {
+    console.error("[engine] positions failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: "could not read your positions — try again shortly" });
+  }
+});
+
+// Collect and close, as unsigned steps for a position the wallet OWNS. The
+// ownership check is on-chain (ownerOf), not trust; the calldata comes from
+// the same computeDecreasePlan the desk executes on its own book.
+const ENGINE_TOKENID_RE = /^\d{1,12}$/;
+async function engineDecreaseSteps(address: string, tokenId: string, mode: "collect" | "close"): Promise<Record<string, unknown> | { error: string; status: number }> {
+  const owner = await ownerOfPosition(tokenId).catch(() => null);
+  if (!owner) return { error: "that position does not exist", status: 400 };
+  if (owner.toLowerCase() !== address.toLowerCase()) return { error: "that position is not owned by this wallet", status: 403 };
+  const pos = await positionOnChain(tokenId);
+  const liquidity = mode === "close" ? pos.liquidity : 0n;
+  if (mode === "close" && liquidity === 0n) return { error: "that position holds no liquidity to close", status: 400 };
+  const plan = computeDecreasePlan({ currency0: pos.currency0, currency1: pos.currency1, tokenId, liquidity, recipient: address as `0x${string}`, nowMs: Date.now() });
+  return {
+    ok: true,
+    kind: mode === "close" ? "engine-close" : "engine-collect",
+    chainId: 4663,
+    tokenId,
+    symbol: pos.symbol,
+    steps: [
+      {
+        kind: mode,
+        description: mode === "close" ? `Close ${pos.symbol} #${tokenId} back to your wallet` : `Collect the fees owed on ${pos.symbol} #${tokenId}`,
+        to: plan.tx.to,
+        data: plan.tx.data,
+        value: "0",
+      },
+    ],
+    note:
+      mode === "close"
+        ? "Removes all liquidity and sends both sides, plus any owed fees, to your wallet. You sign it; Meridian never touches your funds."
+        : "Sweeps the fees this position has earned to your wallet. The position stays open and keeps working.",
+  };
+}
+
+for (const mode of ["collect", "close"] as const) {
+  app.options(`/api/engine/${mode}`, (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+  app.post(`/api/engine/${mode}`, async (req: Request, res: Response) => {
+    setWalletCors(res);
+    const address = requireWallet(req, res);
+    if (!address) return;
+    try {
+      const access = await hasEngineAccess(address, { seatId: typeof (req.body ?? {}).seatId === "string" ? (req.body ?? {}).seatId : undefined });
+      if (!access.ok) {
+        res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
+        return;
+      }
+      const tokenId = String((req.body ?? {}).tokenId ?? "").trim();
+      if (!ENGINE_TOKENID_RE.test(tokenId)) {
+        res.status(400).json({ ok: false, error: "tokenId is required" });
+        return;
+      }
+      const out = await engineDecreaseSteps(address, tokenId, mode);
+      if ("error" in out) {
+        res.status(out.status as number).json({ ok: false, error: out.error });
+        return;
+      }
+      res.json(out);
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : "could not build the plan" });
+    }
+  });
+}
 
 app.post("/mcp", async (req: Request, res: Response) => {
   // JSON-RPC batches are refused, because both gates below decide by reading
