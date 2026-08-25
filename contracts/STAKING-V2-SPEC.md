@@ -88,8 +88,11 @@ Someone must place and re-place the ladder as price moves. The manager role
 
 ## Knock-on changes when this ships
 
-- Engine gate: `$250-of-MERD` stake path reads this vault's
-  `withdrawable(account)` instead of v1 `stakedOf` (env swap + one line).
+- Engine gate: the stake path is a CONSTANT amount, 0.25% of the 1B supply
+  (2,500,000 MERD; operator decision 2026-08-26, replacing the earlier $250
+  bar). Supply-denominated: structurally caps stake-path access (~230 wallets
+  max against circulating supply) and the gate reads no price. It reads this
+  vault's `withdrawable(account)` when v2 ships.
 - Site copy: Access card and STAKING.md rewrite ("your stake works MERD's
   own market") and the revenue-share language comes out everywhere.
 - STAKING.md v2 with the same skeptic-proof tone, including: zero volume

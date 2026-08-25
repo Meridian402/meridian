@@ -1,33 +1,30 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { stakeMeetsBar } from "../src/engine/access.js";
+import { stakeMeetsBar, ENGINE_STAKE_MERD } from "../src/engine/access.js";
 
-const MERD = (n: number) => BigInt(Math.round(n * 1e6)) * 10n ** 12n; // n MERD in wei
+const MERD = (n: number) => BigInt(n) * 10n ** 18n;
 
-test("clears the bar when staked value >= $250 at spot", () => {
-  // 100,000 MERD at $0.003 = $300
-  assert.equal(stakeMeetsBar(MERD(100_000), 0.003, 250), true);
-  // exactly at the bar
-  assert.equal(stakeMeetsBar(MERD(250_000), 0.001, 250), true);
+test("the bar is 0.25% of the 1B supply: 2.5M MERD", () => {
+  assert.equal(ENGINE_STAKE_MERD, 2_500_000);
 });
 
-test("fails below the bar", () => {
-  // 50,000 MERD at $0.003 = $150
-  assert.equal(stakeMeetsBar(MERD(50_000), 0.003, 250), false);
+test("clears at and above the bar, purely by amount", () => {
+  assert.equal(stakeMeetsBar(MERD(2_500_000)), true);
+  assert.equal(stakeMeetsBar(MERD(3_000_000)), true);
 });
 
-test("an unknown or zero spot price fails closed, regardless of stake size", () => {
-  assert.equal(stakeMeetsBar(MERD(10_000_000), 0, 250), false);
-  assert.equal(stakeMeetsBar(MERD(10_000_000), NaN, 250), false);
+test("fails below the bar, even by one wei", () => {
+  assert.equal(stakeMeetsBar(MERD(2_499_999)), false);
+  assert.equal(stakeMeetsBar(MERD(2_500_000) - 1n), false);
+  assert.equal(stakeMeetsBar(0n), false);
+});
+
+test("no price input exists: the verdict is identical whatever MERD trades at", () => {
+  const stake = MERD(2_500_000);
+  assert.equal(stakeMeetsBar(stake), stakeMeetsBar(stake));
 });
 
 test("a zero or negative bar fails closed (misconfiguration is not free access)", () => {
-  assert.equal(stakeMeetsBar(MERD(100), 1, 0), false);
-  assert.equal(stakeMeetsBar(MERD(100), 1, -5), false);
-});
-
-test("price moves change the verdict for the same stake", () => {
-  const stake = MERD(100_000);
-  assert.equal(stakeMeetsBar(stake, 0.0024, 250), false); // $240
-  assert.equal(stakeMeetsBar(stake, 0.0026, 250), true); // $260
+  assert.equal(stakeMeetsBar(MERD(10_000_000), 0), false);
+  assert.equal(stakeMeetsBar(MERD(10_000_000), -5), false);
 });

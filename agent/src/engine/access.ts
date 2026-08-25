@@ -14,7 +14,6 @@
 import { parseAbiItem, type Address } from "viem";
 import { getPublicClient } from "../venues/signer.js";
 import { stakingAddress, stakingEnabled } from "../earn/staking.js";
-import { merdUsdSpot } from "../merd/merdSpot.js";
 import { hasGraduatedLaunch } from "../launch/registry.js";
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -78,15 +77,19 @@ function isAllowlisted(wallet: string): boolean {
   return parseAllowlist().has(wallet.toLowerCase());
 }
 
-/** The stake bar, in USD of MERD at the live pool price (operator decision
- *  2026-08-25: $250). Same convention as the earn program's $100 bounty bar. */
-export const ENGINE_STAKE_USD = Number(process.env.ENGINE_STAKE_USD ?? 250);
+/** The stake bar, as a CONSTANT amount of MERD: 0.25% of the 1B supply
+ *  (operator decision 2026-08-26, replacing the earlier $250 bar). Supply-
+ *  denominated on purpose: with a fixed supply the stake path is structurally
+ *  capped (~230 wallets max against circulating supply), exclusivity scales
+ *  with MERD itself, and the gate needs NO price read, so access never flaps
+ *  with the market and there is no spot surface to manipulate. */
+export const ENGINE_STAKE_MERD = Number(process.env.ENGINE_STAKE_MERD ?? 2_500_000);
 
-/** PURE: does a staked MERD balance clear the USD bar at the given spot?
- *  A zero or unknown spot price fails closed on purpose. */
-export function stakeMeetsBar(stakedWei: bigint, merdUsd: number, barUsd = ENGINE_STAKE_USD): boolean {
-  if (!(merdUsd > 0) || !(barUsd > 0)) return false;
-  return (Number(stakedWei) / 1e18) * merdUsd >= barUsd;
+/** PURE: does a staked MERD balance clear the bar? Pure amount comparison,
+ *  no price anywhere. A zero or negative bar fails closed. */
+export function stakeMeetsBar(stakedWei: bigint, barMerd = ENGINE_STAKE_MERD): boolean {
+  if (!(barMerd > 0)) return false;
+  return stakedWei >= BigInt(Math.round(barMerd)) * 10n ** 18n;
 }
 
 async function hasStake(wallet: Address): Promise<boolean> {
@@ -94,16 +97,13 @@ async function hasStake(wallet: Address): Promise<boolean> {
   const addr = stakingAddress();
   if (!addr) return false;
   try {
-    const [staked, spot] = await Promise.all([
-      getPublicClient().readContract({
-        address: addr,
-        abi: [parseAbiItem("function stakedOf(address account) view returns (uint256)")],
-        functionName: "stakedOf",
-        args: [wallet],
-      }) as Promise<bigint>,
-      merdUsdSpot(),
-    ]);
-    return stakeMeetsBar(staked, spot);
+    const staked = (await getPublicClient().readContract({
+      address: addr,
+      abi: [parseAbiItem("function stakedOf(address account) view returns (uint256)")],
+      functionName: "stakedOf",
+      args: [wallet],
+    })) as bigint;
+    return stakeMeetsBar(staked);
   } catch {
     return false; // fail closed
   }
