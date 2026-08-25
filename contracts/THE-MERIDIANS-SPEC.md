@@ -2,12 +2,20 @@
 
 ## AMENDMENT v2 (operator, 2026-08-26) — supersedes the mint ladder and activation sections below
 
-- **The mint ladder is repriced and extended.** Per wallet: mints 1-3 cost
-  $10 each, mint 4 costs $30, mint 5 and EVERY mint after costs $100. No
-  per-wallet cap beyond pricing; the 1,000 supply is the ceiling. There is
-  NO free mint.
-- **Where payments go.** The $10 tier BURNS MERD to the dead address (entry
-  is deflationary). The $30 and $100 tiers PAY THE TREASURY as mint revenue.
+- **The mint ladder is repriced and extended** (v2.1 adds the holder rung,
+  operator 2026-08-26):
+  - **Free rung: 1 per wallet, holder-gated, globally capped at 250 seats.**
+    Requires holding at least ~$30 of MERD at mint, enforced as an
+    owner-repegged MERD amount (`freeMintHoldMerd`), never a price read.
+    The 250 cap bounds the wallet-splitting farm (the hold check is
+    point-in-time and MERD is movable; per-wallet limits alone are weak).
+  - Paid rungs per wallet: mints 1-3 cost $10 each, mint 4 costs $30,
+    mint 5 and EVERY mint after costs $100. The free seat does not consume
+    a paid slot. No per-wallet cap beyond pricing; 1,000 is the ceiling.
+- **Where payments go.** The free rung pays nothing (the hold requirement
+  drives MERD demand instead). The $10 tier BURNS MERD to the dead address
+  (entry is deflationary). The $30 and $100 tiers PAY THE TREASURY as mint
+  revenue.
   Denomination: MERD for all tiers (one asset, one repeg cadence); prices
   remain owner-set MERD amounts re-pegged to dollar targets off-chain, no
   oracle. (ETH for the upper tiers stays an amendable alternative.)
