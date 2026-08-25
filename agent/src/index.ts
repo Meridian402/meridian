@@ -86,6 +86,7 @@ import { planOpenSteps, ENGINE_SYMBOLS, positionsWithValueFor, ownerOfPosition, 
 import { hasEngineAccess } from "./engine/access.js";
 import { prepareLaunchSteps, routerOpen } from "./launch/prepare.js";
 import { registerLaunchFromTx, launchesForWallet, startGraduationWatch } from "./launch/registry.js";
+import { sniffImage, saveLogo, logoDiskPath, logoPublicUrl, contentTypeFor, LOGO_MAX_BYTES } from "./launch/logos.js";
 import { realSellStockForUsdg, isTradable, tradableSymbols } from "./venues/stockPools.js";
 import { sellSymbolsOrEnqueue, pendingSellsNow, enqueuePendingSell } from "./pendingSells.js";
 import { clearPortfolioStandDown, portfolioStoodDown } from "./portfolioBreaker.js";
@@ -2632,6 +2633,50 @@ app.post("/api/launch/register", async (req: Request, res: Response) => {
     console.error("[launch] register failed:", err instanceof Error ? err.message : err);
     res.status(502).json({ ok: false, error: "could not verify the launch — try again shortly" });
   }
+});
+
+// Token logo upload for a launch: signed-in teams post the raw image bytes,
+// we sniff the real type (the header is never trusted), store it content-
+// addressed, and hand back the URL that goes into TokenParams.logo. Serving
+// is public and immutable: the name IS the hash, so cache forever.
+app.options("/api/launch/logo", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.post(
+  "/api/launch/logo",
+  express.raw({ type: ["image/png", "image/jpeg", "image/webp", "application/octet-stream"], limit: LOGO_MAX_BYTES }),
+  (req: Request, res: Response) => {
+    setWalletCors(res);
+    const address = requireWallet(req, res);
+    if (!address) return;
+    const buf: Buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (buf.length === 0) {
+      res.status(400).json({ ok: false, error: "send the image bytes as the request body (png, jpg, or webp)" });
+      return;
+    }
+    const ext = sniffImage(buf);
+    if (!ext) {
+      res.status(400).json({ ok: false, error: "that file is not a png, jpg, or webp" });
+      return;
+    }
+    try {
+      const name = saveLogo(buf, ext);
+      res.json({ ok: true, name, url: logoPublicUrl(name) });
+    } catch (err) {
+      console.error("[launch] logo save failed:", err instanceof Error ? err.message : err);
+      res.status(502).json({ ok: false, error: "could not store the logo — try again shortly" });
+    }
+  },
+);
+
+app.get("/api/launch/logo/:name", (req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const path = logoDiskPath(String(req.params.name ?? ""));
+  if (!path) {
+    res.sendStatus(404);
+    return;
+  }
+  res.setHeader("Content-Type", contentTypeFor(path));
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  res.sendFile(path);
 });
 
 app.options("/api/launch/mine", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
