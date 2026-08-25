@@ -142,6 +142,42 @@ async function hasTokenizedAgent(wallet: Address): Promise<boolean> {
   return hasGraduatedLaunch(wallet);
 }
 
+/** Any seat at all: the LP ENGINE SKILL tier (amendment v2.3, 2026-08-26).
+ *  Every Meridian, engine seat or not, may integrate the engine's planners
+ *  into its OWN agent: the API computes, their wallet signs. Exclusively a
+ *  seat privilege; no other path grants the standalone skill. */
+async function holdsAnySeat(wallet: Address): Promise<boolean> {
+  const addr = meridiansNftAddress();
+  if (!addr) return false;
+  try {
+    const bal = (await getPublicClient().readContract({
+      address: addr,
+      abi: [parseAbiItem("function balanceOf(address owner) view returns (uint256)")],
+      functionName: "balanceOf",
+      args: [wallet],
+    })) as bigint;
+    return bal > 0n;
+  } catch {
+    return false; // fail closed
+  }
+}
+
+/**
+ * The SKILL gate: may this wallet drive the engine's planning endpoints with
+ * its own hands (plan/positions/collect/close, self-signed)? True for any
+ * seat holder, and for every execution-tier wallet (their tier supersets the
+ * skill). The EXECUTION gate below stays the narrow one and fronts anything
+ * Meridian itself runs (the vault, future bounded autonomy).
+ */
+export async function hasEngineSkill(wallet: string): Promise<{ ok: boolean; via: AccessVia | "seat-skill" | null }> {
+  if (!ADDRESS_RE.test(wallet.trim())) return { ok: false, via: null };
+  const w = wallet.trim() as Address;
+  const execution = await hasEngineAccess(w);
+  if (execution.ok) return { ok: true, via: execution.via };
+  if (await holdsAnySeat(w)) return { ok: true, via: "seat-skill" };
+  return { ok: false, via: null };
+}
+
 /**
  * The gate. Reads chain state to decide access; never signs or moves funds.
  * Fails CLOSED on a malformed address, any read error, or a dormant path.

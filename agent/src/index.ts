@@ -83,7 +83,7 @@ import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { planOpenSteps, ENGINE_SYMBOLS, positionsWithValueFor, ownerOfPosition, positionOnChain, computeDecreasePlan } from "./venues/lpPositions.js";
-import { hasEngineAccess } from "./engine/access.js";
+import { hasEngineAccess, hasEngineSkill } from "./engine/access.js";
 import { prepareLaunchSteps, routerOpen, approvedPairs } from "./launch/prepare.js";
 import { registerLaunchFromTx, launchesForWallet, startGraduationWatch } from "./launch/registry.js";
 import { sniffImage, saveLogo, logoDiskPath, logoPublicUrl, contentTypeFor, LOGO_MAX_BYTES } from "./launch/logos.js";
@@ -2451,10 +2451,11 @@ app.get("/api/engine/access", async (req: Request, res: Response) => {
   const address = requireWallet(req, res);
   if (!address) return;
   try {
-    const access = await hasEngineAccess(address);
-    // Envelope `ok` = the request succeeded; `hasAccess` = the gate verdict.
-    // Keep them separate: a no-access wallet is a successful request, not an error.
-    res.json({ ok: true, hasAccess: access.ok, via: access.via, paths: access.paths, detail: access.detail, pools: ENGINE_SYMBOLS });
+    const [access, skill] = await Promise.all([hasEngineAccess(address), hasEngineSkill(address)]);
+    // Envelope `ok` = the request succeeded. Two verdicts ride it: `hasAccess`
+    // is the narrow EXECUTION tier (vault, Meridian-run products); `hasSkill`
+    // is the LP engine skill (self-signed planning endpoints, any seat).
+    res.json({ ok: true, hasAccess: access.ok, via: access.via, paths: access.paths, detail: access.detail, hasSkill: skill.ok, skillVia: skill.via, pools: ENGINE_SYMBOLS });
   } catch (err) {
     console.error("[engine] access check failed:", err instanceof Error ? err.message : err);
     res.status(502).json({ ok: false, error: "could not check access — try again shortly" });
@@ -2467,9 +2468,9 @@ app.post("/api/engine/plan", async (req: Request, res: Response) => {
   const address = requireWallet(req, res);
   if (!address) return;
   try {
-    const access = await hasEngineAccess(address);
-    if (!access.ok) {
-      res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
+    const skill = await hasEngineSkill(address);
+    if (!skill.ok) {
+      res.status(403).json({ ok: false, error: "the LP engine skill requires a Meridian seat, a qualifying stake, or a graduated launch" });
       return;
     }
     const symbol = String((req.body ?? {}).symbol ?? "").toUpperCase().trim();
@@ -2492,9 +2493,9 @@ app.get("/api/engine/positions", async (req: Request, res: Response) => {
   const address = requireWallet(req, res);
   if (!address) return;
   try {
-    const access = await hasEngineAccess(address);
-    if (!access.ok) {
-      res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
+    const skill = await hasEngineSkill(address);
+    if (!skill.ok) {
+      res.status(403).json({ ok: false, error: "the LP engine skill requires a Meridian seat, a qualifying stake, or a graduated launch" });
       return;
     }
     const positions = await positionsWithValueFor(address as `0x${string}`);
@@ -2562,9 +2563,9 @@ for (const mode of ["collect", "close"] as const) {
     const address = requireWallet(req, res);
     if (!address) return;
     try {
-      const access = await hasEngineAccess(address);
-      if (!access.ok) {
-        res.status(403).json({ ok: false, error: "engine access required", detail: access.detail });
+      const skill = await hasEngineSkill(address);
+      if (!skill.ok) {
+        res.status(403).json({ ok: false, error: "the LP engine skill requires a Meridian seat, a qualifying stake, or a graduated launch" });
         return;
       }
       const tokenId = String((req.body ?? {}).tokenId ?? "").trim();

@@ -27,11 +27,16 @@
     executor. On-chain trait assigned by the raffle module; the execution
     gate reads a per-owner view (`hasEngineSeat(address)`) and NOTHING
     weaker. This resolves the raffle-edge open item: the edge IS the engine.
-  - **THE OTHER 980: the engine's mind for their own agents.** Every seat
-    grants its holder's agent the live intelligence Merd trades on (flow
-    scans, LP scores, allocator rankings, the signals feed; natural
-    delivery: seat-gated free access to the priced MCP data tools). Their
-    agents act on Merd's brain with their own hands; no execution surface.
+  - **THE OTHER 980 (v2.3): the LP ENGINE SKILL, exclusively.** Every seat
+    grants its holder the engine's planning endpoints (plan / positions /
+    collect / close, the same one-brain builders the desk runs) for
+    integration into their OWN agent: the API computes, their agent signs
+    with its own wallet. Implemented as a second gate tier
+    (`hasEngineSkill`: any seat, or any execution-tier wallet whose tier
+    supersets it). The standalone skill is reachable ONLY through seats.
+    Plus the intelligence feed (flow scans, scores, rankings; seat-gated
+    MCP data tools). What stays execution-only: everything MERIDIAN runs
+    (the engine vault, future bounded autonomy).
   - The activation mechanic stays REMOVED (v2 stands); the mint burn is the
     price of the seat and its intelligence access, not an execution key.
   - Engine execution population: ~230 stake keys + 20 seats + graduated
