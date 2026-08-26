@@ -1,10 +1,12 @@
 // Daily profit reconciliation (operator policy 2026-08-23): lock the gains,
 // compound deliberately. Fees are collected to cash intraday by the pilot
 // guard and simply HELD — nothing is redeployed on the spot. Once per ET day,
-// this measures the day's REALIZED profit (collected fees, so principal is
-// never touched), skims a fixed share to the treasury where it can never be
-// given back to the game, and compounds the rest into the lighter seat as a
-// single batched top-up. Never intraday, never on principal.
+// this measures the day's REALIZED CASH profit (the USDG side of collected
+// fees only, since 2026-08-26; token-side fees are inventory until sold, and
+// principal is never touched), skims a fixed share to the treasury where it
+// can never be given back to the game, and compounds the rest into the
+// lighter seat as a single batched top-up. Never intraday, never on
+// principal, never on a token mark.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { encodeFunctionData, parseAbiItem } from "viem";
 import { dataPath } from "./dataDir.js";
@@ -71,11 +73,30 @@ export function dailyReconcileState(): State {
   return state;
 }
 
-/** Realized profit since a timestamp = collected fees (never principal). */
-function collectedFeesSince(sinceMs: number): number {
-  return readAttributionRows(sinceMs)
+/**
+ * PURE: realized CASH profit across attribution rows = the USDG side of
+ * collected fees. Exported for tests.
+ *
+ * Deliberately NOT feeUsd. feeUsd is the income truth (both sides valued at
+ * collection-time price), and during a bleed that books depreciating token
+ * fees as skimmable profit: measured live 2026-08-26, a "$217 profit" day
+ * whose real cash earning was ~$18 shipped ~$109 of working USDG to the
+ * treasury and deployed ~$109 more. usdOut is the cash truth, USDG that
+ * actually landed in the wallet. Token-side fees stay inventory until a sell
+ * row cashes them, and are never skimmed or compounded from here.
+ */
+export function cashCollectedSince(
+  rows: { ts: number; mech?: string; backfilled?: boolean; usdOut: number }[],
+  sinceMs: number,
+): number {
+  return rows
     .filter((r) => r.mech === "collect" && !r.backfilled && r.ts > sinceMs)
-    .reduce((s, r) => s + (r.feeUsd || 0), 0);
+    .reduce((s, r) => s + (r.usdOut || 0), 0);
+}
+
+/** Realized cash profit since a timestamp (never principal, never token marks). */
+function collectedFeesSince(sinceMs: number): number {
+  return cashCollectedSince(readAttributionRows(sinceMs), sinceMs);
 }
 
 /** Lightest held hands-off seat symbol, to compound into and keep the book balanced. */
