@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { parseAbiItem, type Hex } from "viem";
 import { getScanClient } from "./venues/signer.js";
 import { usdgPoolIdFor, tokenIsCurrency0 } from "./venues/stockPools.js";
-import { openPositionsOnChain } from "./venues/lpPositions.js";
+import { openPositionsOnChain, ENGINE_SYMBOLS } from "./venues/lpPositions.js";
 import { appendLedger } from "./ledger.js";
 import { dataPath } from "./dataDir.js";
 
@@ -252,7 +252,15 @@ async function scanSymbol(symbol: string): Promise<DumpReading | null> {
 async function tick(): Promise<void> {
   try {
     const positions = await openPositionsOnChain();
-    const symbols = [...new Set(positions.map((p) => p.symbol.toUpperCase()))].filter((s) => usdgPoolIdFor(s));
+    // Coverage follows the WATCHLIST, not the wallet: exiting a pool must not
+    // blind the detector for it, because flat-and-deciding-to-re-enter is
+    // exactly when the bleed reading matters most (measured 2026-08-26: the
+    // guard exited all CASHCAT seats overnight and the bleed series went
+    // dark while our re-entry trigger depended on it).
+    const symbols = [...new Set([
+      ...positions.map((p) => p.symbol.toUpperCase()),
+      ...ENGINE_SYMBOLS,
+    ])].filter((s) => usdgPoolIdFor(s));
     for (const s of symbols) {
       try {
         const r = await scanSymbol(s);
