@@ -14,8 +14,8 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync } from "node:fs
 import { decodeEventLog, type Address, type Hex } from "viem";
 import { dataPath } from "../dataDir.js";
 import { getPublicClient } from "../venues/signer.js";
-import { TREASURY_WALLET } from "../merd/wallets.js";
-import { PONS_V2, factoryAbi, splitterAbi, isGraduated } from "./ponsV2.js";
+import { PONS_V2, factoryAbi, splitterAbi, splitterFactoryAbi, isGraduated } from "./ponsV2.js";
+import { splitterFactoryAddress } from "./prepare.js";
 
 const REGISTRY_PATH = dataPath("agent-launches.jsonl");
 const WATCH_MS = Number(process.env.MERIDIAN_LAUNCH_WATCH_MS ?? 5 * 60_000);
@@ -102,19 +102,26 @@ export async function registerLaunchFromTx(txHash: Hex, teamWallet: Address): Pr
   }
   if (load().has(launched.token.toLowerCase())) return { ok: false, error: "that launch is already registered" };
 
-  // The launch must route its fee stream through a Meridian splitter: the
-  // recipient contract's treasury() must be our treasury and its team() the
-  // registering wallet. Read, not trusted.
+  // The launch must route its fee stream through a REAL Meridian splitter.
+  // Identity comes from PROVENANCE, not self-report: we ask our own factory
+  // whether it deployed this recipient. A look-alike contract can return our
+  // treasury from a treasury() getter while routing 100% of fees to the
+  // attacker; only factory.isSplitter() can tell the genuine article apart,
+  // because only the factory's create() writes it. Fails closed if the router
+  // isn't armed (no factory address) — an unverifiable recipient is rejected.
   const info = await client.readContract({ address: PONS_V2.factory, abi: factoryAbi, functionName: "getLaunchedToken", args: [launched.token] });
   const recipient = info.creatorFeeRecipient;
-  const [splitTeam, splitTreasury] = await Promise.all([
-    client.readContract({ address: recipient, abi: splitterAbi, functionName: "team" }).catch(() => null),
-    client.readContract({ address: recipient, abi: splitterAbi, functionName: "treasury" }).catch(() => null),
-  ]);
-  if (!splitTeam || !splitTreasury) return { ok: false, error: "the launch's fee recipient is not a Meridian splitter" };
-  if (splitTreasury.toLowerCase() !== TREASURY_WALLET.toLowerCase()) {
-    return { ok: false, error: "the launch's splitter does not pay the Meridian treasury" };
-  }
+  const factory = splitterFactoryAddress();
+  if (!factory) return { ok: false, error: "the launch router is not armed (no splitter factory configured)" };
+  const genuine = await client
+    .readContract({ address: factory, abi: splitterFactoryAbi, functionName: "isSplitter", args: [recipient] })
+    .catch(() => false);
+  if (!genuine) return { ok: false, error: "the launch's fee recipient was not deployed by the Meridian splitter factory" };
+  // Now that provenance is established (bytecode is our splitter, treasury is
+  // pinned to ours by the factory, ROUTER_BPS is compiled in), team() is the
+  // only remaining fact to bind: this launch's splitter must pay THIS wallet.
+  const splitTeam = await client.readContract({ address: recipient, abi: splitterAbi, functionName: "team" }).catch(() => null);
+  if (!splitTeam) return { ok: false, error: "the launch's fee recipient is not a Meridian splitter" };
   if (splitTeam.toLowerCase() !== teamWallet.toLowerCase()) {
     return { ok: false, error: "the launch's splitter is not set to this team" };
   }

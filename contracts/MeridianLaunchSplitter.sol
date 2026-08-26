@@ -121,6 +121,15 @@ contract MeridianSplitterFactory {
     address public immutable treasury;
     address public immutable escrow;
 
+    /// PROVENANCE. True for every splitter this factory deployed, and only
+    /// those. The launch registry checks this on-chain to decide whether a
+    /// launch's creatorFeeRecipient is a real Meridian splitter. An attacker
+    /// can deploy a look-alike contract whose team()/treasury() getters LIE
+    /// (returning the real treasury while routing 100% to themselves), and no
+    /// getter read can tell it apart; this mapping can, because only create()
+    /// writes it. Identity must come from provenance, never self-report.
+    mapping(address => bool) public isSplitter;
+
     event SplitterCreated(address indexed team, bytes32 indexed salt, address splitter);
 
     error ZeroAddress();
@@ -135,6 +144,7 @@ contract MeridianSplitterFactory {
         splitter = address(
             new MeridianLaunchSplitter{salt: keccak256(abi.encode(team, salt))}(team, treasury, escrow)
         );
+        isSplitter[splitter] = true;
         emit SplitterCreated(team, salt, splitter);
     }
 

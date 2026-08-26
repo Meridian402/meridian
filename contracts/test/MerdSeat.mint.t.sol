@@ -186,26 +186,59 @@ contract MerdSeatMintTest is Test {
         vm.stopPrank();
     }
 
+    /// Arm the raffle and roll past the entropy block so a reveal is valid.
+    function _armAndRoll(MerdSeat tiny) internal {
+        tiny.armRaffle();
+        vm.roll(block.number + tiny.REVEAL_DELAY() + 1);
+    }
+
     function test_raffle_commit_is_one_shot() public {
         seat.commitRaffle(keccak256("c"));
         vm.expectRevert(MerdSeat.RaffleAlreadyCommitted.selector);
         seat.commitRaffle(keccak256("c2"));
     }
 
-    function test_raffle_cannot_reveal_before_sellout() public {
+    function test_raffle_cannot_arm_before_mint_is_done() public {
         seat.commitRaffle(keccak256(abi.encodePacked(bytes32("salt"))));
-        vm.expectRevert(MerdSeat.RaffleBeforeSellout.selector);
+        seat.setMintOpen(true); // open, not sold out
+        vm.expectRevert(MerdSeat.RaffleMintNotDone.selector);
+        seat.armRaffle();
+    }
+
+    function test_raffle_cannot_arm_without_enough_public_seats() public {
+        seat.commitRaffle(keccak256(abi.encodePacked(bytes32("salt"))));
+        seat.setMintOpen(true);
+        vm.startPrank(alice);
+        for (uint256 i = 0; i < 5; i++) seat.mintPaid();
+        vm.stopPrank();
+        seat.setMintOpen(false); // mint done, but only 5 eligible < 20
+        vm.expectRevert(MerdSeat.NotEnoughEligible.selector);
+        seat.armRaffle();
+    }
+
+    function test_raffle_cannot_reveal_before_armed() public {
+        seat.commitRaffle(keccak256(abi.encodePacked(bytes32("salt"))));
+        vm.expectRevert(MerdSeat.RaffleNotArmed.selector);
         seat.revealRaffle(bytes32("salt"));
+    }
+
+    function test_raffle_cannot_reveal_before_the_armed_block() public {
+        MerdSeat tiny = _selloutTiny(25);
+        tiny.armRaffle(); // revealBlock is in the future
+        vm.expectRevert(MerdSeat.RaffleNotReady.selector);
+        tiny.revealRaffle(bytes32("salt"));
     }
 
     function test_raffle_rejects_a_wrong_salt() public {
         MerdSeat tiny = _selloutTiny(25);
+        _armAndRoll(tiny);
         vm.expectRevert(MerdSeat.BadSalt.selector);
         tiny.revealRaffle(bytes32("wrong"));
     }
 
     function test_raffle_draws_twenty_unique_engine_seats() public {
         MerdSeat tiny = _selloutTiny(25);
+        _armAndRoll(tiny);
         tiny.revealRaffle(bytes32("salt"));
         assertTrue(tiny.raffleRevealed());
         uint256 count;
@@ -219,13 +252,38 @@ contract MerdSeatMintTest is Test {
 
     function test_raffle_reveals_once() public {
         MerdSeat tiny = _selloutTiny(25);
+        _armAndRoll(tiny);
         tiny.revealRaffle(bytes32("salt"));
         vm.expectRevert(MerdSeat.RaffleAlreadyRevealed.selector);
         tiny.revealRaffle(bytes32("salt"));
     }
 
+    function test_owner_mints_are_never_raffle_eligible() public {
+        // The pool-stuffing exploit (audit finding 1): the owner free-mints
+        // seats to itself, then genuine public mints happen, and the draw must
+        // NEVER land on the owner's stuffed ids.
+        MerdSeat tiny = new MerdSeat(60, "u/", address(merd), payout);
+        tiny.setPrices(HOLD_BAR, P_ENTRY, P_TIER2, P_TIER3);
+        tiny.commitRaffle(keccak256(abi.encodePacked(bytes32("salt"))));
+        for (uint256 i = 0; i < 30; i++) tiny.mint(bob, 900 + i, "meridian"); // owner stuffs 30
+        tiny.setMintOpen(true);
+        vm.startPrank(alice);
+        merd.approve(address(tiny), type(uint256).max);
+        for (uint256 i = 0; i < 25; i++) tiny.mintPaid(); // 25 genuine public
+        vm.stopPrank();
+        tiny.setMintOpen(false);
+        _armAndRoll(tiny);
+        tiny.revealRaffle(bytes32("salt"));
+        assertEq(tiny.engineSeatsOf(bob), 0, "owner self-mints won nothing");
+        assertEq(tiny.engineSeatsOf(alice), 20, "all twenty went to public minters");
+        for (uint256 id = 900; id < 930; id++) {
+            assertFalse(tiny.isEngineSeat(id), "a stuffed id is never an engine seat");
+        }
+    }
+
     function test_engine_seat_trait_travels_on_transfer() public {
         MerdSeat tiny = _selloutTiny(25);
+        _armAndRoll(tiny);
         tiny.revealRaffle(bytes32("salt"));
         // find one engine seat and one plain seat
         uint256 engineId;

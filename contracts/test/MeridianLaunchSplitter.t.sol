@@ -151,4 +151,19 @@ contract MeridianLaunchSplitterTest is Test {
         vm.expectRevert();
         factory.create(team, salt);
     }
+
+    function test_factory_isSplitter_is_provenance_not_selfreport() public {
+        // The forgery the registry must resist (audit finding 2): a look-alike
+        // splitter reporting the real treasury while it is NOT ours.
+        MeridianSplitterFactory factory = new MeridianSplitterFactory(treasury, address(escrow));
+        address real = factory.create(team, keccak256("genuine"));
+        assertTrue(factory.isSplitter(real), "a factory-made splitter is recognized");
+
+        // A hand-deployed splitter with identical getters (team/treasury) is
+        // NOT recognized, because the factory never made it.
+        MeridianLaunchSplitter forged = new MeridianLaunchSplitter(team, treasury, address(escrow));
+        assertEq(forged.treasury(), treasury, "the forgery's getter LIES convincingly");
+        assertFalse(factory.isSplitter(address(forged)), "but provenance exposes it");
+        assertFalse(factory.isSplitter(address(0xdead)), "and an arbitrary address is not a splitter");
+    }
 }

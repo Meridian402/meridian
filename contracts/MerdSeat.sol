@@ -27,12 +27,23 @@ pragma solidity ^0.8.26;
 // worst case from bytecode. Peer-to-peer transfers are never taxed or
 // blocked here: royalties are a marketplace settlement concern.
 //
-// THE RAFFLE: the operator commits a salt hash before mint opens; after the
-// last seat mints, revealing the salt derives the twenty engine seats from
-// keccak(salt, a reveal-time blockhash). Nobody, including the operator, can
-// know winners while the mint runs. (Auditors: the revealer can time the
-// reveal block; with a pre-committed salt over a 20-of-1000 draw this buys
-// negligible bias, and is accepted in exchange for zero oracle surface.)
+// THE RAFFLE (v2.4 hardened): three steps, trustless within the chain's own
+// block-production assumption.
+//   1. commit  — the operator publishes a salt hash BEFORE mint opens.
+//   2. arm     — once the mint is DONE (sold out or deliberately closed) and
+//                at least ENGINE_SEATS PUBLIC seats exist, anyone locks a
+//                FUTURE block (block.number + REVEAL_DELAY) whose hash will
+//                seed the draw. The entropy block is fixed before the salt is
+//                known, so it cannot be chosen to favor an outcome.
+//   3. reveal  — after the armed block is mined (and within blockhash's 256-
+//                block window), the salt is revealed and the seed is
+//                keccak(salt, blockhash(armedBlock), poolSize). The outcome is
+//                fixed the moment the armed block is mined, so the revealer
+//                cannot grind it by retrying blocks.
+// The draw runs ONLY over publicly-minted seats: owner hand-mints are recorded
+// for supply but are NOT eligible, so the operator cannot stuff the pool with
+// free self-mints. Only the producer of the armed block (the sequencer) could
+// bias the hash, which is the chain's trust assumption, not the operator's.
 //
 // SUPPLY IS SMALL, HONEST, AND CAN ONLY EVER SHRINK (lowerMaxSupply only).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,7 +116,12 @@ contract MerdSeat {
     error RaffleAlreadyCommitted();
     error RaffleNotCommitted();
     error RaffleAlreadyRevealed();
-    error RaffleBeforeSellout();
+    error RaffleMintNotDone();
+    error NotEnoughEligible();
+    error RaffleAlreadyArmed();
+    error RaffleNotArmed();
+    error RaffleNotReady();
+    error RaffleExpired();
     error BadSalt();
 
     modifier onlyOwner() {
@@ -208,9 +224,13 @@ contract MerdSeat {
     uint256 public totalBurnedForMints;
     uint256 public totalPaidToTreasury;
     uint256 public nextId = 1;
-    /// Every minted id, in order: the raffle draws over this, so ids minted by
-    /// hand at arbitrary numbers are inside the draw like everything else.
+    /// Every minted id, in order (owner hand-mints included): supply bookkeeping
+    /// and mintedCount() read this.
     uint256[] private _allIds;
+    /// PUBLIC mints only (holder rung + paid ladder). The raffle draws over
+    /// THIS, never _allIds, so owner hand-mints can never be stuffed into the
+    /// draw to capture engine seats.
+    uint256[] private _raffleEligible;
 
     event PublicMint(uint256 indexed id, address indexed to, uint256 rung, uint256 pricePaid, bool burned);
     event MintOpenSet(bool open);
@@ -287,6 +307,7 @@ contract MerdSeat {
         }
         _ownerOf[id] = msg.sender;
         _allIds.push(id);
+        _raffleEligible.push(id); // public mints are the ONLY raffle-eligible ids
         roleOf[id] = "meridian";
         emit Transfer(address(0), msg.sender, id);
         emit SeatMinted(id, msg.sender, "meridian");
@@ -297,12 +318,18 @@ contract MerdSeat {
     // ── the raffle: twenty direct seats, provably blind ──────────────────────
 
     uint256 public constant ENGINE_SEATS = 20;
+    /// Blocks between arming and the earliest reveal: the entropy block sits in
+    /// the future at arm time, so its hash cannot be known when it is chosen.
+    uint256 public constant REVEAL_DELAY = 5;
     bytes32 public raffleCommit;
     bool public raffleRevealed;
+    /// The armed future block whose hash seeds the draw (0 = not armed).
+    uint256 public revealBlock;
     mapping(uint256 => bool) public isEngineSeat;
     mapping(address => uint256) public engineSeatsOf;
 
     event RaffleCommitted(bytes32 commit);
+    event RaffleArmed(uint256 revealBlock);
     event RaffleRevealed(bytes32 salt, bytes32 seed);
     event EngineSeatDrawn(uint256 indexed id, address indexed holder);
 
@@ -314,22 +341,41 @@ contract MerdSeat {
         emit RaffleCommitted(commit);
     }
 
-    /// After sellout, reveal the committed salt and draw the twenty. Callable
-    /// by anyone holding the salt (in practice the operator), so the reveal
-    /// itself needs no trust in who sends it.
+    /// Step 2: lock the entropy block. Callable by anyone (the reveal still
+    /// needs the salt) once the mint is DONE — sold out or deliberately closed
+    /// — and enough PUBLIC seats exist to draw from. Fixes revealBlock to a
+    /// future block so its hash is unknowable now; re-armable only if a prior
+    /// arming's reveal window fully lapsed unrevealed (liveness safeguard).
+    function armRaffle() external {
+        if (raffleCommit == bytes32(0)) revert RaffleNotCommitted();
+        if (raffleRevealed) revert RaffleAlreadyRevealed();
+        if (mintOpen && totalSupply < maxSupply) revert RaffleMintNotDone();
+        if (_raffleEligible.length < ENGINE_SEATS) revert NotEnoughEligible();
+        if (revealBlock != 0 && block.number <= revealBlock + 256) revert RaffleAlreadyArmed();
+        revealBlock = block.number + REVEAL_DELAY;
+        emit RaffleArmed(revealBlock);
+    }
+
+    /// Step 3: after the armed block is mined (within blockhash's 256-block
+    /// window), reveal the salt and draw the twenty over the PUBLIC pool. The
+    /// seed is fixed by the armed block's hash, so the outcome does not depend
+    /// on who reveals or when — no per-block grinding. If the window lapsed,
+    /// re-arm and try again.
     function revealRaffle(bytes32 salt) external {
         if (raffleCommit == bytes32(0)) revert RaffleNotCommitted();
         if (raffleRevealed) revert RaffleAlreadyRevealed();
-        if (totalSupply < maxSupply) revert RaffleBeforeSellout();
+        if (revealBlock == 0) revert RaffleNotArmed();
+        if (block.number <= revealBlock) revert RaffleNotReady();
+        if (block.number > revealBlock + 256) revert RaffleExpired();
         if (keccak256(abi.encodePacked(salt)) != raffleCommit) revert BadSalt();
         raffleRevealed = true;
-        bytes32 seed = keccak256(abi.encodePacked(salt, blockhash(block.number - 1), totalSupply));
+        uint256 pool = _raffleEligible.length;
+        bytes32 seed = keccak256(abi.encodePacked(salt, blockhash(revealBlock), pool));
         emit RaffleRevealed(salt, seed);
         uint256 drawn;
         uint256 k;
-        uint256 pool = _allIds.length;
         while (drawn < ENGINE_SEATS && drawn < pool) {
-            uint256 id = _allIds[uint256(keccak256(abi.encodePacked(seed, k))) % pool];
+            uint256 id = _raffleEligible[uint256(keccak256(abi.encodePacked(seed, k))) % pool];
             k++;
             if (isEngineSeat[id]) continue;
             isEngineSeat[id] = true;

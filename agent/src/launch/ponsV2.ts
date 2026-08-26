@@ -43,6 +43,9 @@ export const factoryAbi = parseAbi([
 export const splitterFactoryAbi = parseAbi([
   "function create(address team, bytes32 salt) returns (address splitter)",
   "function predict(address team, bytes32 salt) view returns (address)",
+  // Provenance: only create() sets this, so it is the trustworthy answer to
+  // "did OUR factory make this splitter?" — unlike the splitter's own getters.
+  "function isSplitter(address) view returns (bool)",
 ]);
 
 export const splitterAbi = parseAbi([
