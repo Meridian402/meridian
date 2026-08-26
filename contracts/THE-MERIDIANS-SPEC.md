@@ -1,5 +1,31 @@
 # The Meridians — locked specification
 
+## AMENDMENT v2.5 (2026-08-26) — raffle hardened after the internal audit
+
+Supersedes the raffle mechanics wherever they differ below. Closes the two
+high-severity findings the internal adversarial audit raised against the draw:
+
+- **The draw runs only over PUBLIC mints.** The eligible set is populated by
+  the holder rung and the paid ladder, never by the owner `mint()` hand-mint
+  path. This kills pool-stuffing: the operator can no longer free-mint seats to
+  itself, drop them into the raffle pool, and capture engine seats. Owner
+  hand-mints still count toward supply and `mintedCount()`, but are never
+  raffle-eligible.
+- **Reveal is two steps: arm, then reveal.** After the mint is DONE (sold out
+  or deliberately closed) with at least `ENGINE_SEATS` public seats, anyone
+  calls `armRaffle()`, which locks a FUTURE block (`block.number + REVEAL_DELAY`)
+  whose hash seeds the draw. After that block is mined (within blockhash's
+  256-block window), `revealRaffle(salt)` derives the seed from
+  `keccak(salt, blockhash(armedBlock), poolSize)`. Because the entropy block is
+  fixed before the salt is known and the outcome is fixed the moment that block
+  is mined, the revealer cannot grind the result by retrying blocks, and
+  `lowerMaxSupply` can no longer be used to synthesize a sellout that changes
+  who wins. Re-armable only if a prior arming's reveal window fully lapsed.
+- **Residual trust:** only the producer of the armed block (the chain's
+  sequencer) could bias its hash. That is the chain's trust assumption, not the
+  operator's, and is the boundary the external audit should weigh. The external
+  audit remains a hard invariant before any mint.
+
 ## AMENDMENT v2 (operator, 2026-08-26) — supersedes the mint ladder and activation sections below
 
 - **The mint ladder is repriced and extended** (v2.1 adds the holder rung,
