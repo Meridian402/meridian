@@ -57,7 +57,7 @@ contract MerdSeatStackTest is Test {
     address NATIVE;
 
     function setUp() public {
-        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18, address(0xFEE));
+        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, address(0xFEE));
         seat.mint(alice, SEAT_ID, "venue-maker");
 
         // The canonical registry deploys the implementation as a proxy that
@@ -234,7 +234,7 @@ contract MerdSeatRegistryTest is Test {
     address constant TREASURY = address(0x7EA5);
 
     function setUp() public {
-        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, 1_000_000e18, address(0xFEE));
+        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, address(0xFEE));
         seat.mint(alice, 1, "launch");
     }
 
@@ -309,83 +309,35 @@ contract MockMerd {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Activation: the entry only gets the engine while it is active, activation
-// burns MERD, and transferring clears it. The point of the last part is that
-// every secondary sale burns AGAIN, so trading the asset shrinks the token
-// supply rather than just moving the asset around.
+// v2.4: there is no activation. A seat is fully itself from mint to resale;
+// nothing lapses on transfer, and the registry works for any holder. The
+// engine-seat trait (raffle) is covered in MerdSeat.mint.t.sol.
 // ─────────────────────────────────────────────────────────────────────────────
-contract MerdSeatActivationTest is Test {
+contract MerdSeatTransferSemanticsTest is Test {
     MerdSeat seat;
     MockMerd merd;
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
-    address constant DEAD = 0x000000000000000000000000000000000000dEaD;
-    uint256 constant FEE = 1_000_000e18;
 
     function setUp() public {
         merd = new MockMerd();
-        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", address(merd), FEE, address(0xFEE));
+        seat = new MerdSeat(1000, "https://meridian402.xyz/seat/", address(merd), address(0xFEE));
         seat.mint(alice, 1, "desk");
-        merd.mint(alice, 5_000_000e18);
-        merd.mint(bob, 5_000_000e18);
     }
 
-    function test_activation_burns_merd_and_turns_the_engine_on() public {
-        assertFalse(seat.isActive(1));
-        vm.prank(alice);
-        seat.activate(1);
-        assertTrue(seat.isActive(1), "the engine reads this");
-        assertEq(merd.balanceOf(DEAD), FEE, "the burn is a fact of the activation");
-        assertEq(seat.totalBurnedForActivation(), FEE);
-    }
-
-    /// The mechanic worth having: a sale forces a second burn.
-    function test_every_sale_forces_another_burn() public {
-        vm.prank(alice);
-        seat.activate(1);
+    function test_nothing_lapses_on_transfer() public {
         vm.prank(alice);
         seat.transferFrom(alice, bob, 1);
-        assertFalse(seat.isActive(1), "activation does not travel with the asset");
-
-        vm.prank(bob);
-        seat.activate(1);
-        assertEq(merd.balanceOf(DEAD), 2 * FEE, "the buyer burns again");
-        assertEq(seat.totalBurnedForActivation(), 2 * FEE);
-    }
-
-    function test_cannot_double_activate_to_burn_less_later() public {
-        vm.startPrank(alice);
-        seat.activate(1);
-        vm.expectRevert(MerdSeat.AlreadyActive.selector);
-        seat.activate(1);
-        vm.stopPrank();
-    }
-
-    function test_only_the_holder_can_activate() public {
-        vm.prank(bob);
-        vm.expectRevert(MerdSeat.NotHolder.selector);
-        seat.activate(1);
-    }
-
-    /// Inactive is not confiscation. The holder still owns the entry and can
-    /// still record it; what lapses is the service, not the asset.
-    function test_going_inactive_costs_the_service_not_the_asset() public {
-        vm.prank(alice);
-        seat.activate(1);
-        vm.prank(alice);
-        seat.transferFrom(alice, bob, 1);
-        assertEq(seat.ownerOf(1), bob, "the asset is still fully owned");
+        assertEq(seat.ownerOf(1), bob, "the asset transfers whole");
+        assertFalse(seat.hasEngineSeat(bob), "no raffle has run; no seat is an engine seat");
         vm.prank(bob);
         seat.register(1, address(0x7EA5), address(0));
         (, address treasury,) = seat.entryOf(1);
-        assertEq(treasury, address(0x7EA5), "an inactive entry is still a real entry");
+        assertEq(treasury, address(0x7EA5), "the buyer registers like any holder");
     }
 
-    function test_a_zero_fee_still_activates() public {
-        seat.setActivationFee(0);
-        vm.prank(alice);
-        seat.activate(1);
-        assertTrue(seat.isActive(1));
-        assertEq(merd.balanceOf(DEAD), 0);
+    function test_no_engine_seats_exist_before_the_raffle() public view {
+        assertFalse(seat.isEngineSeat(1));
+        assertFalse(seat.hasEngineSeat(alice));
     }
 }
