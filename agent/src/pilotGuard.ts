@@ -25,7 +25,7 @@ import { enqueuePendingSell, retryPendingSells, sellSymbolsOrEnqueue } from "./p
 import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
-import { venueEarnsAdmission, venueFeeUsd24h } from "./attribution.js";
+import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
 
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
@@ -310,6 +310,14 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
   const realized = venueEarnsAdmission("usdg", p.symbol, venueOpenUsd + fees);
   if (!realized.ok) {
     console.error(`[pilotGuard] re-center of ${p.symbol} refused by its own record: ${realized.reason}`);
+    return;
+  }
+  // THE CHURN-CYCLE BRAKE: the 7-day floor above is too slow to catch a run of
+  // small losing recenters within a single evening. This looks at just the
+  // last few cycles, not the last week.
+  const churn = venueChurnAdmits("usdg", p.symbol);
+  if (!churn.ok) {
+    console.error(`[pilotGuard] re-center of ${p.symbol} refused by the churn brake: ${churn.reason}`);
     return;
   }
   const budget = p.valueUsd + fees;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregateAttribution, gasUsdOf, type AttributionRow } from "../src/attribution.js";
+import { aggregateAttribution, gasUsdOf, churnCycleAdmits, type AttributionRow } from "../src/attribution.js";
 
 const row = (over: Partial<AttributionRow>): AttributionRow => ({
   ts: 1_787_000_000_000,
@@ -79,4 +79,73 @@ test("empty window aggregates to clean zeros", () => {
   assert.equal(venues.length, 0);
   assert.equal(totals.netUsd, 0);
   assert.equal(totals.ops, 0);
+});
+
+// THE CHURN-CYCLE BRAKE: a run of small losing recenters must be caught
+// within hours, not wait out the slower 7-day realized floor.
+test("churn brake: fewer cycles than the threshold always admits", () => {
+  const rows = [
+    row({ mech: "mint", usdIn: 100 }),
+    row({ mech: "recenter-close", usdOut: 90 }), // -10 net, but only 1 cycle
+  ];
+  const v = churnCycleAdmits(rows, "usdg", "PONS", 3, 0);
+  assert.equal(v.ok, true);
+  assert.equal(v.cycles, 1);
+});
+
+test("churn brake: several losing cycles refuse another recenter", () => {
+  const rows = [
+    row({ mech: "mint", usdIn: 100 }),
+    row({ mech: "recenter-close", usdOut: 90 }),
+    row({ mech: "mint", usdIn: 90 }),
+    row({ mech: "recenter-close", usdOut: 80 }),
+    row({ mech: "mint", usdIn: 80 }),
+    row({ mech: "recenter-close", usdOut: 70 }),
+  ];
+  const v = churnCycleAdmits(rows, "usdg", "PONS", 3, 0);
+  assert.equal(v.ok, false, "three cycles that lost $30 net must not get a fourth");
+  assert.equal(v.cycles, 3);
+  assert.equal(v.netUsd, -30);
+});
+
+test("churn brake: the same cycle count but a real net gain still admits", () => {
+  const rows = [
+    row({ mech: "mint", usdIn: 100 }),
+    row({ mech: "recenter-close", usdOut: 100, feeUsd: 5 }),
+    row({ mech: "mint", usdIn: 100 }),
+    row({ mech: "recenter-close", usdOut: 100, feeUsd: 5 }),
+    row({ mech: "mint", usdIn: 100 }),
+    row({ mech: "recenter-close", usdOut: 105, feeUsd: 5 }), // fees genuinely landed as cash
+  ];
+  const v = churnCycleAdmits(rows, "usdg", "PONS", 3, 0);
+  assert.equal(v.ok, true, "three cycles that netted +$5 real cash earned another shot");
+  assert.equal(v.netUsd, 5);
+});
+
+test("churn brake: a different venue's losing streak never blocks this one", () => {
+  const rows = [
+    row({ venue: "CASHCAT", mech: "mint", usdIn: 100 }),
+    row({ venue: "CASHCAT", mech: "recenter-close", usdOut: 50 }),
+    row({ venue: "CASHCAT", mech: "mint", usdIn: 50 }),
+    row({ venue: "CASHCAT", mech: "recenter-close", usdOut: 10 }),
+    row({ venue: "CASHCAT", mech: "mint", usdIn: 10 }),
+    row({ venue: "CASHCAT", mech: "recenter-close", usdOut: 1 }),
+  ];
+  const v = churnCycleAdmits(rows, "usdg", "PONS", 3, 0);
+  assert.equal(v.ok, true);
+  assert.equal(v.cycles, 0, "no PONS rows exist at all in this window");
+});
+
+test("churn brake: backfilled and approx rows never count toward the streak", () => {
+  const rows = [
+    row({ mech: "mint", usdIn: 100, backfilled: true }),
+    row({ mech: "recenter-close", usdOut: 1, backfilled: true }),
+    row({ mech: "mint", usdIn: 100, approx: true }),
+    row({ mech: "recenter-close", usdOut: 1, approx: true }),
+    row({ mech: "mint", usdIn: 100 }),
+    row({ mech: "recenter-close", usdOut: 1 }), // only ONE live cycle
+  ];
+  const v = churnCycleAdmits(rows, "usdg", "PONS", 3, 0);
+  assert.equal(v.ok, true, "only one live, non-backfilled cycle exists; the brake needs 3");
+  assert.equal(v.cycles, 1);
 });

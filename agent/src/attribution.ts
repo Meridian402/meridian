@@ -220,6 +220,51 @@ export function venueFeeUsd24h(sleeve: Sleeve, venue: string): number {
   return Math.round((ensureAdmissionCache().fee24.get(`${sleeve}:${venue}`) ?? 0) * 100) / 100;
 }
 
+// THE CHURN-CYCLE BRAKE (2026-08-26, live-desk finding). venueEarnsAdmission's
+// 7-day floor is the right check for "has this venue been a loser," but it is
+// too slow for the failure mode a few losing re-centers create in an hour: a
+// run of small cycles that each individually clear the -$25/7d floor, and
+// each individually clear the payback gate's generic cost-vs-fee-rate
+// ESTIMATE, but that as a GROUP have paid gas and swap slippage repeatedly
+// without ever netting a real gain. Neither existing gate looks at the
+// position's own measured impermanent loss (which /api/proof already
+// computes) or at how many times this symbol has cycled recently. This does:
+// count real recenter-close events for the venue in a SHORT window, and once
+// several have run, require that their combined cash flow (same
+// usdOut - usdIn - gas model as the ledger everywhere else) is genuinely
+// non-negative before allowing another. A venue that fails this is not
+// banned, just paused until the window rolls past the losing run.
+const CHURN_WINDOW_MS = Number(process.env.MERIDIAN_CHURN_WINDOW_HOURS ?? 3) * 3600e3;
+const CHURN_MAX_CYCLES = Number(process.env.MERIDIAN_CHURN_MAX_CYCLES ?? 3);
+const CHURN_MIN_NET_USD = Number(process.env.MERIDIAN_CHURN_MIN_NET_USD ?? 0);
+
+/** PURE: has this venue run several recenter cycles recently without a real
+ *  net gain? Exported for tests. rows should already be windowed to the
+ *  lookback the caller wants (readAttributionRows(now - windowMs)). */
+export function churnCycleAdmits(
+  rows: readonly Pick<AttributionRow, "sleeve" | "venue" | "mech" | "usdIn" | "usdOut" | "gasUsd" | "backfilled" | "approx">[],
+  sleeve: Sleeve,
+  venue: string,
+  maxCycles = CHURN_MAX_CYCLES,
+  minNetUsd = CHURN_MIN_NET_USD,
+): { ok: boolean; reason: string; cycles: number; netUsd: number } {
+  const mine = rows.filter((r) => r.sleeve === sleeve && r.venue === venue && !r.backfilled && !r.approx);
+  const cycles = mine.filter((r) => r.mech === "recenter-close").length;
+  const netUsd = Math.round(mine.reduce((s, r) => s + r.usdOut - r.usdIn - r.gasUsd, 0) * 100) / 100;
+  if (cycles < maxCycles || netUsd >= minNetUsd) return { ok: true, reason: "", cycles, netUsd };
+  return {
+    ok: false,
+    reason: `${cycles} recenters in the lookback window netted $${netUsd.toFixed(2)} (< $${minNetUsd.toFixed(2)}); pausing until the window rolls off instead of paying for another losing cycle`,
+    cycles,
+    netUsd,
+  };
+}
+
+/** The gate itself, live: this venue's recenter cycles in the churn window. */
+export function venueChurnAdmits(sleeve: Sleeve, venue: string): { ok: boolean; reason: string; cycles: number; netUsd: number } {
+  return churnCycleAdmits(readAttributionRows(Date.now() - CHURN_WINDOW_MS), sleeve, venue);
+}
+
 /** The nightly print: per-venue truth to the log, worst first. Wired to a
  *  24h interval at boot; also computable on demand via /api/attribution. */
 export function printAttributionReport(daysBack = 1): void {
