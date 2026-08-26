@@ -2674,6 +2674,10 @@ app.get("/api/launch/logo/:name", (req: Request, res: Response) => {
     return;
   }
   res.setHeader("Content-Type", contentTypeFor(path));
+  // These bytes are user-uploaded; the magic-byte sniff already rejects SVG and
+  // non-images, so the declared image type is authoritative — nosniff makes the
+  // browser honor it and never render a polyglot as HTML.
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
   res.sendFile(path);
 });

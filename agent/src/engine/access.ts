@@ -83,12 +83,26 @@ function isAllowlisted(wallet: string): boolean {
  *  capped (~230 wallets max against circulating supply), exclusivity scales
  *  with MERD itself, and the gate needs NO price read, so access never flaps
  *  with the market and there is no spot surface to manipulate. */
-export const ENGINE_STAKE_MERD = Number(process.env.ENGINE_STAKE_MERD ?? 2_500_000);
+function parseStakeBar(): number {
+  const raw = process.env.ENGINE_STAKE_MERD;
+  if (raw === undefined || raw.trim() === "") return 2_500_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    // A malformed bar would silently deny every staker (fail closed) with no
+    // trace. Refuse to boot on it instead: the operator sees the problem now,
+    // not weeks later when a staker asks why the gate never opens. Common
+    // footguns: "2,500,000", "2.5M".
+    throw new Error(`ENGINE_STAKE_MERD must be a positive number of whole MERD, got ${JSON.stringify(raw)} (no commas, no suffix)`);
+  }
+  return n;
+}
+
+export const ENGINE_STAKE_MERD = parseStakeBar();
 
 /** PURE: does a staked MERD balance clear the bar? Pure amount comparison,
- *  no price anywhere. A zero or negative bar fails closed. */
+ *  no price anywhere. A zero, negative, or non-finite bar fails closed. */
 export function stakeMeetsBar(stakedWei: bigint, barMerd = ENGINE_STAKE_MERD): boolean {
-  if (!(barMerd > 0)) return false;
+  if (!Number.isFinite(barMerd) || !(barMerd > 0)) return false;
   return stakedWei >= BigInt(Math.round(barMerd)) * 10n ** 18n;
 }
 

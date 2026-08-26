@@ -28,10 +28,16 @@ test("ticks snap to spacing and bracket spot (±10% at tick 0, spacing 60)", () 
   assert.ok(p.liquidity > 0n);
 });
 
-test("amountMax caps are exactly the owner's balances", () => {
+test("amountMax bounds the per-side deposit, not the whole wallet (slippage guard)", () => {
   const p = plan(DESK);
-  assert.equal(p.amountMax0, BAL0);
-  assert.equal(p.amountMax1, BAL1);
+  // Never exceeds the real balance on either side...
+  assert.ok(p.amountMax0 <= BAL0, `amountMax0 ${p.amountMax0} must not exceed the balance`);
+  assert.ok(p.amountMax1 <= BAL1, `amountMax1 ${p.amountMax1} must not exceed the balance`);
+  assert.ok(p.amountMax0 > 0n && p.amountMax1 > 0n);
+  // ...and the non-binding side is bounded FAR below the full wallet. The old
+  // bug capped both sides at the whole balance, so a mid-inclusion price move
+  // could pull the entire side; the ratio guard keeps that from happening.
+  assert.ok(p.amountMax1 < BAL1 / 2n, `amountMax1 ${p.amountMax1} should be well under half the wallet, not the full balance`);
 });
 
 test("deadline is now + 300s", () => {

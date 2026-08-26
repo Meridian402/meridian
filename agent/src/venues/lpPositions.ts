@@ -37,6 +37,7 @@ const MINT_POSITION = "0x02";
 const DECREASE_LIQUIDITY = "0x01";
 const SETTLE_PAIR = "0x0d";
 const TAKE_PAIR = "0x11";
+const SWEEP = "0x14"; // refund unspent native ETH after a native-leg mint
 
 const POSITIONS_PATH = dataPath("lp-positions.jsonl");
 
@@ -63,6 +64,22 @@ const LP_POOLS: Record<string, { token: Address; fee: number; tickSpacing: numbe
 // so any dynamically-qualified pool is strictly additive to (never replaces) it.
 export const LP_BASELINE_SYMBOLS = Object.keys(LP_POOLS);
 
+// The deep ETH anchor: NATIVE/USDG, the chain's highest-flow, lowest-toxicity,
+// deepest USDG pool (measured 2026-08-26: ~$5.3M/day volume, NEGATIVE markout,
+// ~$55k at-the-money depth — an order of magnitude deeper than the meme sleeve).
+// Deliberately kept OUT of LP_POOLS: it is NOT in LP_BASELINE_SYMBOLS, the
+// allocator never scans it, and isAutoExecutable() gates on stockPools which
+// never lists it — so the desk's autonomous rotor cannot deploy into it on its
+// own. It is resolvable by symbol so the operator (and, once proven, the
+// self-serve engine) can mint it deliberately. The tier is NON-STANDARD
+// (fee 460 / spacing 9); the standard 0.05% (500/10) tier is ~20x thinner, so
+// the params are pinned here and were verified on-chain against poolId
+// 0x54f7883914619af9105355bf83ed678bcf9f63560218ac61c9963b9503d0ba32.
+const ANCHOR_POOLS: Record<string, { token: Address; fee: number; tickSpacing: number }> = {
+  ETHUSDG: { token: NATIVE, fee: 460, tickSpacing: 9 },
+};
+export const ANCHOR_SYMBOLS = Object.keys(ANCHOR_POOLS);
+
 const pmAbi = [parseAbiItem("function modifyLiquidities(bytes unlockData, uint256 deadline) payable")];
 const erc20Abi = [
   parseAbiItem("function allowance(address owner, address spender) view returns (uint256)"),
@@ -80,7 +97,7 @@ function poolKeyOf(symbol: string) {
   // warm cache — if it's cold, we simply fall through to the baseline, never to
   // an unvetted pool. A dynamically-resolved pool that somehow can't be minted
   // still fails safe: the mint reverts and no capital moves.
-  let p: { token: Address; fee: number; tickSpacing: number } | undefined = LP_POOLS[symbol];
+  let p: { token: Address; fee: number; tickSpacing: number } | undefined = LP_POOLS[symbol] ?? ANCHOR_POOLS[symbol];
   if (!p) {
     const q = cachedQualified().find((x) => x.symbol === symbol);
     if (q) p = { token: q.token, fee: q.fee, tickSpacing: q.tickSpacing };
@@ -101,7 +118,7 @@ function poolKeyOf(symbol: string) {
  * acting on it.
  */
 export function configuredPool(symbol: string): { fee: number; tickSpacing: number } | null {
-  const p = LP_POOLS[symbol] ?? cachedQualified().find((x) => x.symbol === symbol);
+  const p = LP_POOLS[symbol] ?? ANCHOR_POOLS[symbol] ?? cachedQualified().find((x) => x.symbol === symbol);
   return p ? { fee: p.fee, tickSpacing: p.tickSpacing } : null;
 }
 
@@ -255,6 +272,28 @@ export function computeMintPlan(args: {
   const liquidity = BigInt(Math.floor(Math.min(lFrom0, lFrom1) * 0.99));
   if (liquidity <= 0n) throw new Error("insufficient balances for any liquidity in this range");
 
+  // amountMax is the ONLY slippage guard the pool enforces: the most this mint
+  // will pay per side for the fixed `liquidity` at execution price. Derive it
+  // from the SAME pool math that set `liquidity` — the exact raw amounts this
+  // liquidity draws per side — capped at the real balance. Never the whole
+  // balance: a whole-balance cap lets a mid-inclusion price move (drift or a
+  // sandwich) deposit almost the entire wallet into the side about to be dumped
+  // and never revert. This bounds the deposit RATIO on both sides and makes
+  // maxUsd an honest cap. The 1.5% tolerance is NOT arbitrary: the old design's
+  // effective headroom on the binding side was 1/(0.99 x 0.995) ~= 1.52%, the
+  // calibration the 2026-08-11 re-center revert taught us — so desk re-centers
+  // are exactly as revert-tolerant as they have always been, while the
+  // non-binding side drops from "entire wallet" to the same 1.5%.
+  const lf = Math.min(lFrom0, lFrom1) * 0.99;
+  const need0 = Math.max(0, lf * (Q96 / sC - Q96 / sB)); // raw currency0 this liquidity draws
+  const need1 = Math.max(0, lf * (sC / Q96 - sA / Q96)); // raw currency1 this liquidity draws
+  const capSide = (needed: number, balRaw: bigint): bigint => {
+    const want = BigInt(Math.ceil(needed * 1.015));
+    return want < balRaw ? want : balRaw;
+  };
+  const amountMax0 = capSide(need0, bal0Raw);
+  const amountMax1 = capSide(need1, bal1Raw);
+
   const mintParams = encodeAbiParameters(
     parseAbiParameters("(address,address,uint24,int24,address), int24, int24, uint256, uint128, uint128, address, bytes"),
     [
@@ -262,29 +301,50 @@ export function computeMintPlan(args: {
       tickLower,
       tickUpper,
       liquidity,
-      bal0Raw, // amountMax caps: never spend beyond the owner's real balances
-      bal1Raw,
+      amountMax0, // slippage cap: planned per-side amount + 1%, never the full wallet
+      amountMax1,
       recipient,
       "0x",
     ],
   );
   const settleParams = encodeAbiParameters(parseAbiParameters("address, address"), [k.currency0, k.currency1]);
-  const actions = encodePacked(["bytes1", "bytes1"], [MINT_POSITION, SETTLE_PAIR]);
-  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, [mintParams, settleParams]]);
+
+  // Native leg: when currency0 is native ETH (the ETH/USDG anchor), the ETH side
+  // is settled from msg.value rather than pulled through Permit2, so the tx must
+  // carry value = the ETH cap and a trailing SWEEP refunds whatever the mint did
+  // not consume back to the recipient (else the excess is stranded in the
+  // PositionManager). currency0 is sorted ascending, so only the native address
+  // (0x0) can ever land here; for every ERC20/ERC20 pool this branch is inert
+  // and the calldata is byte-identical to before.
+  const nativeLeg = k.currency0.toLowerCase() === NATIVE.toLowerCase();
+  let actions: Hex;
+  let paramsList: Hex[];
+  let txValue: bigint;
+  if (nativeLeg) {
+    const sweepParams = encodeAbiParameters(parseAbiParameters("address, address"), [NATIVE, recipient]);
+    actions = encodePacked(["bytes1", "bytes1", "bytes1"], [MINT_POSITION, SETTLE_PAIR, SWEEP]);
+    paramsList = [mintParams, settleParams, sweepParams];
+    txValue = amountMax0; // the ETH we may spend; SWEEP returns the remainder
+  } else {
+    actions = encodePacked(["bytes1", "bytes1"], [MINT_POSITION, SETTLE_PAIR]);
+    paramsList = [mintParams, settleParams];
+    txValue = 0n;
+  }
+  const unlockData = encodeAbiParameters(parseAbiParameters("bytes, bytes[]"), [actions, paramsList]);
   const deadline = BigInt(Math.floor(nowMs / 1000) + 300);
 
   return {
     tickLower,
     tickUpper,
     liquidity,
-    amountMax0: bal0Raw,
-    amountMax1: bal1Raw,
+    amountMax0,
+    amountMax1,
     unlockData,
     deadline,
     tx: {
       to: POSITION_MANAGER,
       data: encodeFunctionData({ abi: pmAbi, functionName: "modifyLiquidities", args: [unlockData, deadline] }),
-      value: 0n,
+      value: txValue,
     },
   };
 }
@@ -298,11 +358,13 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
   const client = getPublicClient();
   const { sqrtP, tick } = await slot0(symbol);
 
-  const [bal0Raw, bal1Raw] = await Promise.all(
-    [k.currency0, k.currency1].map((c) =>
-      client.readContract({ address: c, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
-    ),
-  );
+  // The native leg (ETH anchor) has no ERC20 balance and needs no approval:
+  // currency0 is sorted ascending, so only native ETH (0x0) can sit on side 0.
+  const nativeLeg = k.currency0.toLowerCase() === NATIVE.toLowerCase();
+  const [bal0Raw, bal1Raw] = await Promise.all([
+    nativeLeg ? client.getBalance({ address: signer.address }) : client.readContract({ address: k.currency0, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+    client.readContract({ address: k.currency1, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+  ]);
 
   // ONE BRAIN: the desk mints through the exact same planner a gated self-serve
   // user signs, so the customer path can never drift from Merd's own. Recipient
@@ -310,11 +372,11 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
   const plan = computeMintPlan({ key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient: signer.address, maxUsd, nowMs: Date.now() });
   const { tickLower, tickUpper, liquidity } = plan;
 
-  await ensureApprovedForPM(k.currency0);
+  if (!nativeLeg) await ensureApprovedForPM(k.currency0);
   await ensureApprovedForPM(k.currency1);
 
   const wallet = getWalletClient();
-  const hash = await wallet.sendTransaction({ to: plan.tx.to, data: plan.tx.data });
+  const hash = await wallet.sendTransaction({ to: plan.tx.to, data: plan.tx.data, value: plan.tx.value });
   const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
   if (receipt.status !== "success") throw new Error(`mint reverted: ${hash}`);
 
@@ -325,13 +387,14 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
   );
   const tokenId = mintLog ? BigInt(mintLog.topics[3]!).toString() : "unknown";
 
-  const [after0, after1] = await Promise.all(
-    [k.currency0, k.currency1].map((c) =>
-      client.readContract({ address: c, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
-    ),
-  );
+  const [after0, after1] = await Promise.all([
+    nativeLeg ? client.getBalance({ address: signer.address }) : client.readContract({ address: k.currency0, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+    client.readContract({ address: k.currency1, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+  ]);
   const usdgIsC0 = k.currency0.toLowerCase() === USDG.toLowerCase();
   const usdgIn = Number((usdgIsC0 ? bal0Raw : bal1Raw) - (usdgIsC0 ? after0 : after1)) / 1e6;
+  // For the native anchor, the side-0 delta also includes gas spent on this tx;
+  // it is inventory logging only (the USDG side above is the cash truth).
   const tokenIn = Number((usdgIsC0 ? bal1Raw : bal0Raw) - (usdgIsC0 ? after1 : after0)) / 1e18;
 
   const record: LpPositionRecord = {
@@ -522,6 +585,9 @@ const SYMBOL_BY_TOKEN: Record<string, string> = Object.fromEntries([
   // ("unmeasured"), the snapshotter can't count it, and the site renders an
   // empty card over $146 of real working capital (2026-08-14).
   ...Object.entries(LP_POOLS).map(([s, p]) => [p.token.toLowerCase(), s] as const),
+  // The ETH anchor's non-USDG leg is native (0x0); without this a discovered
+  // ETH/USDG band names itself the zero address and can't be priced or managed.
+  ...Object.entries(ANCHOR_POOLS).map(([s, p]) => [p.token.toLowerCase(), s] as const),
 ]);
 const xferEvent = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)");
 const poolAndInfoAbi = [
@@ -678,13 +744,16 @@ export async function positionsWithValueFor(wallet: Address): Promise<LpPosition
   const out: LpPositionValue[] = [];
   for (const p of positions) {
     if (p.liquidity === 0n) continue; // emptied position: it is owned but holds nothing
-    // THE MEME SLEEVE'S BANDS ARE NOT STOCK POSITIONS. This valuation assumes
-    // a 6-decimal USDG quote; a native-quoted band (18 decimals) inflates by
-    // 1e12 and one such leak made the allocator believe it managed $2.3e17,
-    // at which size every real pool reads as too thin and the stock sleeve
-    // sits in cash forever (measured live 2026-08-11). memeGuard values its
-    // own bands; this list is the USDG book only.
-    if (p.currency0.toLowerCase() === NATIVE.toLowerCase()) continue;
+    // Skip a band only when NEITHER leg is USDG. A native/token meme band (both
+    // 18 decimals) inflates this 6-decimal-USDG valuation by 1e12, and one such
+    // leak made the allocator believe it managed $2.3e17, at which size every
+    // real pool reads as too thin and the stock sleeve sits in cash forever
+    // (measured live 2026-08-11); memeGuard values those itself. But a
+    // native/USDG band (the ETH anchor) is well-defined here — currency1 IS the
+    // 6-decimal USDG quote — so it stays visible and manageable rather than
+    // hidden-but-closable.
+    const hasUsdg = p.currency0.toLowerCase() === USDG.toLowerCase() || p.currency1.toLowerCase() === USDG.toLowerCase();
+    if (!hasUsdg) continue;
     const poolId = keccak256(
       encodeAbiParameters(parseAbiParameters("address, address, uint24, int24, address"), [p.currency0, p.currency1, p.fee, p.tickSpacing, NATIVE]),
     );
@@ -892,7 +961,12 @@ export async function collectFees(params: { tokenId: string; symbol: string }): 
   const k = poolKeyOf(params.symbol);
   const signer = getAgentSigner()!;
   const client = getPublicClient();
-  const bal = (t: Address) => client.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] });
+  // Native-aware: the anchor's token side is native ETH (0x0), which has no
+  // erc20 balanceOf. TAKE_PAIR sends the ETH fees to the wallet regardless.
+  const bal = (t: Address) =>
+    t.toLowerCase() === NATIVE.toLowerCase()
+      ? client.getBalance({ address: signer.address })
+      : client.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] });
   const [usdgBefore, tokenBefore] = await Promise.all([bal(USDG), bal(k.token)]);
 
   // ONE BRAIN: liquidity 0n removes nothing and sweeps only the owed fees.
