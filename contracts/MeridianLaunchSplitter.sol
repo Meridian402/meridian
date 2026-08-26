@@ -23,9 +23,11 @@ pragma solidity ^0.8.26;
 // FEE PATHS COVERED: the PONS FeeEscrow credits creator earnings to the
 // recipient for pull-based claiming (claim for the native quote, claimToken
 // for an ERC20 quote such as USDG); claimAndSplit pulls then splits. Anything
-// transferred here directly is handled by split alone. A team address that
-// reverts on native receive can block only its own native-quote splits; the
-// ERC20 path, which is what USDG-paired launches use, is unaffected.
+// transferred here directly is handled by split alone. The two payout legs are
+// independent: a team address that reverts on native receive cannot block the
+// treasury's share or lock funds — its own leg is credited to owedNative and
+// pulled with withdrawNative(). The ERC20 path uses SafeERC20-style calls, so
+// no-bool-return tokens (USDT-style) do not brick the split.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface IFeeEscrow {
@@ -48,11 +50,19 @@ contract MeridianLaunchSplitter {
     /// The router share in basis points. Constant, compiled in, not a knob.
     uint16 public constant ROUTER_BPS = 2000;
 
+    /// Native owed to a recipient whose direct send failed (a non-payable or
+    /// reverting team contract). Kept as a pull balance so one hostile recipient
+    /// can never brick the other party's share or lock the contract's funds.
+    mapping(address => uint256) public owedNative;
+
     event Split(address indexed currency, uint256 toTeam, uint256 toTreasury);
+    event NativeOwed(address indexed to, uint256 amount);
+    event NativeWithdrawn(address indexed to, uint256 amount);
 
     error ZeroAddress();
     error NativeSendFailed();
     error TokenTransferFailed();
+    error NothingOwed();
 
     constructor(address team_, address treasury_, address escrow_) {
         if (team_ == address(0) || treasury_ == address(0)) revert ZeroAddress();
@@ -80,29 +90,75 @@ contract MeridianLaunchSplitter {
 
     /// Split this contract's full balance of `currency`: ROUTER_BPS to the
     /// treasury, the rest to the team. Rounding dust favors the team.
+    ///
+    /// Robust to hostile or non-standard parties: the two legs are INDEPENDENT.
+    /// A team address that reverts on native receive no longer bricks the whole
+    /// split (which used to lock the treasury's 20% too) — the failed leg is
+    /// credited to owedNative for the party to pull later. The ERC20 path uses a
+    /// SafeERC20-style call so no-bool-return tokens (USDT-style) do not revert
+    /// forever, and re-reads the balance for the team leg so fee-on-transfer
+    /// tokens do not over-draw. The intended quotes are native and USDG.
     function split(address currency) public {
         if (currency == address(0)) {
             uint256 bal = address(this).balance;
             if (bal == 0) return;
             uint256 cut = (bal * ROUTER_BPS) / 10_000;
-            _sendNative(treasury, cut);
-            _sendNative(team, bal - cut);
+            _payNative(treasury, cut);
+            _payNative(team, bal - cut);
             emit Split(currency, bal - cut, cut);
         } else {
-            IERC20Minimal t = IERC20Minimal(currency);
-            uint256 bal = t.balanceOf(address(this));
+            uint256 bal = _erc20Balance(currency);
             if (bal == 0) return;
             uint256 cut = (bal * ROUTER_BPS) / 10_000;
-            if (!t.transfer(treasury, cut)) revert TokenTransferFailed();
-            if (!t.transfer(team, bal - cut)) revert TokenTransferFailed();
-            emit Split(currency, bal - cut, cut);
+            _safeTransfer(currency, treasury, cut);
+            // Re-read: fee-on-transfer tokens leave less than bal-cut behind, so
+            // paying the precomputed remainder would over-draw and revert.
+            uint256 remaining = _erc20Balance(currency);
+            _safeTransfer(currency, team, remaining);
+            emit Split(currency, remaining, cut);
         }
     }
 
-    function _sendNative(address to, uint256 amount) private {
+    /// Pull native credited to you by a failed direct send in split().
+    function withdrawNative() external {
+        uint256 amount = owedNative[msg.sender];
+        if (amount == 0) revert NothingOwed();
+        owedNative[msg.sender] = 0; // effect before interaction
+        (bool ok,) = msg.sender.call{value: amount}("");
+        if (!ok) {
+            owedNative[msg.sender] = amount; // restore on failure
+            revert NativeSendFailed();
+        }
+        emit NativeWithdrawn(msg.sender, amount);
+    }
+
+    /// Send native; on failure credit a pull balance instead of reverting, so
+    /// one party can never block the other's leg or lock the contract.
+    function _payNative(address to, uint256 amount) private {
         if (amount == 0) return;
         (bool ok,) = to.call{value: amount}("");
-        if (!ok) revert NativeSendFailed();
+        if (!ok) {
+            owedNative[to] += amount;
+            emit NativeOwed(to, amount);
+        }
+    }
+
+    function _erc20Balance(address token) private view returns (uint256) {
+        (bool ok, bytes memory data) = token.staticcall(
+            abi.encodeWithSelector(IERC20Minimal.balanceOf.selector, address(this))
+        );
+        if (!ok || data.length < 32) revert TokenTransferFailed();
+        return abi.decode(data, (uint256));
+    }
+
+    /// SafeERC20 transfer: tolerates tokens that return no data on success
+    /// (USDT-style) and treats a false return or a revert as failure.
+    function _safeTransfer(address token, address to, uint256 amount) private {
+        if (amount == 0) return;
+        (bool ok, bytes memory data) = token.call(
+            abi.encodeWithSelector(IERC20Minimal.transfer.selector, to, amount)
+        );
+        if (!ok || (data.length > 0 && !abi.decode(data, (bool)))) revert TokenTransferFailed();
     }
 }
 
@@ -135,7 +191,11 @@ contract MeridianSplitterFactory {
     error ZeroAddress();
 
     constructor(address treasury_, address escrow_) {
-        if (treasury_ == address(0)) revert ZeroAddress();
+        // Both are required for the production path: the treasury receives the
+        // router share, and the escrow is where PONS credits pull-based creator
+        // fees. A factory deployed with escrow=0 would silently produce
+        // splitters that can never claim earnings, so reject it here.
+        if (treasury_ == address(0) || escrow_ == address(0)) revert ZeroAddress();
         treasury = treasury_;
         escrow = escrow_;
     }

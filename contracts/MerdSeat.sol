@@ -64,7 +64,7 @@ contract MerdSeat {
 
     mapping(uint256 => address) private _ownerOf;
     mapping(address => uint256) private _balanceOf;
-    mapping(uint256 => address) public getApproved;
+    mapping(uint256 => address) private _approved;
     mapping(address => mapping(address => bool)) public isApprovedForAll;
     /// What this entry is for, set at mint and immutable after.
     mapping(uint256 => string) public roleOf;
@@ -112,6 +112,7 @@ contract MerdSeat {
     error HolderRungUsed();
     error HolderRungExhausted();
     error InsufficientHold();
+    error BelowFreeTranche();
     error RoyaltyAboveCeiling();
     error RaffleAlreadyCommitted();
     error RaffleNotCommitted();
@@ -156,10 +157,16 @@ contract MerdSeat {
         return string.concat(baseURI, _toString(id));
     }
 
+    /// ERC-721 requires this to throw for a nonexistent token; ownerOf does.
+    function getApproved(uint256 id) public view returns (address) {
+        ownerOf(id);
+        return _approved[id];
+    }
+
     function approve(address spender, uint256 id) external {
         address holder = _ownerOf[id];
         if (msg.sender != holder && !isApprovedForAll[holder][msg.sender]) revert NotAuthorized();
-        getApproved[id] = spender;
+        _approved[id] = spender;
         emit Approval(holder, spender, id);
     }
 
@@ -171,7 +178,7 @@ contract MerdSeat {
     function transferFrom(address from, address to, uint256 id) public {
         if (from != _ownerOf[id]) revert WrongFrom();
         if (to == address(0)) revert ToZero();
-        if (msg.sender != from && !isApprovedForAll[from][msg.sender] && msg.sender != getApproved[id]) {
+        if (msg.sender != from && !isApprovedForAll[from][msg.sender] && msg.sender != _approved[id]) {
             revert NotAuthorized();
         }
         unchecked {
@@ -179,7 +186,7 @@ contract MerdSeat {
             _balanceOf[to]++;
         }
         _ownerOf[id] = to;
-        delete getApproved[id];
+        delete _approved[id];
         // The engine-seat trait travels WITH the seat: the per-owner counter
         // that the access gate reads moves on every transfer.
         if (isEngineSeat[id]) {
@@ -283,6 +290,12 @@ contract MerdSeat {
             price = priceTier3Merd;
         }
         if (price == 0) revert PriceNotSet();
+        // Checks-effects-interactions: advance the ladder counter BEFORE the
+        // external MERD transfer, so even a hooked payment token could not
+        // re-enter and buy several seats all at the cheapest tier (audit
+        // finding 12). MERD has no transfer hook today; this is defense in
+        // depth. A reverting transfer rolls the increment back with the tx.
+        paidMintedBy[msg.sender] = already + 1;
         address to = burned ? BURN_ADDRESS : payout;
         if (!merd.transferFrom(msg.sender, to, price)) {
             if (burned) revert BurnFailed();
@@ -290,7 +303,6 @@ contract MerdSeat {
         }
         if (burned) totalBurnedForMints += price;
         else totalPaidToTreasury += price;
-        paidMintedBy[msg.sender] = already + 1;
         id = _publicMint(already + 1, price, burned);
     }
 
@@ -450,10 +462,13 @@ contract MerdSeat {
         return _allIds.length;
     }
 
-    /// Supply can only ever shrink.
+    /// Supply can only ever shrink, and never below the free tranche: dropping
+    /// maxSupply under FREE_TRANCHE would let free holder-rung mints consume the
+    /// whole supply and starve the paid ladder (audit finding 11).
     function lowerMaxSupply(uint256 next) external onlyOwner {
         if (next >= maxSupply) revert CannotRaiseSupply();
         if (next < totalSupply) revert CannotRaiseSupply();
+        if (next < FREE_TRANCHE) revert BelowFreeTranche();
         emit MaxSupplyLowered(maxSupply, next);
         maxSupply = next;
     }

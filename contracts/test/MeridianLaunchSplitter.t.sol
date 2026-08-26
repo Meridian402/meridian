@@ -60,6 +60,22 @@ contract MockEscrow {
     }
 }
 
+/// USDT-style: transfer succeeds but returns NO data.
+contract NoBoolToken {
+    mapping(address => uint256) public balanceOf;
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function transfer(address to, uint256 amount) external {
+        require(balanceOf[msg.sender] >= amount, "bal");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+    }
+}
+
+/// A team that reverts on native receive.
+contract RejectsNative {
+    receive() external payable { revert("no"); }
+}
+
 contract MeridianLaunchSplitterTest is Test {
     address team = makeAddr("team");
     address treasury = makeAddr("treasury");
@@ -165,5 +181,32 @@ contract MeridianLaunchSplitterTest is Test {
         assertEq(forged.treasury(), treasury, "the forgery's getter LIES convincingly");
         assertFalse(factory.isSplitter(address(forged)), "but provenance exposes it");
         assertFalse(factory.isSplitter(address(0xdead)), "and an arbitrary address is not a splitter");
+    }
+
+    function test_native_split_is_not_bricked_by_a_reverting_team() public {
+        // Finding 5: a team that reverts on receive must NOT lock the treasury's
+        // 20% or the contract's funds.
+        RejectsNative badTeam = new RejectsNative();
+        MeridianLaunchSplitter s = new MeridianLaunchSplitter(address(badTeam), treasury, address(escrow));
+        vm.deal(address(s), 100 ether);
+        s.split(address(0));
+        assertEq(treasury.balance, 20 ether, "treasury paid despite the reverting team");
+        assertEq(s.owedNative(address(badTeam)), 80 ether, "team's share is credited for pull, not lost");
+        assertEq(address(s).balance, 80 ether, "and held, not stranded across the whole tx reverting");
+    }
+
+    function test_no_bool_return_token_does_not_brick_the_split() public {
+        // Finding 4: a USDT-style token (no return data) must split, not revert.
+        NoBoolToken t = new NoBoolToken();
+        t.mint(address(splitter), 1000);
+        splitter.split(address(t));
+        assertEq(t.balanceOf(treasury), 200, "20% to treasury");
+        assertEq(t.balanceOf(team), 800, "80% to team");
+    }
+
+    function test_factory_rejects_zero_escrow() public {
+        // Finding 15: a factory with escrow=0 would silently disable claims.
+        vm.expectRevert(MeridianSplitterFactory.ZeroAddress.selector);
+        new MeridianSplitterFactory(treasury, address(0));
     }
 }

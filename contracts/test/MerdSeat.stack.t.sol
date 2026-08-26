@@ -193,12 +193,22 @@ contract MerdSeatStackTest is Test {
     }
 
     function test_supply_can_shrink_but_never_grow() public {
-        seat.lowerMaxSupply(3);
-        assertEq(seat.maxSupply(), 3);
+        seat.lowerMaxSupply(300);
+        assertEq(seat.maxSupply(), 300);
         vm.expectRevert(MerdSeat.CannotRaiseSupply.selector);
-        seat.lowerMaxSupply(50);
+        seat.lowerMaxSupply(500);
         vm.expectRevert(MerdSeat.CannotRaiseSupply.selector);
-        seat.lowerMaxSupply(3);
+        seat.lowerMaxSupply(300);
+    }
+
+    function test_cannot_lower_below_the_free_tranche() public {
+        // Dropping under the free tranche would let free mints starve the paid
+        // ladder (audit finding 11); the exact tranche is the floor.
+        uint256 floor = seat.FREE_TRANCHE();
+        vm.expectRevert(MerdSeat.BelowFreeTranche.selector);
+        seat.lowerMaxSupply(floor - 1);
+        seat.lowerMaxSupply(floor);
+        assertEq(seat.maxSupply(), floor);
     }
 
     function test_cannot_lower_supply_below_seats_already_sold() public {
@@ -214,10 +224,13 @@ contract MerdSeatStackTest is Test {
     }
 
     function test_mint_stops_at_max_supply() public {
-        seat.lowerMaxSupply(2);
-        seat.mint(bob, 2, "scout");
+        // A small collection is set at construction (the floor guard only
+        // applies to lowerMaxSupply), so the SoldOut cap is tested directly.
+        MerdSeat tiny = new MerdSeat(2, "u/", 0x12f8Cca1875B6CdfaF00f7Efde52A40C275Ab8d8, address(0xFEE));
+        tiny.mint(bob, 1, "scout");
+        tiny.mint(bob, 2, "scout");
         vm.expectRevert(MerdSeat.SoldOut.selector);
-        seat.mint(bob, 3, "watcher");
+        tiny.mint(bob, 3, "watcher");
     }
 }
 
