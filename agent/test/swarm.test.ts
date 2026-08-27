@@ -160,7 +160,7 @@ test("looksLikePlanningLeak does not flag an ordinary substantive reply", () => 
 });
 
 test("looksLikePlanningLeak does not flag a normal reply that happens to start with 'I'", () => {
-  assert.equal(looksLikePlanningLeak("I disagree on GOOGL — flat at 0% is still informative when volume is this thin."), false);
+  assert.equal(looksLikePlanningLeak("I disagree on GOOGL: flat at 0% is still informative when volume is this thin."), false);
   assert.equal(looksLikePlanningLeak("I've been watching CASHCAT all day and the fill pattern says the same thing you're seeing."), false);
 });
 
