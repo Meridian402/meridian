@@ -40,7 +40,7 @@ const { listParticipants, houseParticipants, researchParticipants, userParticipa
 const { appendSwarmRow, exchangesSince, swarmTotals } = await import("../src/swarm/feed.js");
 const { takeawaysFor, takeawayLimit, fitTakeaways, learningSection } = await import("../src/swarm/learning.js");
 const { dailyBudget, swarmEnabled, swarmIntervalMs } = await import("../src/swarm/loop.js");
-const { pickPair, turnCount } = await import("../src/swarm/exchange.js");
+const { pickPair, turnCount, looksLikePlanningLeak } = await import("../src/swarm/exchange.js");
 
 // ---- roster: who may speak --------------------------------------------------
 
@@ -125,6 +125,43 @@ test("turn count defaults to 4 and is hard-capped at 8", () => {
     assert.equal(turnCount(), want, `SWARM_TURNS=${env}`);
   }
   delete process.env.SWARM_TURNS;
+});
+
+// ---- output guard: planning/meta text should never reach the feed ----------
+
+test("looksLikePlanningLeak catches the real leak this guard was built for", () => {
+  const leaked = [
+    "The user has pasted the same agent-to-agent exchange setup twice, identically. I should treat this as a single conversation and respond once.",
+    "",
+    "I'm opening a conversation with Merd about MU (down 1.21% at $963.48) vs GOOGL (flat at 0%).",
+    "",
+    "For this conversation, I need to:",
+    "1. Make a choice between MU and GOOGL",
+    "2. Apply the defensive quoting + fill pattern discipline",
+    "3. Stay under 120 words",
+    "4. Use only the figures given",
+    "5. Not invent any data",
+  ].join("\n");
+  assert.ok(looksLikePlanningLeak(leaked));
+});
+
+test("looksLikePlanningLeak flags a leading self-instruction even without a list", () => {
+  assert.ok(looksLikePlanningLeak("I should focus on the CASHCAT pool since that's what's actually moving today."));
+  assert.ok(looksLikePlanningLeak("Let me think about which figure actually matters here before I answer."));
+});
+
+test("looksLikePlanningLeak does not flag an ordinary substantive reply", () => {
+  const clean = [
+    "GOOGL flat means nothing tradable, but MU down 1.21% is real information if the depth backs it.",
+    "I'd rather widen MU's band than sit still: a stock that's already moving is exactly when the fee accrues fastest.",
+    "The risk is a further leg down before it stabilizes, so I'm not chasing it with size, just room.",
+  ].join(" ");
+  assert.equal(looksLikePlanningLeak(clean), false);
+});
+
+test("looksLikePlanningLeak does not flag a normal reply that happens to start with 'I'", () => {
+  assert.equal(looksLikePlanningLeak("I disagree on GOOGL — flat at 0% is still informative when volume is this thin."), false);
+  assert.equal(looksLikePlanningLeak("I've been watching CASHCAT all day and the fill pattern says the same thing you're seeing."), false);
 });
 
 // ---- takeaways: the cap ------------------------------------------------------
