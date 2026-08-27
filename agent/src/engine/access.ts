@@ -192,6 +192,13 @@ export async function hasEngineSkill(wallet: string): Promise<{ ok: boolean; via
   return { ok: false, via: null };
 }
 
+/** PURE: read the `version:` line out of the skill file's YAML frontmatter.
+ *  "unknown" on anything malformed rather than throwing — a caller should
+ *  never fail to receive the skill body over a broken version stamp. */
+export function parseSkillVersion(content: string): string {
+  return /^version:\s*(\S+)/m.exec(content)?.[1] ?? "unknown";
+}
+
 /**
  * The gate. Reads chain state to decide access; never signs or moves funds.
  * Fails CLOSED on a malformed address, any read error, or a dormant path.

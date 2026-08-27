@@ -1,6 +1,8 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { dataPath } from "./dataDir.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -83,7 +85,7 @@ import { fundingHealth, logFundingHealthAtBoot } from "./fundingHealth.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
 import { openPositionsOnChain, withdrawPosition } from "./venues/lpPositions.js";
 import { planOpenSteps, ENGINE_SYMBOLS, positionsWithValueFor, ownerOfPosition, positionOnChain, computeDecreasePlan } from "./venues/lpPositions.js";
-import { hasEngineAccess, hasEngineSkill } from "./engine/access.js";
+import { hasEngineAccess, hasEngineSkill, parseSkillVersion } from "./engine/access.js";
 import { prepareLaunchSteps, routerOpen, approvedPairs } from "./launch/prepare.js";
 import { registerLaunchFromTx, launchesForWallet, startGraduationWatch } from "./launch/registry.js";
 import { sniffImage, saveLogo, logoDiskPath, logoPublicUrl, contentTypeFor, LOGO_MAX_BYTES } from "./launch/logos.js";
@@ -2459,6 +2461,43 @@ app.get("/api/engine/access", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("[engine] access check failed:", err instanceof Error ? err.message : err);
     res.status(502).json({ ok: false, error: "could not check access — try again shortly" });
+  }
+});
+
+// The skill itself: what teaches a seat holder's OWN agent to call the four
+// routes above. Gated exactly like them (hasEngineSkill, not a public file),
+// and read from disk on every request rather than held in memory — the
+// single source of truth is this one file, so improving the engine's
+// calling convention, adding a pool, or tightening a safety note reaches
+// every holder's agent on its next fetch, with no re-mint and no manual
+// re-download. The frontmatter `version` line is how a caller notices it
+// changed. This is the whole answer to "exclusive AND upgradeable": exclusive
+// is the gate below, upgradeable is that there is nowhere else to cache it.
+const SKILL_MD_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "meridian-engine", "SKILL.md");
+app.options("/api/engine/skill", (_req: Request, res: Response) => { setWalletCors(res); res.sendStatus(204); });
+app.get("/api/engine/skill", async (req: Request, res: Response) => {
+  setWalletCors(res);
+  const address = requireWallet(req, res);
+  if (!address) return;
+  try {
+    const skill = await hasEngineSkill(address);
+    if (!skill.ok) {
+      res.status(403).json({ ok: false, error: "the LP engine skill requires a Meridian seat, a qualifying stake, or a graduated launch" });
+      return;
+    }
+    if (!existsSync(SKILL_MD_PATH)) {
+      res.status(503).json({ ok: false, error: "the skill file is not deployed on this instance" });
+      return;
+    }
+    const content = readFileSync(SKILL_MD_PATH, "utf8");
+    const version = parseSkillVersion(content);
+    res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+    res.setHeader("X-Meridian-Skill-Version", version);
+    res.setHeader("Cache-Control", "no-store"); // always the current file, never a stale cached copy
+    res.send(content);
+  } catch (err) {
+    console.error("[engine] skill fetch failed:", err instanceof Error ? err.message : err);
+    res.status(502).json({ ok: false, error: "could not read the skill file — try again shortly" });
   }
 });
 
