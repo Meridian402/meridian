@@ -34,6 +34,7 @@ import { withHouseWalletLock, operatorWaiting } from "./houseWallet.js";
 import { walletOpsAvailable } from "./risk.js";
 import { memeRotorTick } from "./memeGuard.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
+import { dumpMintRefusal } from "./dumpWatch.js";
 import { readFileSync as _rf, writeFileSync as _wf, existsSync as _ex } from "node:fs";
 import { dataPath } from "./dataDir.js";
 
@@ -303,6 +304,15 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
   // deliberately via POST /api/admin/clear-halt, not a path a loop retries into.
   if (portfolioStoodDown()) {
     throw new Error("portfolio breaker stand-down is active: no new positions until the operator clears it (POST /api/admin/clear-halt)");
+  }
+  // The dump gate (2026-08-28): after a dump-exit this venue is locked out
+  // for a window, and a pool whose tape is printing live dump pressure is
+  // refused regardless. Every entry path funnels through here (operator
+  // lp-open, pilot re-center, open-deploy, compound), so exiting on the
+  // signal and immediately re-buying the same falling pool cannot happen.
+  const dumpBlock = dumpMintRefusal(symbol);
+  if (dumpBlock) {
+    throw new Error(dumpBlock);
   }
   // Never start what we cannot finish: an open is up to three wallet ops
   // (funding swap, token buy, mint). Whole sequence fits or none of it runs.

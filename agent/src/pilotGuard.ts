@@ -26,6 +26,7 @@ import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
+import { latestDumpReading, dumpExitVerdict, recordDumpExit } from "./dumpWatch.js";
 
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
@@ -222,7 +223,27 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
 
   const fees = await uncollectedFeesUsd(p).catch(() => 0);
 
-  // 3. THE FLOOR, checked first: a bleeding position does not get managed,
+  // 0. THE DUMP EXIT (2026-08-28, operator decision after the midday CASHCAT
+  // dump). Checked before everything, in-range included: the whole point is
+  // to act DURING the leg, while the band is still converting USDG into the
+  // falling token, not after the exit-below machinery has ridden it down.
+  // The three-condition pressure signal (dominant + accelerating + rolling
+  // over) is the trigger; the verdict declines on a disarmed switch or a
+  // stale reading. Exits deliberately ignore the stand-down, same as the
+  // floor: selling is always allowed.
+  const dumpCall = dumpExitVerdict(latestDumpReading(p.symbol), now);
+  if (dumpCall.act) {
+    console.error(`[pilotGuard] DUMP EXIT: #${p.tokenId} (${p.symbol}) worth $${p.valueUsd.toFixed(2)}, ${dumpCall.reason}; flattening to cash now instead of riding the leg`);
+    await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "dump-exit" });
+    const sold = await sellSymbolsOrEnqueue([p.symbol], "dump-exit");
+    appendLedger("pilot-guard.jsonl", { ts: now, kind: "dump-exit", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd, feesUsd: fees, soldUsd: sold[0]?.usdgReceived ?? 0 });
+    recordDumpExit(p.symbol, now);
+    clearLineage(key);
+    outSince.delete(key);
+    return;
+  }
+
+  // 3. THE FLOOR, checked before any management: a bleeding position does not get managed,
   // it gets closed. Worst case is bounded by construction. Deposit basis is
   // the LINEAGE deposit when this band came from a re-center chain, else
   // ~2x the recorded USDG side (balanced mint); no basis falls back to env.

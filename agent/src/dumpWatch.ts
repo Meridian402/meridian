@@ -2,12 +2,20 @@
 // session-scoped Claude watcher). For every seat pool we hold, it reads the
 // pool's recent on-chain swap flow and flags the earliest leading signal of a
 // dump: ONE-SIDED selling that is DOMINANT and ACCELERATING while price rolls
-// over — minutes before price breaks the band and the reactive break-exit
-// fires. ALERT ONLY by design: heavy selling is often absorbed (a false
-// positive), and auto-exiting on it would sell the bottom and re-buy higher —
-// the churn/ratchet loss the desk already learned. It logs + records + exposes
-// state; a human/operator decides. Wiring an auto-de-risk is a later step,
-// only after the signal is validated against real dumps.
+// over, minutes before price breaks the band and the reactive break-exit
+// fires.
+//
+// ARMED 2026-08-28 (operator decision, after the midday CASHCAT dump cost
+// ~$200 riding a 15.6% leg under the alert-only contract): the SHARP signal
+// now acts. When pressure prints on a held pool, the pilot guard flattens
+// that venue's seats to cash on its next tick and new entries into the venue
+// are refused for a lockout window. The signal spent 08-26 -> 08-28 validated
+// against live tape (one real dump caught, absorbed selling correctly
+// ignored), which was the stated bar for this step. The three-condition
+// verdict is unchanged; false positives cost one ~$5 round-trip, a true
+// positive un-acted-on measured ~$200. MERIDIAN_DUMP_AUTO_EXIT=off restores
+// alert-only. The SLOW-BLEED layer below stays alert-only: a grind is a
+// judgment call, a one-sided accelerating dump is not.
 // SLOW-BLEED LAYER (added 2026-08-26 after the CASHCAT grind): the sharp-dump
 // verdict above watches MINUTES and correctly stayed silent through a two-day
 // stairstep decline — every 2-minute window looked calm while the price walked
@@ -51,6 +59,95 @@ const alerted = new Map<string, boolean>();
 
 export function dumpWatchState(): DumpReading[] {
   return [...latest.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+// ---------------------------------------------------------------------------
+// The armed step: exit verdict + re-entry lockout.
+// ---------------------------------------------------------------------------
+const AUTO_EXIT = (process.env.MERIDIAN_DUMP_AUTO_EXIT ?? "on") !== "off";
+const EXIT_LOCKOUT_MS = Number(process.env.MERIDIAN_DUMP_EXIT_LOCKOUT_MIN ?? 90) * 60_000;
+// A reading older than two scan intervals is a stopped watch, not a signal.
+// Acting on stale pressure would sell into whatever happened AFTER the scan
+// died, which is exactly the blind trade this whole file exists to prevent.
+const READING_FRESH_MS = 2 * WATCH_MS + 60_000;
+
+export function dumpAutoExitArmed(): boolean {
+  return AUTO_EXIT;
+}
+
+/** The most recent sharp reading for one symbol, if the watch has produced one. */
+export function latestDumpReading(symbol: string): DumpReading | undefined {
+  return latest.get(symbol.toUpperCase());
+}
+
+/** PURE: should an armed guard flatten this venue's seats now? Exported for
+ *  tests. Requires the signal to be armed, present, fresh, and printing
+ *  pressure; anything less keeps the alert-only behavior. */
+export function dumpExitVerdict(
+  reading: DumpReading | undefined,
+  nowMs: number,
+  armed = AUTO_EXIT,
+  freshMs = READING_FRESH_MS,
+): { act: boolean; reason: string } {
+  if (!armed) return { act: false, reason: "auto-exit disarmed (MERIDIAN_DUMP_AUTO_EXIT=off)" };
+  if (!reading) return { act: false, reason: "no dump reading for this symbol yet" };
+  if (!reading.pressure) return { act: false, reason: reading.reason };
+  const age = nowMs - reading.at;
+  if (age > freshMs) return { act: false, reason: `pressure reading is stale (${Math.round(age / 1000)}s old); not acting on a dead watch` };
+  return { act: true, reason: `dump pressure live: ${reading.reason} over ${reading.swaps} swaps` };
+}
+
+// Lockout survives restarts on disk: a dump-exit followed by a crash-loop
+// redeploy must not wake up amnesiac and buy straight back into the dump.
+const LOCKOUT_PATH = dataPath("dump-lockout.json");
+let lockouts: Record<string, number> | null = null;
+
+function loadLockouts(): Record<string, number> {
+  if (lockouts) return lockouts;
+  try {
+    lockouts = existsSync(LOCKOUT_PATH) ? (JSON.parse(readFileSync(LOCKOUT_PATH, "utf8")) as Record<string, number>) : {};
+  } catch {
+    lockouts = {};
+  }
+  return lockouts;
+}
+
+/** Called by the guard right after a dump-exit lands: no new entries into
+ *  this venue until the lockout rolls off. A zero lockout disables. */
+export function recordDumpExit(symbol: string, nowMs = Date.now()): void {
+  if (EXIT_LOCKOUT_MS <= 0) return;
+  const l = loadLockouts();
+  l[symbol.toUpperCase()] = nowMs + EXIT_LOCKOUT_MS;
+  try {
+    writeFileSync(LOCKOUT_PATH, JSON.stringify(l, null, 2));
+  } catch (err) {
+    console.error(`[dumpWatch] lockout save failed (in-memory only until restart): ${err instanceof Error ? err.message.slice(0, 80) : err}`);
+  }
+  appendLedger("dump-watch.jsonl", { ts: nowMs, kind: "dump-exit-lockout", symbol: symbol.toUpperCase(), untilTs: nowMs + EXIT_LOCKOUT_MS });
+}
+
+/** PURE: why a mint into this venue is refused right now, or null when it is
+ *  allowed. Two independent vetoes: an active post-exit lockout, and LIVE
+ *  pressure on the tape this minute (no lockout needed to refuse buying into
+ *  a dump that is still printing). Exported for tests. */
+export function mintRefusal(
+  lockUntilMs: number | undefined,
+  reading: DumpReading | undefined,
+  nowMs: number,
+  freshMs = READING_FRESH_MS,
+): string | null {
+  if (lockUntilMs && nowMs < lockUntilMs) {
+    return `dump-exit lockout: this venue was flattened on live dump pressure; no re-entry for another ${Math.ceil((lockUntilMs - nowMs) / 60_000)}m (MERIDIAN_DUMP_EXIT_LOCKOUT_MIN=0 disables)`;
+  }
+  if (reading?.pressure && nowMs - reading.at <= freshMs) {
+    return `dump pressure is live on this pool right now (${reading.reason}); not opening into a printing dump`;
+  }
+  return null;
+}
+
+/** The live gate openInPool consults before any entry. */
+export function dumpMintRefusal(symbol: string, nowMs = Date.now()): string | null {
+  return mintRefusal(loadLockouts()[symbol.toUpperCase()], latest.get(symbol.toUpperCase()), nowMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +364,10 @@ async function tick(): Promise<void> {
         if (!r) continue;
         if (r.pressure && !alerted.get(s)) {
           alerted.set(s, true);
-          console.error(`[dumpWatch] EARLY WARNING on ${s}: ${r.reason} over ${r.swaps} swaps — one-sided selling accelerating with price rolling over. ALERT ONLY; verify before de-risking.`);
+          const posture = AUTO_EXIT
+            ? "AUTO-EXIT ARMED: the pilot guard flattens this venue's seats on its next tick."
+            : "ALERT ONLY (auto-exit disarmed); verify before de-risking.";
+          console.error(`[dumpWatch] EARLY WARNING on ${s}: ${r.reason} over ${r.swaps} swaps, one-sided selling accelerating with price rolling over. ${posture}`);
           appendLedger("dump-watch.jsonl", { ts: r.at, ...r });
         } else if (!r.pressure && alerted.get(s)) {
           alerted.set(s, false);
@@ -288,7 +388,7 @@ export function startDumpWatch(): NodeJS.Timeout | undefined {
     return;
   }
   console.log(
-    `[dumpWatch] armed: leading sell-flow watch on held seat pools every ${Math.round(WATCH_MS / 1000)}s (alert-only; fires when sell-share>=${SELL_SHARE}, accel>=${ACCEL}x, and price<=${VEL_PCT}%)`,
+    `[dumpWatch] sharp layer: sell-flow watch on held seat pools every ${Math.round(WATCH_MS / 1000)}s, fires when sell-share>=${SELL_SHARE}, accel>=${ACCEL}x, and price<=${VEL_PCT}%. ${AUTO_EXIT ? `AUTO-EXIT ARMED (pilot guard flattens the venue; ${Math.round(EXIT_LOCKOUT_MS / 60000)}m re-entry lockout)` : "alert-only (MERIDIAN_DUMP_AUTO_EXIT=off)"}`,
   );
   console.log(
     `[dumpWatch] slow-bleed layer armed: fires on a ${BLEED_PCT}%+ drawdown from the ${BLEED_WINDOW_HOURS}h peak with >=${Math.round(BLEED_NEG_SHARE * 100)}% negative steps and avg sell-share >=${BLEED_SELL_PCT}% over >=${BLEED_MIN_HOURS}h (alert-only; catches the grinds the sharp signal skips)`,

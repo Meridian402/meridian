@@ -96,7 +96,7 @@ import { readAttributionRows, aggregateAttribution, printAttributionReport } fro
 import { runAttributionBackfill } from "./attributionBackfill.js";
 import { submitProposal, previewProposal, listProposals, getProposal, decideProposal, markExecuted, markFailed } from "./agentProposals.js";
 import { INTEGRATION_DOC } from "./integrationDoc.js";
-import { startDumpWatch, dumpWatchState, bleedWatchState } from "./dumpWatch.js";
+import { startDumpWatch, dumpWatchState, bleedWatchState, dumpAutoExitArmed } from "./dumpWatch.js";
 import { startDailyReconcile, dailyReconcileState } from "./dailyReconcile.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { parseAbiItem } from "viem";
@@ -2231,7 +2231,8 @@ app.get("/api/dump-watch", (_req: Request, res: Response) => {
   res.json({
     readings: dumpWatchState(),
     bleed: bleedWatchState(),
-    note: "Two layers, both alert-only. 'readings' is the minutes-scale sharp-dump signal: pressure fires only when selling is dominant AND accelerating AND price is rolling over (absorbed selling is a common false positive). 'bleed' is the hours-scale grind signal: bleeding fires on a sustained drawdown from the window peak with mostly-negative steps and sellers persistently present — the pattern the sharp signal deliberately skips. Neither moves funds.",
+    autoExitArmed: dumpAutoExitArmed(),
+    note: "'readings' is the minutes-scale sharp-dump signal: pressure fires only when selling is dominant AND accelerating AND price is rolling over (absorbed selling is a common false positive). When autoExitArmed is true, live pressure on a held pool makes the pilot guard flatten that venue to cash and refuse re-entry for a lockout window; disarmed it is alert-only. 'bleed' is the hours-scale grind signal: bleeding fires on a sustained drawdown from the window peak with mostly-negative steps and sellers persistently present, the pattern the sharp signal deliberately skips. The bleed layer stays alert-only.",
   });
 });
 
