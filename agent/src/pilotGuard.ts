@@ -562,7 +562,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}} — collect ≥$${COLLECT_THRESHOLD_USD}, re-center ${RECENTER_BELOW_MIN_MS / 60000}m below / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect >=$${COLLECT_THRESHOLD_USD}, re-center ${RECENTER_BELOW_MIN_MS / 60000}m below / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, floor $${FLOOR_USD}`,
   );
   return timer;
 }
