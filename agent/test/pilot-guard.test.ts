@@ -99,3 +99,40 @@ test("skim sweeps only the excess above the float target", () => {
   assert.equal(skimAmountUsd(305, 300, 10), 0, "sub-minimum excess is not worth a transaction");
   assert.equal(skimAmountUsd(250, 300, 10), 0, "under target sweeps nothing, ever");
 });
+
+// ── the dump bid: when the desk stands below a fall and gets paid ────────────
+import { dumpBidDecision } from "../src/pilotGuard.js";
+
+const BID_BASE = {
+  enabled: true,
+  lockoutUntil: 2_000_000 as number | undefined,
+  now: 1_000_000,
+  venueSeats: 0,
+  hasActiveBid: false,
+  usdgAvailUsd: 500,
+  bidUsd: 100,
+  bidsToday: 0,
+  bidsPerDay: 3,
+  stoodDown: false,
+};
+
+test("a flattened venue in lockout with budget gets exactly one bid", () => {
+  assert.equal(dumpBidDecision({ ...BID_BASE }).act, true);
+  assert.equal(dumpBidDecision({ ...BID_BASE, hasActiveBid: true }).act, false, "one bid per lockout");
+});
+
+test("no lockout means no bid: this is a dump response, not a standing strategy", () => {
+  assert.equal(dumpBidDecision({ ...BID_BASE, lockoutUntil: undefined }).act, false);
+  assert.equal(dumpBidDecision({ ...BID_BASE, now: 3_000_000 }).act, false, "an expired lockout is no lockout");
+});
+
+test("a venue still holding seats is not flat; no bid on top of exposure", () => {
+  assert.equal(dumpBidDecision({ ...BID_BASE, venueSeats: 1 }).act, false);
+});
+
+test("the stand-down, the daily budget, the wallet, and the kill switch all veto", () => {
+  assert.equal(dumpBidDecision({ ...BID_BASE, stoodDown: true }).act, false);
+  assert.equal(dumpBidDecision({ ...BID_BASE, bidsToday: 3 }).act, false);
+  assert.equal(dumpBidDecision({ ...BID_BASE, usdgAvailUsd: 60 }).act, false);
+  assert.equal(dumpBidDecision({ ...BID_BASE, enabled: false }).act, false);
+});

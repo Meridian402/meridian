@@ -230,13 +230,21 @@ export function computeMintPlan(args: {
   recipient: Address;
   maxUsd?: number;
   nowMs: number;
+  /** Explicit tick bounds override the width-around-spot placement. The
+   *  in-range amount math below is already correct for a range entirely on
+   *  one side of spot (the other side's liquidity bound goes to Infinity and
+   *  its needed amount to zero), which is what the dump bid relies on. */
+  bounds?: { tickLower: number; tickUpper: number };
 }): MintPlan {
-  const { key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient, maxUsd, nowMs } = args;
+  const { key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient, maxUsd, nowMs, bounds } = args;
 
   const halfTicks = Math.log(1 + widthPct / 200) / Math.log(1.0001);
   const ts = k.tickSpacing;
-  const tickLower = Math.floor((tick - halfTicks) / ts) * ts;
-  const tickUpper = Math.ceil((tick + halfTicks) / ts) * ts;
+  const tickLower = bounds ? bounds.tickLower : Math.floor((tick - halfTicks) / ts) * ts;
+  const tickUpper = bounds ? bounds.tickUpper : Math.ceil((tick + halfTicks) / ts) * ts;
+  if (tickLower >= tickUpper || tickLower % ts !== 0 || tickUpper % ts !== 0) {
+    throw new Error(`invalid tick bounds [${tickLower}, ${tickUpper}] for spacing ${ts}`);
+  }
 
   // Keep a whisper of headroom so maxes never bind on rounding.
   let amt0 = Number(bal0Raw) * 0.995;
@@ -421,6 +429,109 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
     const tokenUsd = (usdgIsC0 ? 1 / praw : praw) * 1e12;
     void attribute({ sleeve: "usdg", venue: symbol, tokenId, mech: "mint", usdIn: usdgIn, usdOut: 0, feeUsd: 0, tokenUsd, gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n), tx: hash });
   }
+  return record;
+}
+
+// ---------------------------------------------------------------------------
+// THE DUMP BID (2026-08-28, operator: "we need to be earning while tokens go
+// down just like we earn on tokens going up"). After a dump-exit flattens a
+// venue, the desk does not have to sit fully aside: a single-sided, all-USDG
+// band placed BELOW the falling price is the bid side of the book. Every
+// panic sell that fills through it pays us the pool fee, and the inventory
+// it accumulates was bought at a discount we chose in advance, not a price
+// the dump chose for us. The USDG-sleeve sibling of the meme rotor's
+// capitulation catcher, built on the same audited mint plan (ONE BRAIN).
+// ---------------------------------------------------------------------------
+
+/** PURE: spacing-aligned tick bounds for a bid band on the USDG side of spot,
+ *  `depthPct` below the current price, `widthPct` wide. Orientation matters:
+ *  for a currency0 token the price falls as the tick falls, so "below spot"
+ *  is lower ticks; for a currency1 token it is the mirror. The returned range
+ *  is strictly out of range on the USDG side, so a mint in it pulls only
+ *  USDG. Exported for tests. */
+export function bidBelowBounds(
+  tick: number,
+  tickSpacing: number,
+  tokenIsC0: boolean,
+  depthPct: number,
+  widthPct: number,
+): { tickLower: number; tickUpper: number } {
+  const depthTicks = Math.log(1 + depthPct / 100) / Math.log(1.0001);
+  const widthTicks = Math.max(tickSpacing, Math.log(1 + widthPct / 100) / Math.log(1.0001));
+  if (tokenIsC0) {
+    // Price falls with the tick: the bid sits below in ticks.
+    let upper = Math.floor((tick - depthTicks) / tickSpacing) * tickSpacing;
+    if (upper >= tick) upper -= tickSpacing;
+    const lower = Math.floor((upper - widthTicks) / tickSpacing) * tickSpacing;
+    return { tickLower: lower, tickUpper: upper };
+  }
+  // Price falls as the tick RISES: the bid sits above in ticks.
+  let lower = Math.ceil((tick + depthTicks) / tickSpacing) * tickSpacing;
+  if (lower <= tick) lower += tickSpacing;
+  const upper = Math.ceil((lower + widthTicks) / tickSpacing) * tickSpacing;
+  return { tickLower: lower, tickUpper: upper };
+}
+
+/** Mint the dump bid: one single-sided USDG band below the current price.
+ *  Same executor rails as mintRange (runaway breaker, approvals, ledger,
+ *  attribution) with its own attribution mech so the accountant can price
+ *  this strategy on its own line. */
+export async function mintDumpBid(params: { symbol: string; depthPct: number; widthPct: number; bidUsd: number }): Promise<LpPositionRecord> {
+  const { symbol, depthPct, widthPct, bidUsd } = params;
+  guardWalletOp(`dump-bid ${symbol}`);
+  recordWalletOp(0, "dump-bid");
+  const k = poolKeyOf(symbol);
+  const signer = getAgentSigner()!;
+  const client = getPublicClient();
+  const { sqrtP, tick } = await slot0(symbol);
+  const tokenIsC0 = k.currency0.toLowerCase() === k.token.toLowerCase();
+  const bounds = bidBelowBounds(tick, k.tickSpacing, tokenIsC0, depthPct, widthPct);
+
+  const [bal0Raw, bal1Raw] = await Promise.all([
+    client.readContract({ address: k.currency0, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+    client.readContract({ address: k.currency1, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+  ]);
+  // maxUsd caps each SIDE at half; a single-sided band spends only its USDG
+  // side, so the whole-bid budget rides in as 2x.
+  const plan = computeMintPlan({ key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient: signer.address, maxUsd: bidUsd * 2, nowMs: Date.now(), bounds });
+
+  await ensureApprovedForPM(k.currency0);
+  await ensureApprovedForPM(k.currency1);
+  const wallet = getWalletClient();
+  const hash = await wallet.sendTransaction({ to: plan.tx.to, data: plan.tx.data, value: plan.tx.value });
+  const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
+  if (receipt.status !== "success") throw new Error(`dump-bid mint reverted: ${hash}`);
+
+  const transferTopic = keccak256(toBytes("Transfer(address,address,uint256)"));
+  const mintLog = receipt.logs.find(
+    (l) => l.address.toLowerCase() === POSITION_MANAGER.toLowerCase() && l.topics[0] === transferTopic && BigInt(l.topics[1]!) === 0n,
+  );
+  const tokenId = mintLog ? BigInt(mintLog.topics[3]!).toString() : "unknown";
+
+  const [after0, after1] = await Promise.all([
+    client.readContract({ address: k.currency0, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+    client.readContract({ address: k.currency1, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),
+  ]);
+  const usdgIsC0 = k.currency0.toLowerCase() === USDG.toLowerCase();
+  const usdgIn = Number((usdgIsC0 ? bal0Raw : bal1Raw) - (usdgIsC0 ? after0 : after1)) / 1e6;
+
+  const record: LpPositionRecord = {
+    tokenId,
+    symbol,
+    tickLower: plan.tickLower,
+    tickUpper: plan.tickUpper,
+    liquidity: plan.liquidity.toString(),
+    usdgIn,
+    tokenIn: 0,
+    mintedAt: Date.now(),
+    txHash: hash,
+    fee: k.fee,
+    tickSpacing: k.tickSpacing,
+    hasCostBasis: true,
+  };
+  appendLedger("lp-positions.jsonl", record);
+  recordExecution({ ts: Date.now(), kind: "lp-mint", fromSymbol: "USDG", toSymbol: symbol, amountUsd: usdgIn, success: true, txHash: hash });
+  void attribute({ sleeve: "usdg", venue: symbol, tokenId, mech: "dump-bid-mint", usdIn: usdgIn, usdOut: 0, feeUsd: 0, gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n), tx: hash });
   return record;
 }
 

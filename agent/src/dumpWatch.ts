@@ -150,6 +150,14 @@ export function dumpMintRefusal(symbol: string, nowMs = Date.now()): string | nu
   return mintRefusal(loadLockouts()[symbol.toUpperCase()], latest.get(symbol.toUpperCase()), nowMs);
 }
 
+/** When this venue's post-dump-exit lockout ends, if one is active. The dump
+ *  bid runs INSIDE this window on purpose: the lockout forbids re-entering at
+ *  spot, not standing below the fall with a resting bid. */
+export function dumpLockoutUntil(symbol: string, nowMs = Date.now()): number | undefined {
+  const until = loadLockouts()[symbol.toUpperCase()];
+  return until && nowMs < until ? until : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Slow bleed: hours-scale grind detection.
 // ---------------------------------------------------------------------------

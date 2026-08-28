@@ -71,3 +71,40 @@ test("maxUsd cap shrinks the mint vs uncapped", () => {
 test("the mint always targets the position manager", () => {
   assert.equal(plan(DESK).tx.to.toLowerCase(), "0x58daec3116aae6d93017baaea7749052e8a04fa7");
 });
+
+// ---- the dump bid: one-sided USDG bands below a falling price ---------------
+import { bidBelowBounds } from "../src/venues/lpPositions.js";
+
+test("bidBelowBounds (token=currency0): band sits strictly below spot, aligned, at depth", () => {
+  const b = bidBelowBounds(1000, 60, true, 8, 6);
+  assert.ok(b.tickUpper < 1000, "bid must sit below spot in ticks");
+  assert.equal(Math.abs(b.tickLower % 60), 0);
+  assert.equal(Math.abs(b.tickUpper % 60), 0);
+  assert.ok(b.tickLower < b.tickUpper);
+  // ~8% depth in ticks is ln(1.08)/ln(1.0001) ~ 770; spacing-aligned below.
+  assert.ok(1000 - b.tickUpper >= 720 && 1000 - b.tickUpper <= 900, `depth landed at ${1000 - b.tickUpper} ticks`);
+});
+
+test("bidBelowBounds (token=currency1): 'below spot in price' is above in ticks", () => {
+  const b = bidBelowBounds(1000, 60, false, 8, 6);
+  assert.ok(b.tickLower > 1000, "for a currency1 token the bid sits above in ticks");
+  assert.equal(Math.abs(b.tickLower % 60), 0);
+  assert.equal(Math.abs(b.tickUpper % 60), 0);
+  assert.ok(b.tickUpper > b.tickLower);
+});
+
+test("a bid-side plan is single-sided: it pulls only USDG, and the bid budget caps it", () => {
+  // Fixture pool: USDG is currency0, token currency1 -> bid is above in ticks.
+  const bounds = bidBelowBounds(0, 60, false, 8, 6);
+  const p = plan(DESK, { bounds, maxUsd: 200 }); // $100 bid rides as maxUsd 2x
+  assert.ok(p.liquidity > 0n);
+  assert.equal(p.amountMax1, 0n, "the token side of a resting bid must pull nothing");
+  assert.ok(p.amountMax0 > 0n, "the USDG side carries the whole bid");
+  // capped at ~$100 of USDG (6 decimals), with the planner's ~1.5% headroom
+  assert.ok(p.amountMax0 <= 103_000000n, `amountMax0 ${p.amountMax0} should be ~$100 of USDG`);
+});
+
+test("misaligned or inverted explicit bounds are refused outright", () => {
+  assert.throws(() => plan(DESK, { bounds: { tickLower: -601, tickUpper: -300 } }));
+  assert.throws(() => plan(DESK, { bounds: { tickLower: 300, tickUpper: -300 } }));
+});

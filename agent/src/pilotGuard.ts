@@ -14,7 +14,9 @@
 // It never opens fresh positions (operator-only via lp-open), never resizes,
 // never chases venues. The stock guard's clock is US market hours and is
 // wrong for these 24/7 pools; that is why this file exists.
-import { lpPositionsWithValue, uncollectedFeesUsd, collectFees, withdrawPosition, poolTick, type LpPositionValue } from "./venues/lpPositions.js";
+import { lpPositionsWithValue, uncollectedFeesUsd, collectFees, withdrawPosition, poolTick, mintDumpBid, type LpPositionValue } from "./venues/lpPositions.js";
+import { getPublicClient } from "./venues/signer.js";
+import { parseAbiItem } from "viem";
 import { realSellStockForUsdg, tokenAddressFor, poolFeePct } from "./venues/stockPools.js";
 import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
@@ -26,7 +28,7 @@ import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
-import { latestDumpReading, dumpExitVerdict, recordDumpExit } from "./dumpWatch.js";
+import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil } from "./dumpWatch.js";
 
 const CHECK_MS = 3 * 60 * 1000;
 const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
@@ -186,12 +188,132 @@ export function recenterPaysBack(costUsd: number, feePerHourUsd: number, horizon
 // instead of -22% later; roughly two fee-days instead of five. 0 disables.
 const BREAK_EXIT_MS = Number(process.env.MERIDIAN_PILOT_BREAK_EXIT_MIN ?? 45) * 60 * 1000;
 
+// THE DUMP BID (2026-08-28, operator: earn on the way down too). While a
+// venue sits in its post-dump-exit lockout, the desk places ONE small
+// all-USDG band below the fall. Panic sellers filling through it pay us the
+// pool fee; what it buys, it buys at a discount chosen in advance. The
+// USDG-sleeve sibling of the meme catcher, with the same shape of bounds:
+// one bid per lockout, a hard size cap, a daily count, and a kill switch.
+const DUMP_BID_ON = (process.env.MERIDIAN_DUMP_BID ?? "on") !== "off";
+const DUMP_BID_USD = Number(process.env.MERIDIAN_DUMP_BID_USD ?? 100);
+const DUMP_BID_DEPTH_PCT = Number(process.env.MERIDIAN_DUMP_BID_DEPTH_PCT ?? 8);
+const DUMP_BID_WIDTH_PCT = Number(process.env.MERIDIAN_DUMP_BID_WIDTH_PCT ?? 6);
+const DUMP_BIDS_PER_DAY = Number(process.env.MERIDIAN_DUMP_BIDS_PER_DAY ?? 3);
+const DUMP_BID_STATE = dataPath("dump-bids.json");
+const USDG_TOKEN = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" as const;
+
+interface DumpBidState {
+  [symbol: string]: { tokenId: string; placedAt: number };
+}
+function loadDumpBids(): DumpBidState {
+  try {
+    return existsSync(DUMP_BID_STATE) ? (JSON.parse(readFileSync(DUMP_BID_STATE, "utf8")) as DumpBidState) : {};
+  } catch {
+    return {};
+  }
+}
+function saveDumpBids(s: DumpBidState): void {
+  try {
+    writeFileSync(DUMP_BID_STATE, JSON.stringify(s, null, 2));
+  } catch (err) {
+    console.error(`[pilotGuard] dump-bid state save failed: ${err instanceof Error ? err.message.slice(0, 80) : err}`);
+  }
+}
+let dumpBidDay = "";
+let dumpBidsToday = 0;
+
+/** PURE: place a dump bid in this venue now? Exported for tests. */
+export function dumpBidDecision(args: {
+  enabled: boolean;
+  lockoutUntil: number | undefined;
+  now: number;
+  venueSeats: number;
+  hasActiveBid: boolean;
+  usdgAvailUsd: number;
+  bidUsd: number;
+  bidsToday: number;
+  bidsPerDay: number;
+  stoodDown: boolean;
+}): { act: boolean; reason: string } {
+  if (!args.enabled) return { act: false, reason: "dump bid disabled (MERIDIAN_DUMP_BID=off)" };
+  if (!args.lockoutUntil || args.now >= args.lockoutUntil) return { act: false, reason: "no active dump lockout; the bid only stands under one" };
+  if (args.venueSeats > 0) return { act: false, reason: "venue still holds seats; the bid is for a flattened venue only" };
+  if (args.hasActiveBid) return { act: false, reason: "one bid per lockout, and it is already resting" };
+  if (args.stoodDown) return { act: false, reason: "portfolio stand-down: no new exposure of any shape" };
+  if (args.bidsToday >= args.bidsPerDay) return { act: false, reason: `daily dump-bid budget (${args.bidsPerDay}) spent` };
+  if (args.usdgAvailUsd < args.bidUsd) return { act: false, reason: `wallet USDG $${args.usdgAvailUsd.toFixed(0)} under the $${args.bidUsd} bid size` };
+  return { act: true, reason: "flattened venue in lockout, budget available" };
+}
+
+/** Where the resting bid's tokenId lives, if this venue has one. */
+function activeDumpBid(symbol: string): { tokenId: string; placedAt: number } | undefined {
+  return loadDumpBids()[symbol.toUpperCase()];
+}
+
+async function maybePlaceDumpBids(positions: readonly LpPositionValue[]): Promise<void> {
+  if (!DUMP_BID_ON) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== dumpBidDay) {
+    dumpBidDay = today;
+    dumpBidsToday = 0;
+  }
+  const now = Date.now();
+  for (const symbol of HANDS_OFF_SYMBOLS) {
+    const lockUntil = dumpLockoutUntil(symbol, now);
+    if (!lockUntil) continue; // the common case, checked before anything costs a call
+    let usdgAvailUsd = 0;
+    try {
+      const raw = await getPublicClient().readContract({
+        address: USDG_TOKEN,
+        abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")],
+        functionName: "balanceOf",
+        args: [getAgentSigner()!.address],
+      });
+      usdgAvailUsd = Number(raw) / 1e6;
+    } catch {
+      continue; // no balance read, no bid; next tick retries
+    }
+    const call = dumpBidDecision({
+      enabled: DUMP_BID_ON,
+      lockoutUntil: lockUntil,
+      now,
+      venueSeats: positions.filter((p) => p.symbol === symbol).length,
+      hasActiveBid: !!activeDumpBid(symbol),
+      usdgAvailUsd,
+      bidUsd: DUMP_BID_USD,
+      bidsToday: dumpBidsToday,
+      bidsPerDay: DUMP_BIDS_PER_DAY,
+      stoodDown: portfolioStoodDown(),
+    });
+    if (!call.act) continue;
+    if (!walletOpsAvailable(1)) continue;
+    try {
+      const rec = await withHouseWalletLock(`dump-bid ${symbol}`, () =>
+        mintDumpBid({ symbol, depthPct: DUMP_BID_DEPTH_PCT, widthPct: DUMP_BID_WIDTH_PCT, bidUsd: DUMP_BID_USD }),
+      );
+      dumpBidsToday += 1;
+      const s = loadDumpBids();
+      s[symbol.toUpperCase()] = { tokenId: rec.tokenId, placedAt: now };
+      saveDumpBids(s);
+      appendLedger("pilot-guard.jsonl", { ts: now, kind: "dump-bid", tokenId: rec.tokenId, symbol, valueUsd: rec.usdgIn });
+      console.error(
+        `[pilotGuard] DUMP BID: $${rec.usdgIn.toFixed(2)} USDG resting ${DUMP_BID_DEPTH_PCT}% below ${symbol} (#${rec.tokenId}); sellers filling through it pay us the fee`,
+      );
+    } catch (err) {
+      console.error(`[pilotGuard] dump bid on ${symbol} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
+    }
+  }
+}
+
 async function runTick(): Promise<void> {
   // The sell queue first, before the position check can return early: a
   // stranded token is unhedged exposure whether or not any position is open.
   // 6,329 PONS rode the 08-18 dump because the failed sale was only a log line.
   await retryPendingSells();
   const positions = (await lpPositionsWithValue()).filter((p) => HANDS_OFF_SYMBOLS.has(p.symbol));
+  // The dump bid places when a venue is FLAT and locked out, so it must run
+  // before (and regardless of) the empty-board early return below.
+  await maybePlaceDumpBids(positions);
   if (positions.length === 0) {
     outSince.clear();
     return;
@@ -223,6 +345,39 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
 
   const fees = await uncollectedFeesUsd(p).catch(() => 0);
 
+  // THE RESTING DUMP BID is not a seat to manage, it is an order working:
+  // while unfilled it holds only USDG (nothing to floor, nothing to
+  // re-center), and the normal exit-above reflex would yank it 12 minutes
+  // after placement. When its lockout window closes unfilled, it comes home
+  // to cash for the cost of gas. When price fills into it, it graduates to a
+  // normal seat: lineage from its own deposit, every guard from then on.
+  const bid = activeDumpBid(p.symbol);
+  if (bid && bid.tokenId === key) {
+    const tokenIsC0Bid = (tokenAddressFor(p.symbol) ?? "").toLowerCase() < USDG_TOKEN.toLowerCase();
+    const unfilled = tokenIsC0Bid ? tick >= p.tickUpper : tick <= p.tickLower;
+    if (unfilled) {
+      if (!dumpLockoutUntil(p.symbol, now)) {
+        console.error(`[pilotGuard] dump bid #${p.tokenId} (${p.symbol}) expired unfilled; withdrawing the USDG`);
+        await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "dump-bid-expire" });
+        if (p.tokenAmount * p.tokenPriceUsd > 1) await sellSymbolsOrEnqueue([p.symbol], "dump-bid-expire");
+        appendLedger("pilot-guard.jsonl", { ts: now, kind: "dump-bid-expire", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd });
+        const s = loadDumpBids();
+        delete s[p.symbol.toUpperCase()];
+        saveDumpBids(s);
+        outSince.delete(key);
+      }
+      return; // resting: leave the order alone
+    }
+    // Filled (or filling): promote to a normal seat.
+    console.error(`[pilotGuard] dump bid #${p.tokenId} (${p.symbol}) FILLED at the discount; promoting to a managed seat`);
+    setLineage(key, p.usdgIn > 0 ? p.usdgIn : p.valueUsd);
+    appendLedger("pilot-guard.jsonl", { ts: now, kind: "dump-bid-fill", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd });
+    const s = loadDumpBids();
+    delete s[p.symbol.toUpperCase()];
+    saveDumpBids(s);
+    // fall through: from here it is a seat like any other
+  }
+
   // 0. THE DUMP EXIT (2026-08-28, operator decision after the midday CASHCAT
   // dump). Checked before everything, in-range included: the whole point is
   // to act DURING the leg, while the band is still converting USDG into the
@@ -231,8 +386,13 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
   // over) is the trigger; the verdict declines on a disarmed switch or a
   // stale reading. Exits deliberately ignore the stand-down, same as the
   // floor: selling is always allowed.
+  // While the venue's own dump lockout is active, the only seat that can
+  // exist here is a just-filled bid, and cutting it on the same pressure
+  // that placed it would undo the strategy at its moment of working. The
+  // floor and break-exit still bound it; full dump-exit reflexes resume the
+  // moment the lockout rolls off.
   const dumpCall = dumpExitVerdict(latestDumpReading(p.symbol), now);
-  if (dumpCall.act) {
+  if (dumpCall.act && !dumpLockoutUntil(p.symbol, now)) {
     console.error(`[pilotGuard] DUMP EXIT: #${p.tokenId} (${p.symbol}) worth $${p.valueUsd.toFixed(2)}, ${dumpCall.reason}; flattening to cash now instead of riding the leg`);
     await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "dump-exit" });
     const sold = await sellSymbolsOrEnqueue([p.symbol], "dump-exit");
