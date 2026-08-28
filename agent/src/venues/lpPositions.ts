@@ -58,6 +58,10 @@ const LP_POOLS: Record<string, { token: Address; fee: number; tickSpacing: numbe
   MU: { token: "0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD" as Address, fee: 10000, tickSpacing: 200 },
   TTWO: { token: "0x5e81213613b6B86EaB4c6c50d718d34359459786" as Address, fee: 40000, tickSpacing: 400 },
   STONKBROKER: { token: "0xe934e36A439C94017B64a3FecE66AF12099aBF50" as Address, fee: 9000, tickSpacing: 90 },
+  // Artificial Inu (operator add 2026-08-28; provenance + measurements in
+  // stockPools.POOLS). Same dry-test contract as its neighbors: mintable by
+  // the operator, invisible to the autonomous rotor until a mint lands.
+  AI: { token: "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18" as Address, fee: 10000, tickSpacing: 200 },
 };
 // The trusted, mint-proven baseline. Kept SEPARATE from the qualifier so these
 // five are always deployable even before the qualifier's cache has warmed, and

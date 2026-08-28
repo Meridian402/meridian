@@ -365,6 +365,11 @@ async function tick(): Promise<void> {
     const symbols = [...new Set([
       ...positions.map((p) => p.symbol.toUpperCase()),
       ...ENGINE_SYMBOLS,
+      // Operator watchlist beyond the held/engine set: pools worth building a
+      // tape on BEFORE any capital goes in, since admission, the bleed series,
+      // and any future entry decision all want history that only accumulates
+      // while someone is looking. AI added 2026-08-28 on the operator's call.
+      ...(process.env.MERIDIAN_DUMP_WATCH_EXTRA ?? "AI").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
     ])].filter((s) => usdgPoolIdFor(s));
     for (const s of symbols) {
       try {

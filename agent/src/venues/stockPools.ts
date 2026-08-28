@@ -94,6 +94,13 @@ const POOLS: Record<string, PoolEntry> = {
   MU: { token: "0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD" as Address, quote: "USDG", fee: 10000, tickSpacing: 200 },
   TTWO: { token: "0x5e81213613b6B86EaB4c6c50d718d34359459786" as Address, quote: "USDG", fee: 40000, tickSpacing: 400 },
   STONKBROKER: { token: "0xe934e36A439C94017B64a3FecE66AF12099aBF50" as Address, quote: "USDG", fee: 9000, tickSpacing: 90 },
+  // Artificial Inu (operator add, 2026-08-28: "really good volume"). Measured on
+  // add: ~$438k/day pace over a 6h scan (2,467 swaps), balanced 50% sell-share,
+  // 1% tier live at ~$0.105 with ~31M tokens of PM reserves; transfer sim from
+  // the PoolManager passes (not SPCX-restricted). No Index listing (the ticker
+  // collides with C3.ai's but the Index universe carries no AI token). Dry-test
+  // tier like the rest of this block: no landed mint, so not auto-executable.
+  AI: { token: "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18" as Address, quote: "USDG", fee: 10000, tickSpacing: 200 },
   // SPCX still EXCLUDED. Removed 2026-07-16 after a real mint reverted (0x70a08…):
   // SPCX (SpaceX) is a TRANSFER-RESTRICTED token, so our wallet couldn't receive
   // or LP it. Re-checked 2026-07-21: a USDG→SPCX swap now LANDS in faithful
