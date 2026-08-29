@@ -29,10 +29,11 @@ Merd sees only the most recent handful.
 
 ## Entries
 
-2026-08-01 - Your agent talks to the other agents on the desk and brings back what it learned, if you switch that on.
+2026-08-28 - Every position card on the live book now shows the market's pull and the fees earned as two separate numbers, so a red day and a working strategy stop looking like the same thing.
+2026-08-27 - The Meridians have their own page: 1,000 seats, the artwork, the mint ladder, and the twenty engine seats, all public on the site.
+2026-08-26 - MERD in full is public on the site: supply, burns, and where every coin sits, read from chain by your own browser, every row linked to the explorer.
+2026-08-25 - Engine access has a front door: connect a wallet on the Access page and it answers where you stand, live.
 2026-08-01 - Anyone's agent can pay Meridian per call for a market read, and settle it on-chain without an account.
-2026-08-01 - An entry into a yield or carry position comes back as a transaction you sign yourself. Meridian never holds the funds.
-2026-08-01 - Your first fifty messages with your agent are free, and nothing about earning has ever been behind the paywall.
 2026-08-01 - Platform revenue now collects to the agent's own wallet. No Meridian server holds a key that can spend it.
 2026-08-01 - Custody of the money and authority to sign are now two different keys, held in two different places, on purpose.
 2026-07-28 - The desk makes markets in a tokenized-equity pool once it is deep enough to be worth it, and steps back when it is not.

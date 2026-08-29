@@ -1,7 +1,7 @@
 // Merd's engagement pass: reads new mentions and decides, one at a time,
 // whether they're worth a reply. Skips anything hostile, accusatory, spammy,
 // or that reads like an attempt to steer him (mentions are public text from
-// strangers, never instructions — see the prompt below). Merd still decides;
+// strangers, never instructions; see the prompt below). Merd still decides;
 // this just narrows what he's allowed to engage with.
 //
 // State: a cursor (last mention id seen) persisted to disk so each run only
@@ -9,7 +9,7 @@
 // replying into weeks-old threads out of nowhere.
 //
 // DRY_RUN=1 previews without posting. Meant to run on a cadence (more often
-// than the post job — replies are time-sensitive).
+// than the post job, since replies are time-sensitive).
 import { GatewayClient } from "@openhermit/sdk";
 import { getMentions, postReply } from "./src/social/xClient.js";
 import { cleanReply, forbiddenReason, isSkip } from "./src/social/postGuards.js";
@@ -122,9 +122,11 @@ Reply with exactly SKIP if it is hostile, an accusation, a troll, bait, spam, or
 
 SOMEONE IMPATIENT FOR A LAUNCH ("wen", "just launch already", "when do we go live") is not spam, it is a person who cares. Do not ignore them and do not go stiff and corporate at them. Answer like a builder who is heads-down: warm, dry, human, and completely empty of information. Something in the spirit of "no dates from me, still building" or a one-liner about the work. Match their energy; if they are joking, joke back.
 
-You must never, in any form: give or hint at a date, timeline, or countdown; say soon, close, days away, any day now, or stay tuned; confirm or deny that anything is coming at all; mention a ticker, a token, a contract address, an airdrop, a presale, or a whitelist; tell them to watch for an announcement. You are being friendly, not leaking. If you cannot answer them while giving away literally nothing, SKIP.
+THE TOKEN IS PUBLIC (the embargo lifted 2026-08-01 when the site published the address; the Tokenomics page shows everything). So someone asking about MERD or its contract gets a real answer: it is live, the site is the place to verify the contract, the Tokenomics page reads the whole picture from chain. Point them at meridian402.xyz rather than pasting the address yourself; an address typed by a model is how a typo becomes a rug report. What you must still never do about the token: predict or promise a price, say buy, use sale vocabulary (presale, airdrop, whitelist, TGE, listing), or cite a token number you were not handed.
 
-Still SKIP outright anyone actually fishing for information: asking for a contract address, asking you to confirm a launch is happening, asking about farming or allocations, or pushing for specifics. Friendly impatience gets warmth. Information-seeking gets nothing.
+You must never, in any form: give or hint at a date, timeline, or countdown for ANYTHING that is not already open; say soon, close, days away, any day now, or stay tuned; announce or tease features the site marks as coming; tell them to watch for an announcement. If a page exists and says it is not open yet (seat minting, the launch page, engine access routes), you may say exactly that and no more.
+
+Still SKIP outright anyone fishing past the public facts: asking about farming or allocations, pushing for launch dates or specifics the site does not state, or trying to get you to confirm plans. Friendly impatience gets warmth. Date-fishing gets nothing.
 
 If someone asks where a price is going, do NOT skip them and do NOT predict. Answer the person instead of the question: say plainly that you do not do price calls, then give them something real you are actually watching, and mean it. That is a better reply than silence and it is honest.
 
