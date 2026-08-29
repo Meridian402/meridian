@@ -89,13 +89,20 @@ export function consistencyBoard() {
 
   const stopsByDay = new Map<string, number>();
   const collectsByDay = new Map<string, number>();
-  if (existsSync(JOURNAL_PATH)) {
-    for (const line of readFileSync(JOURNAL_PATH, "utf8").split("\n")) {
+  // Both desks' journals. This board read only the meme rotor's journal while
+  // the USDG pilot sleeve became the whole desk, so days with 25 real collects
+  // printed a blank in the collects column (found 2026-08-29, same root cause
+  // as /api/desk-journal's "0 collects" caption). Pilot exits are stops in
+  // this board's vocabulary: every one is a bounded, deliberate close.
+  const PILOT_STOPS = new Set(["floor-exit", "break-exit", "dump-exit", "recenter-abort"]);
+  for (const file of [JOURNAL_PATH, dataPath("pilot-guard.jsonl")]) {
+    if (!existsSync(file)) continue;
+    for (const line of readFileSync(file, "utf8").split("\n")) {
       if (!line.trim()) continue;
       try {
         const e = JSON.parse(line) as { ts: number; kind?: string };
         const d = new Date(e.ts).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-        if (e.kind === "stop-loss") stopsByDay.set(d, (stopsByDay.get(d) ?? 0) + 1);
+        if (e.kind === "stop-loss" || PILOT_STOPS.has(e.kind ?? "")) stopsByDay.set(d, (stopsByDay.get(d) ?? 0) + 1);
         if (e.kind === "collect") collectsByDay.set(d, (collectsByDay.get(d) ?? 0) + 1);
       } catch {
         /* skip */
