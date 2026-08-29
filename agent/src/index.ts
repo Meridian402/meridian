@@ -757,19 +757,41 @@ app.get("/api/asset-scorecard", async (_req: Request, res: Response) => {
 app.get("/api/desk-journal", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
-    const path = dataPath("meme-rotations.jsonl");
-    const lines = existsSync(path)
-      ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).slice(-100)
-      : [];
-    const entries = lines
-      .map((l) => {
-        try {
-          return JSON.parse(l) as Record<string, unknown>;
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
+    const readTail = (file: string, n: number): Record<string, unknown>[] => {
+      const p = dataPath(file);
+      if (!existsSync(p)) return [];
+      return readFileSync(p, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .slice(-n)
+        .map((l) => {
+          try {
+            return JSON.parse(l) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean) as Record<string, unknown>[];
+    };
+    // BOTH desks' journals, not just the meme rotor's. The USDG pilot sleeve
+    // became the whole desk while this endpoint kept serving the retired meme
+    // journal, so the site showed "0 collects" through days when the guard was
+    // collecting every few hours (operator caught it from the site, 2026-08-29).
+    // Pilot rows are normalized to the shape the site already reads: collects
+    // keep their fee figure, every bounded exit is an honest stop, and the
+    // rest are moves.
+    const pilot = readTail("pilot-guard.jsonl", 150).map((e) => {
+      const kind = String(e.kind ?? "");
+      if (kind === "collect") return { ts: e.ts, kind: "collect", feesUsdAtRead: e.feesUsd, symbol: e.symbol };
+      if (kind === "floor-exit" || kind === "break-exit" || kind === "dump-exit" || kind === "recenter-abort") {
+        return { ts: e.ts, kind: "stop-loss", symbol: e.symbol, exit: kind };
+      }
+      return { ts: e.ts, kind, symbol: e.symbol };
+    });
+    const entries = [...readTail("meme-rotations.jsonl", 100), ...pilot].sort(
+      (a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0),
+    );
     // Delayed tape: the journal is verifiable HISTORY, not a live targeting
     // feed for whoever wants to trade against our rules. Ten minutes is
     // enough to kill the sniping value and nothing for the trust value.
