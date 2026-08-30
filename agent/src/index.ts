@@ -781,14 +781,20 @@ app.get("/api/desk-journal", (_req: Request, res: Response) => {
     // Pilot rows are normalized to the shape the site already reads: collects
     // keep their fee figure, every bounded exit is an honest stop, and the
     // rest are moves.
-    const pilot = readTail("pilot-guard.jsonl", 150).map((e) => {
-      const kind = String(e.kind ?? "");
-      if (kind === "collect") return { ts: e.ts, kind: "collect", feesUsdAtRead: e.feesUsd, symbol: e.symbol };
-      if (kind === "floor-exit" || kind === "break-exit" || kind === "dump-exit" || kind === "recenter-abort") {
-        return { ts: e.ts, kind: "stop-loss", symbol: e.symbol, exit: kind };
-      }
-      return { ts: e.ts, kind, symbol: e.symbol };
-    });
+    const pilot = readTail("pilot-guard.jsonl", 150)
+      // Dump-bid rows are a LIVE resting order's location, and the order can
+      // stand for ~90 minutes: publishing them after only the 10-minute delay
+      // handed the market a map of where our bid sits (audit 2026-08-30). They are
+      // strategy internals, not history, and stay off the public journal.
+      .filter((e) => !String(e.kind ?? "").startsWith("dump-bid"))
+      .map((e) => {
+        const kind = String(e.kind ?? "");
+        if (kind === "collect") return { ts: e.ts, kind: "collect", feesUsdAtRead: e.feesUsd, symbol: e.symbol };
+        if (kind === "floor-exit" || kind === "break-exit" || kind === "dump-exit" || kind === "recenter-abort") {
+          return { ts: e.ts, kind: "stop-loss", symbol: e.symbol, exit: kind };
+        }
+        return { ts: e.ts, kind, symbol: e.symbol };
+      });
     const entries = [...readTail("meme-rotations.jsonl", 100), ...pilot].sort(
       (a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0),
     );

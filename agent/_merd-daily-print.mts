@@ -53,13 +53,19 @@ const j = async (path: string) => (await fetch(`${API}${path}`, { signal: AbortS
 
 interface DayRow { date: string; lpFeesUsd: number; bookOpen: number; bookClose: number; stops: number; collects: number }
 const consistency = (await j("/api/consistency")) as { days: DayRow[]; summary: { totalLpFeesUsd: number } };
-const row = consistency.days.find((d) => d.date === yesterday);
+// Everything on the card scopes to CERTIFIED days (through yesterday): at
+// 9:15am the board already carries today's partial row, and the first
+// version printed "day N live" beside totals that included N+1 days and
+// this morning's fees (audit 2026-08-30).
+const certified = consistency.days.filter((d) => d.date <= yesterday);
+const row = certified.find((d) => d.date === yesterday);
 if (!row) {
   console.error(`[daily-print] no certified row for ${yesterday}; staying silent today`);
   process.exit(1);
 }
-const dayN = consistency.days.findIndex((d) => d.date === yesterday) + 1;
-const priorCloses = consistency.days.filter((d) => d.date < yesterday).map((d) => d.bookClose);
+const dayN = certified.length;
+const certifiedFeesUsd = certified.reduce((t, d) => t + d.lpFeesUsd, 0);
+const priorCloses = certified.filter((d) => d.date < yesterday).map((d) => d.bookClose);
 const newHigh = row.bookClose > Math.max(...priorCloses, 0);
 
 const hist = (await j("/api/book-history?hours=54")) as { points: { ts: number; book: number; banked: number }[] };
@@ -171,7 +177,7 @@ const html = `<!doctype html><html><head><meta charset="utf-8">
       <div class="tl"><span>the book, every mark of the day · opened $${o}</span><span>closed <b>$${c}</b>${newHigh ? " · a new high" : ""}</span></div>
     </div>
     <div class="cols">
-      <div class="col"><div class="cv">$${money(consistency.summary.totalLpFeesUsd)}</div><div class="cl">total fees, ${consistency.days.length} days live</div></div>
+      <div class="col"><div class="cv">$${money(certifiedFeesUsd)}</div><div class="cl">total fees, ${dayN} days live</div></div>
       <div class="col"><div class="cv">${bankedPct}%</div><div class="cl">of the book banked, out of the desk's reach</div></div>
       <div class="col"><div class="cv">$997</div><div class="cl">ever put in</div></div>
     </div>

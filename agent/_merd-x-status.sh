@@ -39,12 +39,11 @@ if failed:
 plan = rows("merd-daily-plan.jsonl")
 done = rows("merd-daily-done.jsonl")
 today = now.strftime("%Y-%m-%d")
-plan_today = [p for p in plan if p.get("day") == today]
-done_today = [d for d in done if d.get("day") == today]
+# one row per item, keyed by "date" (the planner's field, not "day")
+plan_today = [p for p in plan if p.get("date") == today]
+done_today = [d for d in done if d.get("date") == today]
 if plan_today:
-    items = plan_today[-1].get("items", plan_today)
-    n = len(items) if isinstance(items, list) else "?"
-    print(f"\nPLAN: {len(done_today)}/{n} of today's plan posted")
+    print(f"\nPLAN: {len(done_today)}/{len(plan_today)} of today's plan posted")
 else:
     print(f"\nPLAN: none generated yet today")
 

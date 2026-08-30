@@ -29,8 +29,10 @@ banned from duplicating it (voice doc, P&L bullet).
 | com.meridian.merdoutreach | 3h | `_merd-outreach.sh` -> `_merd-outreach.mts` | Finds conversations worth joining. Separately gated: dry-run unless `MERD_OUTREACH_ENABLED=true`. | `~/Library/Logs/merd-outreach.log` |
 | com.meridian.merddailyprint | 15min tick | `_merd-daily-print.sh` -> `_merd-daily-print.mts` | Posts once/day, first tick at/after 9:15am ET: prior day's certified close, deterministic text + rendered card. Silent when data is missing. | `~/Library/Logs/merd-daily-print.log` |
 
-Not X: `com.meridian.merdtelegram` (telegram bridge), `com.meridian.merdpayout`
-(earn payouts). They share the launchd install but never post.
+Not X but same installer: `com.meridian.merdtelegram` (telegram bridge, 4h)
+and `com.meridian.merdpayout` (earn payouts, 6h). Adopted into
+install-agents.sh 2026-08-30 so this page's claim that one script owns every
+job is actually true.
 
 **Kill switches, most global first:** unset `X_LIVE` in the runner (per job) ·
 `launchctl unload ~/Library/LaunchAgents/<label>.plist` (per job) ·

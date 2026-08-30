@@ -64,7 +64,14 @@ export function dumpWatchState(): DumpReading[] {
 // ---------------------------------------------------------------------------
 // The armed step: exit verdict + re-entry lockout.
 // ---------------------------------------------------------------------------
-const AUTO_EXIT = (process.env.MERIDIAN_DUMP_AUTO_EXIT ?? "on") !== "off";
+/** An emergency kill switch must understand every way a human says "off":
+ *  the first version only matched the literal string, so =false or =0 left a
+ *  money-moving reflex armed (audit 2026-08-30). Exported for reuse. */
+export function switchedOff(v: string | undefined): boolean {
+  return /^(off|false|0|no|disabled?)$/i.test((v ?? "").trim());
+}
+
+const AUTO_EXIT = !switchedOff(process.env.MERIDIAN_DUMP_AUTO_EXIT);
 const EXIT_LOCKOUT_MS = Number(process.env.MERIDIAN_DUMP_EXIT_LOCKOUT_MIN ?? 90) * 60_000;
 // A reading older than two scan intervals is a stopped watch, not a signal.
 // Acting on stale pressure would sell into whatever happened AFTER the scan
@@ -396,7 +403,7 @@ async function tick(): Promise<void> {
 }
 
 export function startDumpWatch(): NodeJS.Timeout | undefined {
-  if (process.env.MERIDIAN_DUMP_WATCH === "off") {
+  if (switchedOff(process.env.MERIDIAN_DUMP_WATCH)) {
     console.log("[dumpWatch] off (MERIDIAN_DUMP_WATCH=off)");
     return;
   }

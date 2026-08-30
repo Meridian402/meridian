@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dumpVerdict, dumpExitVerdict, mintRefusal, type DumpReading } from "../src/dumpWatch.js";
+import { dumpVerdict, dumpExitVerdict, mintRefusal, switchedOff, type DumpReading } from "../src/dumpWatch.js";
 
 // Dump pressure requires ALL THREE: dominant sell-share, accelerating sell
 // volume, and price rolling over. Any one missing = no alert.
@@ -88,4 +88,13 @@ test("calm tape and no lockout -> mint allowed", () => {
 
 test("a stale pressure reading does not block a mint (the lockout owns that window)", () => {
   assert.equal(mintRefusal(undefined, reading({}), NOW + 600_000, 300_000), null);
+});
+
+test("the kill switch understands every way a human says off", () => {
+  for (const v of ["off", "OFF", "false", "0", "no", "disabled", " off "]) {
+    assert.equal(switchedOff(v), true, `"${v}" must disarm`);
+  }
+  for (const v of [undefined, "", "on", "true", "1", "armed"]) {
+    assert.equal(switchedOff(v as string | undefined), false, `"${v}" must stay armed`);
+  }
 });

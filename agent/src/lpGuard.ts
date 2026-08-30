@@ -398,11 +398,22 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
         const deployedUsd = pos.usdgIn * 2; // balanced mint: the USDG side is half
         if (isUndersizedMint(deployedUsd, maxUsd)) {
           console.error(`[lpGuard] UNDERSIZED MINT: #${pos.tokenId} deployed ~$${deployedUsd.toFixed(2)} of the $${maxUsd} budget; unwinding instead of pretending`);
-          await withdrawPosition({ tokenId: pos.tokenId, symbol, liquidity: pos.liquidity, mech: "undersized-mint-abort" });
+          // The unwind itself can fail (RPC hiccup, the runaway-ops cap).
+          // Whatever happens in here, the open MUST still fail with the
+          // non-retryable abort message: the first version let an unwind
+          // error fall to the retry loop, which minted a SECOND sliver from
+          // the now-depleted token side (audit 2026-08-30).
+          let unwindNote = "unwound";
           try {
-            await realSellStockForUsdg({ fromSymbol: symbol });
-          } catch { /* pending-sells machinery is the caller's fallback for stranded inventory */ }
-          throw new Error(`undersized mint aborted: deployed ~$${deployedUsd.toFixed(2)} of $${maxUsd} (price moved through the caps mid-sequence)`);
+            await withdrawPosition({ tokenId: pos.tokenId, symbol, liquidity: pos.liquidity, mech: "undersized-mint-abort" });
+            try {
+              await realSellStockForUsdg({ fromSymbol: symbol });
+            } catch { /* pending-sells machinery is the caller's fallback for stranded inventory */ }
+          } catch (unwindErr) {
+            unwindNote = `unwind FAILED (${unwindErr instanceof Error ? unwindErr.message.slice(0, 80) : unwindErr}); position #${pos.tokenId} left open for the guard`;
+            console.error(`[lpGuard] undersized-mint ${unwindNote}`);
+          }
+          throw new Error(`undersized mint aborted: deployed ~$${deployedUsd.toFixed(2)} of $${maxUsd}, ${unwindNote}`);
         }
         console.error(`[lpGuard] operator opened CAPPED #${pos.tokenId} in ${symbol} (±${widthPct / 2}%, ≤$${maxUsd})`);
         return { tokenId: pos.tokenId, symbol: pos.symbol };

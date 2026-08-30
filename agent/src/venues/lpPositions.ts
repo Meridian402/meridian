@@ -275,14 +275,23 @@ export function computeMintPlan(args: {
   const sA = sqrtAtTick(tickLower);
   const sB = sqrtAtTick(tickUpper);
   // In-range: currency0 fills [current..upper], currency1 fills [lower..current].
-  const lFrom0 = (amt0 * ((sC / Q96) * (sB / Q96))) / (sB / Q96 - sC / Q96);
-  const lFrom1 = amt1 / (sC / Q96 - sA / Q96);
+  // A range entirely on one side of spot makes the other side's denominator
+  // zero. With a nonzero balance that division is Infinity and min() ignores
+  // it, but a ZERO balance yields 0/0 = NaN, and BigInt(NaN) throws, which
+  // killed every dump-bid mint on a cleanly flattened venue, the exact state
+  // the bid was built for (audit 2026-08-30). A side the range cannot hold
+  // never bounds the liquidity: absent-side NaN normalizes to Infinity.
+  const lFrom0raw = (amt0 * ((sC / Q96) * (sB / Q96))) / (sB / Q96 - sC / Q96);
+  const lFrom1raw = amt1 / (sC / Q96 - sA / Q96);
+  const lFrom0 = Number.isNaN(lFrom0raw) ? Infinity : lFrom0raw;
+  const lFrom1 = Number.isNaN(lFrom1raw) ? Infinity : lFrom1raw;
   // Extra 1% haircut on the final liquidity: the pool pulls amounts at
   // EXECUTION-time price, not calc-time price, and the first live re-center
   // reverted exactly here — price drifted mid-rally and the needed amount
   // busted the balance cap. Headroom buys ~±1.5% of drift tolerance.
-  const liquidity = BigInt(Math.floor(Math.min(lFrom0, lFrom1) * 0.99));
-  if (liquidity <= 0n) throw new Error("insufficient balances for any liquidity in this range");
+  const minL = Math.min(lFrom0, lFrom1) * 0.99;
+  if (!Number.isFinite(minL) || minL <= 0) throw new Error("insufficient balances for any liquidity in this range");
+  const liquidity = BigInt(Math.floor(minL));
 
   // amountMax is the ONLY slippage guard the pool enforces: the most this mint
   // will pay per side for the fixed `liquidity` at execution price. Derive it
@@ -510,7 +519,19 @@ export async function mintDumpBid(params: { symbol: string; depthPct: number; wi
   const mintLog = receipt.logs.find(
     (l) => l.address.toLowerCase() === POSITION_MANAGER.toLowerCase() && l.topics[0] === transferTopic && BigInt(l.topics[1]!) === 0n,
   );
-  const tokenId = mintLog ? BigInt(mintLog.topics[3]!).toString() : "unknown";
+  let tokenId = mintLog ? BigInt(mintLog.topics[3]!).toString() : "unknown";
+  // A bid recorded as "unknown" poisons its venue: the guard cannot match it
+  // to the resting-order branch (so the floor mismanages it) and the state
+  // record blocks future bids forever (audit 2026-08-30). The chain always
+  // knows the id: recover it from on-chain position discovery by the exact
+  // tick bounds this mint just used.
+  if (tokenId === "unknown") {
+    try {
+      const live = await openPositionsOnChain();
+      const match = live.find((x) => x.symbol === symbol && x.tickLower === plan.tickLower && x.tickUpper === plan.tickUpper);
+      if (match) tokenId = String(match.tokenId);
+    } catch { /* the reconcile pass clears a truly unresolvable record */ }
+  }
 
   const [after0, after1] = await Promise.all([
     client.readContract({ address: k.currency0, abi: erc20Abi, functionName: "balanceOf", args: [signer.address] }),

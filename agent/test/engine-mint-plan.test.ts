@@ -108,3 +108,23 @@ test("misaligned or inverted explicit bounds are refused outright", () => {
   assert.throws(() => plan(DESK, { bounds: { tickLower: -601, tickUpper: -300 } }));
   assert.throws(() => plan(DESK, { bounds: { tickLower: 300, tickUpper: -300 } }));
 });
+
+test("a one-sided bid plan survives a ZERO balance on the absent side", () => {
+  // The audit crash: a cleanly flattened venue holds no token, the absent
+  // side's liquidity bound went 0/0 = NaN, and BigInt(NaN) threw on the
+  // exact state the dump bid exists for. Both orientations must plan fine.
+  const below = bidBelowBounds(0, 60, true, 8, 6); // range below spot: all currency1
+  const pBelow = plan(DESK, { bounds: below, maxUsd: 300, bal0Raw: 0n });
+  assert.ok(pBelow.liquidity > 0n);
+  assert.equal(pBelow.amountMax0, 0n, "zero-balance absent side pulls nothing");
+
+  const above = bidBelowBounds(0, 60, false, 8, 6); // range above spot: all currency0
+  const pAbove = plan(DESK, { bounds: above, maxUsd: 300, bal1Raw: 0n });
+  assert.ok(pAbove.liquidity > 0n);
+  assert.equal(pAbove.amountMax1, 0n);
+});
+
+test("both sides empty still refuses cleanly instead of throwing BigInt(NaN)", () => {
+  const bounds = bidBelowBounds(0, 60, true, 8, 6);
+  assert.throws(() => plan(DESK, { bounds, bal0Raw: 0n, bal1Raw: 0n }), /insufficient balances/);
+});

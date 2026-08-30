@@ -28,6 +28,11 @@ JOBS=(
   # the first tick at or after 9:15am ET, so a sleeping Mac posts on wake
   # instead of skipping the day. See _merd-daily-print.mts.
   "com.meridian.merddailyprint|_merd-daily-print.sh|900|merd-daily-print.log"
+  # Telegram bridge and earn payouts: hand-installed originally, adopted here
+  # 2026-08-30 (audit: X-OPS promised this script regenerates EVERY job, and
+  # these two were silently left pointing at wherever the repo used to live).
+  "com.meridian.merdtelegram|_merd-telegram.sh|14400|merd-telegram.log"
+  "com.meridian.merdpayout|_merd-payout.sh|21600|merd-payout.log"
 )
 
 if [ "${1:-}" = "--uninstall" ]; then

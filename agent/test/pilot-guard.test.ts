@@ -110,7 +110,8 @@ const BID_BASE = {
   venueSeats: 0,
   hasActiveBid: false,
   usdgAvailUsd: 500,
-  bidUsd: 100,
+  bidUsd: 150,
+  envFloorUsd: 120,
   bidsToday: 0,
   bidsPerDay: 3,
   stoodDown: false,
@@ -146,4 +147,13 @@ test("a mint deploying a sliver of its budget is refused; normal drift is not", 
   assert.equal(isUndersizedMint(380, 444), false, "86% is price drift inside the caps");
   assert.equal(isUndersizedMint(444, 444), false);
   assert.equal(isUndersizedMint(100, 0), false, "no budget, no verdict");
+});
+
+test("a bid that cannot survive its own fill is refused outright", () => {
+  // The audit case: $100 bid, $120 env floor. At fill the seat's floor is
+  // max(120, 80) = 120 > ~100 value, an instant buy-then-floor-sell machine.
+  const v = dumpBidDecision({ ...BID_BASE, bidUsd: 100 });
+  assert.equal(v.act, false);
+  assert.match(v.reason, /under its own/);
+  assert.equal(dumpBidDecision({ ...BID_BASE, bidUsd: 150 }).act, true, "$150 clears max(120, 120) with 10% room");
 });
