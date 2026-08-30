@@ -476,6 +476,15 @@ async function swapExactInPath(params: {
   const hash = await wallet.sendTransaction({ to, data, value });
   const client = getPublicClient();
   const receipt = await client.waitForTransactionReceipt({ hash, timeout: 90_000 });
+  // A reverted swap used to return here looking exactly like a success with
+  // zero output. On 2026-08-30 that let a PONS re-center's reverted buy leg
+  // (tx 0x875393...32a4) sail on to mint a $76 seat against a $444 budget,
+  // and write a phantom $183 token-buy into the attribution ledger that then
+  // poisoned the venue's admission record. A swap that reverted is a FAILURE
+  // and every caller must see it as one.
+  if (receipt.status !== "success") {
+    throw new Error(`swap reverted on-chain: ${hash} (amountIn ${amountIn}, ${route.length} hop${route.length === 1 ? "" : "s"})`);
+  }
   const balanceAfter = await currencyBalance(outputCurrency, signer.address);
   return { hash, amountOutReal: balanceAfter - balanceBefore, gasWei: receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n) };
 }

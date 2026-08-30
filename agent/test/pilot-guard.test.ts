@@ -136,3 +136,14 @@ test("the stand-down, the daily budget, the wallet, and the kill switch all veto
   assert.equal(dumpBidDecision({ ...BID_BASE, usdgAvailUsd: 60 }).act, false);
   assert.equal(dumpBidDecision({ ...BID_BASE, enabled: false }).act, false);
 });
+
+// ── the sliver-mint abort: a mint that barely deployed is a malfunction ──────
+import { isUndersizedMint } from "../src/lpGuard.js";
+
+test("a mint deploying a sliver of its budget is refused; normal drift is not", () => {
+  assert.equal(isUndersizedMint(76, 444), true, "the measured live failure: 17% deployed");
+  assert.equal(isUndersizedMint(200, 444), true, "45% is still a malfunction");
+  assert.equal(isUndersizedMint(380, 444), false, "86% is price drift inside the caps");
+  assert.equal(isUndersizedMint(444, 444), false);
+  assert.equal(isUndersizedMint(100, 0), false, "no budget, no verdict");
+});

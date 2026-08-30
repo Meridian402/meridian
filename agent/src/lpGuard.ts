@@ -296,6 +296,14 @@ async function attemptRecovery(): Promise<void> {
  * caller chooses the pool instead of it defaulting to the last one held. Run on
  * a flat wallet (close the current position first); it deploys available USDG.
  */
+/** PURE: did a capped mint deploy so little of its budget that it is a
+ *  malfunction rather than a position? 55%: a balanced mint naturally lands
+ *  near 100%, price drift inside the slippage caps can shave it into the
+ *  80s, and the measured failure deployed 17%. Exported for tests. */
+export function isUndersizedMint(deployedUsd: number, budgetUsd: number): boolean {
+  return budgetUsd > 0 && deployedUsd < budgetUsd * 0.55;
+}
+
 export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_PCT, maxUsd?: number): Promise<{ tokenId: string; symbol: string }> {
   // Every seat entry funnels through here (operator lp-open, pilot re-center,
   // open-deploy), so this is the one gate the portfolio breaker needs on the
@@ -381,9 +389,28 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         const pos = await mintRange({ symbol, widthPct, maxUsd });
+        // THE SLIVER-MINT ABORT (2026-08-30). A mint that deployed a fraction
+        // of its budget is a malfunction, not a position: proceeding hands a
+        // mis-sized seat to the guard, whose lineage floor then exits it in
+        // theatrical confusion (measured live: $76 minted against $444, floor
+        // fired within minutes). Unwind it on the spot and fail loudly so the
+        // caller treats the re-center as failed rather than half-done.
+        const deployedUsd = pos.usdgIn * 2; // balanced mint: the USDG side is half
+        if (isUndersizedMint(deployedUsd, maxUsd)) {
+          console.error(`[lpGuard] UNDERSIZED MINT: #${pos.tokenId} deployed ~$${deployedUsd.toFixed(2)} of the $${maxUsd} budget; unwinding instead of pretending`);
+          await withdrawPosition({ tokenId: pos.tokenId, symbol, liquidity: pos.liquidity, mech: "undersized-mint-abort" });
+          try {
+            await realSellStockForUsdg({ fromSymbol: symbol });
+          } catch { /* pending-sells machinery is the caller's fallback for stranded inventory */ }
+          throw new Error(`undersized mint aborted: deployed ~$${deployedUsd.toFixed(2)} of $${maxUsd} (price moved through the caps mid-sequence)`);
+        }
         console.error(`[lpGuard] operator opened CAPPED #${pos.tokenId} in ${symbol} (±${widthPct / 2}%, ≤$${maxUsd})`);
         return { tokenId: pos.tokenId, symbol: pos.symbol };
       } catch (err) {
+        // The undersized-mint abort already unwound and sold; a retry would
+        // mint from an empty token side and abort again, buying nothing but
+        // gas and wallet ops. Fail the open outright.
+        if (err instanceof Error && err.message.startsWith("undersized mint aborted")) throw err;
         lastErr = err;
         console.error(`[lpGuard] capped mint attempt ${attempt}/3 failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
         if (attempt < 3) await new Promise((r) => setTimeout(r, 15_000));
