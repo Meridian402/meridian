@@ -24,6 +24,10 @@ JOBS=(
   "com.meridian.merdx|_merd-post.sh|7200|merd-autopilot.log"
   "com.meridian.merdengage|_merd-engage.sh|120|merd-engage.log"
   "com.meridian.merdoutreach|_merd-outreach.sh|10800|merd-outreach.log"
+  # The Daily Print ticks every 15 minutes and gates itself: one post per day,
+  # the first tick at or after 9:15am ET, so a sleeping Mac posts on wake
+  # instead of skipping the day. See _merd-daily-print.mts.
+  "com.meridian.merddailyprint|_merd-daily-print.sh|900|merd-daily-print.log"
 )
 
 if [ "${1:-}" = "--uninstall" ]; then
