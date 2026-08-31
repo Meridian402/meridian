@@ -45,6 +45,7 @@ job is actually true.
 | `MERD_X_VOICE.md` | Persona + hard rules + "what the site is today." The gateway copywriter reads it from the connected repo, so CHANGES REQUIRE A PUSH. | Any product/policy change a stranger could ask him about. |
 | `merd-shipped.md` | The curated what-shipped feed (top 4 lines reach his prompts). Engineering writes the line, he decides if it is worth saying. | When something becomes true for users. Delete lines that stop being true; do not archive them into his context. |
 | `merd-watchlist.json` | `accounts`: ecosystem peers outreach prioritises. `avoid`: never interact, operator-maintained. | Freely. |
+| `merd-news.md` | Verified ecosystem news he may react to as a practitioner (one NEWS post max per day). Lines self-expire after 3 days by date prefix. | When real news lands that his seat gives him standing on. Verify before adding; his reaction is a factual claim. |
 | `src/social/postGuards.ts` | The output guards every freeform post/reply passes: forbidden vocabulary, helplessness, similarity dedupe, dash strip. | Only with tests; every rule in it was paid for. |
 
 **THE DRIFT LESSON (2026-08-29, do not relearn it):** these surfaces once
