@@ -295,6 +295,81 @@ function recordBleedSample(symbol: string, px: number, sellSharePct: number): vo
   saveBleedSeries();
 }
 
+// ---------------------------------------------------------------------------
+// Crowding: hourly share-of-pool sampler.
+// ---------------------------------------------------------------------------
+// Fee income is volume x fee tier x OUR SHARE of the active liquidity, and the
+// third factor was invisible until now: the 08-29 PONS forensics found ~$700k
+// of professional LP capital in range against our ~$1,500 (share under 0.1%),
+// and there was no way to see that dilution happening, only to discover it
+// after the fact. One row per pool per hour makes the trend a fact on disk.
+// Measurement only: no alert, no action, by design (operator call 2026-08-30).
+const CROWD_MS = Number(process.env.MERIDIAN_CROWDING_MS ?? 3_600_000);
+const STATE_VIEW = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b" as const;
+
+export interface CrowdingSample {
+  symbol: string;
+  at: number;
+  activeL: string; // the pool's total in-range liquidity, raw L units
+  ourL: string; // our in-range seats' liquidity, same units
+  sharePct: number;
+}
+
+const crowdLatest = new Map<string, CrowdingSample>();
+let lastCrowdSampleAt = 0;
+
+export function crowdingState(): CrowdingSample[] {
+  return [...crowdLatest.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+/** PURE: our share of the pool's active liquidity, in percent to basis-point
+ *  precision. Bigint throughout; an empty pool reads 0, never NaN. */
+export function crowdingSharePct(ourL: bigint, activeL: bigint): number {
+  if (activeL <= 0n) return 0;
+  return Number((ourL * 1_000_000n) / activeL) / 10_000;
+}
+
+async function sampleCrowding(
+  symbols: readonly string[],
+  positions: readonly { symbol: string; tickLower: number; tickUpper: number; liquidity: bigint }[],
+): Promise<void> {
+  const now = Date.now();
+  if (now - lastCrowdSampleAt < CROWD_MS) return;
+  lastCrowdSampleAt = now;
+  const client = getScanClient();
+  for (const s of symbols) {
+    const id = usdgPoolIdFor(s);
+    if (!id) continue;
+    try {
+      const [activeL, slot0] = await Promise.all([
+        client.readContract({
+          address: STATE_VIEW,
+          abi: [parseAbiItem("function getLiquidity(bytes32) view returns (uint128)")],
+          functionName: "getLiquidity",
+          args: [id as Hex],
+        }) as Promise<bigint>,
+        client.readContract({
+          address: STATE_VIEW,
+          abi: [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")],
+          functionName: "getSlot0",
+          args: [id as Hex],
+        }) as Promise<readonly [bigint, number, number, number]>,
+      ]);
+      const tick = Number(slot0[1]);
+      // Only in-range seats count: an out-of-range seat's liquidity is not in
+      // the pool's active L, so including it would overstate our share.
+      const ourL = positions
+        .filter((p) => p.symbol.toUpperCase() === s && p.tickLower <= tick && tick < p.tickUpper)
+        .reduce((sum, p) => sum + p.liquidity, 0n);
+      const sample: CrowdingSample = { symbol: s, at: now, activeL: activeL.toString(), ourL: ourL.toString(), sharePct: crowdingSharePct(ourL, activeL) };
+      crowdLatest.set(s, sample);
+      appendLedger("crowding.jsonl", { ts: now, symbol: s, activeL: sample.activeL, ourL: sample.ourL, sharePct: sample.sharePct });
+    } catch (e) {
+      console.error(`[dumpWatch] crowding sample failed for ${s}: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
+    }
+  }
+}
+
 /** PURE: the dump-pressure decision from split-window flow + velocity.
  *  Pressure requires all three — dominant sell share, accelerating sell
  *  volume, and price rolling over — so absorbed selling (heavy but with
@@ -397,6 +472,7 @@ async function tick(): Promise<void> {
         console.error(`[dumpWatch] ${s} scan failed: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
       }
     }
+    await sampleCrowding(symbols, positions);
   } catch (e) {
     console.error(`[dumpWatch] tick failed: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
   }
@@ -412,6 +488,9 @@ export function startDumpWatch(): NodeJS.Timeout | undefined {
   );
   console.log(
     `[dumpWatch] slow-bleed layer armed: fires on a ${BLEED_PCT}%+ drawdown from the ${BLEED_WINDOW_HOURS}h peak with >=${Math.round(BLEED_NEG_SHARE * 100)}% negative steps and avg sell-share >=${BLEED_SELL_PCT}% over >=${BLEED_MIN_HOURS}h (alert-only; catches the grinds the sharp signal skips)`,
+  );
+  console.log(
+    `[dumpWatch] crowding sampler on: share-of-pool per watched symbol every ${Math.round(CROWD_MS / 60000)}m to crowding.jsonl (measurement only)`,
   );
   const t = setInterval(() => void tick(), WATCH_MS);
   t.unref?.();

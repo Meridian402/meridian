@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dumpVerdict, dumpExitVerdict, mintRefusal, switchedOff, type DumpReading } from "../src/dumpWatch.js";
+import { dumpVerdict, dumpExitVerdict, mintRefusal, switchedOff, crowdingSharePct, type DumpReading } from "../src/dumpWatch.js";
 
 // Dump pressure requires ALL THREE: dominant sell-share, accelerating sell
 // volume, and price rolling over. Any one missing = no alert.
@@ -97,4 +97,13 @@ test("the kill switch understands every way a human says off", () => {
   for (const v of [undefined, "", "on", "true", "1", "armed"]) {
     assert.equal(switchedOff(v as string | undefined), false, `"${v}" must stay armed`);
   }
+});
+
+test("crowding share: bigint-exact percent, and an empty pool reads 0 not NaN", () => {
+  // The live 2026-08-30 CASHCAT measurement: our two seats vs pool active L.
+  const share = crowdingSharePct(27533656313780756n, 4474122429227305951n);
+  assert.ok(share > 0.6 && share < 0.63, `expected ~0.615, got ${share}`);
+  assert.equal(crowdingSharePct(0n, 6687012301177300157n), 0); // flat in PONS
+  assert.equal(crowdingSharePct(123n, 0n), 0); // empty pool: 0, never NaN or Infinity
+  assert.equal(crowdingSharePct(500n, 500n), 100); // sole LP owns the whole pool
 });
