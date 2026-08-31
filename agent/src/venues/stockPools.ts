@@ -101,6 +101,15 @@ const POOLS: Record<string, PoolEntry> = {
   // collides with C3.ai's but the Index universe carries no AI token). Dry-test
   // tier like the rest of this block: no landed mint, so not auto-executable.
   AI: { token: "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18" as Address, quote: "USDG", fee: 10000, tickSpacing: 200 },
+  // Boner Coin (operator add 2026-08-31, probation probe). Measured on add:
+  // ~$1.95M/24h through this hookless 0.9% USDG pool (9,125 swaps, 57 distinct
+  // router senders, $334k via the canonical UniversalRouter; top sender 32%,
+  // possibly wash, discounted in sizing). The token's viral market is a
+  // BONER/HIMS pool we deliberately do NOT touch: dynamic-fee with an unknown
+  // hook. Token contract is a 44-byte minimal proxy (implementation unseen),
+  // so probe stays probation-sized. 148 other initialized BONER pools are
+  // sniper-bot dust; this tier is the live hookless one.
+  BONER: { token: "0x98096d17e191b3da1d5f99a6d7b3584351b11e18" as Address, quote: "USDG", fee: 9000, tickSpacing: 90 },
   // SPCX still EXCLUDED. Removed 2026-07-16 after a real mint reverted (0x70a08…):
   // SPCX (SpaceX) is a TRANSFER-RESTRICTED token, so our wallet couldn't receive
   // or LP it. Re-checked 2026-07-21: a USDG→SPCX swap now LANDS in faithful
