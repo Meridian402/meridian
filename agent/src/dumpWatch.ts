@@ -331,7 +331,9 @@ export function crowdingSharePct(ourL: bigint, activeL: bigint): number {
 
 async function sampleCrowding(
   symbols: readonly string[],
-  positions: readonly { symbol: string; tickLower: number; tickUpper: number; liquidity: bigint }[],
+  // liquidity arrives as a decimal string from the position record; BigInt()
+  // inside the per-symbol try so one malformed row cannot kill the sampler.
+  positions: readonly { symbol: string; tickLower: number; tickUpper: number; liquidity: string | bigint }[],
 ): Promise<void> {
   const now = Date.now();
   if (now - lastCrowdSampleAt < CROWD_MS) return;
@@ -360,7 +362,7 @@ async function sampleCrowding(
       // the pool's active L, so including it would overstate our share.
       const ourL = positions
         .filter((p) => p.symbol.toUpperCase() === s && p.tickLower <= tick && tick < p.tickUpper)
-        .reduce((sum, p) => sum + p.liquidity, 0n);
+        .reduce((sum, p) => sum + BigInt(p.liquidity), 0n);
       const sample: CrowdingSample = { symbol: s, at: now, activeL: activeL.toString(), ourL: ourL.toString(), sharePct: crowdingSharePct(ourL, activeL) };
       crowdLatest.set(s, sample);
       appendLedger("crowding.jsonl", { ts: now, symbol: s, activeL: sample.activeL, ourL: sample.ourL, sharePct: sample.sharePct });
