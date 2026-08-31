@@ -128,7 +128,7 @@ const FORBIDDEN: Array<[RegExp, string]> = [
   [/\btge\b|\bairdrop\b|\bpresale\b|\bpre-sale\b|\btoken sale\b|\bwhitelist\b/i, "token sale vocabulary"],
   // Token launching is built but NOT announced. The rule above was written to
   // stop Merd shilling a token of his own, and it does not cover him announcing
-  // that USERS can launch one — a different sentence that sailed straight
+  // that USERS can launch one, a different sentence that sailed straight
   // through ("your agent can deploy a token for you now" passed clean). Until
   // this ships deliberately, it is not his to reveal. Scoped to launching a
   // token specifically so ordinary market talk ("the ETF launch", "launched in
