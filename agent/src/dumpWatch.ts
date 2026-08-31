@@ -18,7 +18,7 @@
 // judgment call, a one-sided accelerating dump is not.
 // SLOW-BLEED LAYER (added 2026-08-26 after the CASHCAT grind): the sharp-dump
 // verdict above watches MINUTES and correctly stayed silent through a two-day
-// stairstep decline — every 2-minute window looked calm while the price walked
+// stairstep decline, every 2-minute window looked calm while the price walked
 // down 20%. The bleed detector watches HOURS: a rolling price series per held
 // symbol, firing on a persistent grind (real drawdown from the window's peak,
 // mostly-negative steps, sellers persistently present). Same contract as the
@@ -194,7 +194,7 @@ export interface BleedReading {
 }
 
 // Samples survive restarts on disk; without that, every deploy would blind the
-// detector for BLEED_MIN_HOURS — and deploys are exactly when attention lapses.
+// detector for BLEED_MIN_HOURS, and deploys are exactly when attention lapses.
 const bleedSeries = new Map<string, BleedSample[]>();
 const bleedLatest = new Map<string, BleedReading>();
 const bleedAlerted = new Map<string, boolean>();
@@ -226,7 +226,7 @@ export function bleedWatchState(): BleedReading[] {
 
 /**
  * PURE: the slow-bleed decision over an hours-scale sample window. Bleeding
- * requires all three — a real drawdown from the window's PEAK, a majority of
+ * requires all three, a real drawdown from the window's PEAK, a majority of
  * negative steps (a grind, not one spike that recovered), and sellers
  * persistently present on average. A short or thin window never fires.
  * Exported for tests.
@@ -371,8 +371,8 @@ async function sampleCrowding(
 }
 
 /** PURE: the dump-pressure decision from split-window flow + velocity.
- *  Pressure requires all three — dominant sell share, accelerating sell
- *  volume, and price rolling over — so absorbed selling (heavy but with
+ *  Pressure requires all three, dominant sell share, accelerating sell
+ *  volume, and price rolling over, so absorbed selling (heavy but with
  *  buyers, price flat/up) does NOT trip it. Exported for tests. */
 export function dumpVerdict(
   recentSell: number,
