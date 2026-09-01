@@ -31,7 +31,7 @@ import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
-import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff } from "./dumpWatch.js";
+import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff, fadeVerdictFor, recordFadeExit, FADE_ARMED } from "./dumpWatch.js";
 
 // The tick is half the collect cadence so a 5-minute collect lands on the
 // interval instead of on the next 3-minute wake (2026-09-01, operator:
@@ -415,7 +415,40 @@ async function runTick(): Promise<void> {
   // open). Credit the venue's TOTAL open value instead.
   const venueOpenUsd = new Map<string, number>();
   for (const p of positions) venueOpenUsd.set(p.symbol, (venueOpenUsd.get(p.symbol) ?? 0) + p.valueUsd);
+  // THE VOLUME-FADE EXIT (2026-09-01, operator's strategy: "exit at the tops
+  // once volume dies down"). Checked once per venue per tick, before any
+  // per-seat management: two consecutive fading hours close every seat the
+  // venue holds and lock re-entry until the flow returns. Seats younger than
+  // the age floor are exempt (a fresh entry has no post-entry tape to judge,
+  // and a just-placed pullback bid must not be closed by the fade that
+  // preceded it). The floor and the dump exit still bound everything.
+  const FADE_MIN_SEAT_AGE_MS = Number(process.env.MERIDIAN_FADE_MIN_SEAT_AGE_H ?? 2) * 3_600_000;
+  if (FADE_ARMED) {
+    const nowMs = Date.now();
+    for (const symbol of [...venueOpenUsd.keys()]) {
+      const seats = positions.filter((p) => p.symbol === symbol && (p.mintedAt === 0 || nowMs - p.mintedAt >= FADE_MIN_SEAT_AGE_MS));
+      if (seats.length === 0) continue;
+      const v = fadeVerdictFor(symbol, nowMs);
+      if (!v.fading) continue;
+      console.error(`[pilotGuard] VOLUME FADE: ${symbol} ${v.reason}; closing ${seats.length} seat(s) to cash and locking re-entry until flow returns`);
+      recordFadeExit(symbol, v.refUsd, nowMs);
+      for (const p of seats) {
+        try {
+          await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "fade-exit" });
+          appendLedger("pilot-guard.jsonl", { ts: nowMs, kind: "fade-exit", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd });
+          clearLineage(String(p.tokenId));
+          outSince.delete(String(p.tokenId));
+        } catch (err) {
+          console.error(`[pilotGuard] fade exit of #${p.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+        }
+      }
+      const sold = await sellSymbolsOrEnqueue([symbol], "fade-exit");
+      if (sold[0]?.usdgReceived) console.error(`[pilotGuard] fade exit sold $${sold[0].usdgReceived.toFixed(2)} of loose ${symbol} to cash`);
+      venueOpenUsd.delete(symbol);
+    }
+  }
   for (const p of positions) {
+    if (!venueOpenUsd.has(p.symbol)) continue; // venue was fade-closed this tick
     try {
       await managePosition(p, venueOpenUsd.get(p.symbol) ?? p.valueUsd);
     } catch (err) {

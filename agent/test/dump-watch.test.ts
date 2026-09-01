@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dumpVerdict, dumpExitVerdict, mintRefusal, switchedOff, crowdingSharePct, type DumpReading } from "../src/dumpWatch.js";
+import { dumpVerdict, dumpExitVerdict, mintRefusal, switchedOff, crowdingSharePct, type DumpReading, volumeFadeVerdict, fadeRefusal, type BleedSample } from "../src/dumpWatch.js";
 
 // Dump pressure requires ALL THREE: dominant sell-share, accelerating sell
 // volume, and price rolling over. Any one missing = no alert.
@@ -106,4 +106,40 @@ test("crowding share: bigint-exact percent, and an empty pool reads 0 not NaN", 
   assert.equal(crowdingSharePct(0n, 6687012301177300157n), 0); // flat in PONS
   assert.equal(crowdingSharePct(123n, 0n), 0); // empty pool: 0, never NaN or Infinity
   assert.equal(crowdingSharePct(500n, 500n), 100); // sole LP owns the whole pool
+});
+
+
+// ── the volume-fade exit (2026-09-01): leave when the flow leaves ────────────
+
+const fadeSample = (minAgo: number, usd: number): BleedSample => ({ ts: FNOW - minAgo * 60_000, px: 1, sellSharePct: 50, usd });
+const FNOW = 1_800_000_000_000;
+const hourOf = (minStart: number, usd: number): BleedSample[] => [50, 30, 10].map((m) => fadeSample(minStart - (50 - m), usd));
+
+test("two consecutive fading hours from a real base fire the fade", () => {
+  const tape = [...hourOf(170, 10_000), ...hourOf(110, 6_000), ...hourOf(50, 3_500)];
+  const v = volumeFadeVerdict(tape, FNOW, { dropPct: 30, minWindowUsd: 2000 });
+  assert.equal(v.fading, true);
+  assert.equal(Math.round(v.refUsd), 10_000, "the base hour is the flow-return reference");
+});
+
+test("one fading hour is a dip, not a fade; a quiet-by-nature venue never fades", () => {
+  const dip = [...hourOf(170, 10_000), ...hourOf(110, 9_500), ...hourOf(50, 3_000)];
+  assert.equal(volumeFadeVerdict(dip, FNOW, { dropPct: 30, minWindowUsd: 2000 }).fading, false);
+  const quiet = [...hourOf(170, 1_500), ...hourOf(110, 900), ...hourOf(50, 500)];
+  assert.equal(volumeFadeVerdict(quiet, FNOW, { dropPct: 30, minWindowUsd: 2000 }).fading, false, "below the base bar there is nothing to fade from");
+});
+
+test("a thin or volume-less tape refuses to judge (old persisted samples lack usd)", () => {
+  const thin = [fadeSample(170, 9000), fadeSample(110, 5000), fadeSample(50, 2000)];
+  assert.equal(volumeFadeVerdict(thin, FNOW).fading, false);
+  const legacy = [...hourOf(170, 10_000), ...hourOf(110, 6_000), ...hourOf(50, 3_500)].map((s) => ({ ts: s.ts, px: s.px, sellSharePct: s.sellSharePct }));
+  assert.equal(volumeFadeVerdict(legacy as BleedSample[], FNOW).fading, false);
+});
+
+test("the fade lockout blocks re-entry until flow returns or it ages out", () => {
+  const lock = { until: FNOW + 60 * 60_000, refUsd: 10_000 };
+  assert.ok(fadeRefusal(lock, 2_000, FNOW), "flow still dead: refused");
+  assert.equal(fadeRefusal(lock, 7_500, FNOW), null, "flow back to 70% of the base: allowed early");
+  assert.equal(fadeRefusal(lock, 2_000, FNOW + 61 * 60_000), null, "lockout aged out");
+  assert.equal(fadeRefusal(undefined, 0, FNOW), null);
 });

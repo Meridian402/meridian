@@ -165,6 +165,19 @@ Plumbing: mintRange bidOnly -> bidBelowBounds(depth 0, width/2) with the
 dump bid's 2x maxUsd convention; openInPool passes {bidOnly}; the pilot
 sets it for every above re-center. Post-mortem artifact: "The Give-Back".
 
+**The volume-fade exit (2026-09-01, operator: "exit at the tops once volume
+dies down").** Every other exit is price-driven; this one leaves a venue when
+the flow that justified the seat leaves. The dump watcher's bleed samples now
+carry each scan window's USD volume; two consecutive fading hours (each down
+`MERIDIAN_FADE_DROP_PCT` (30%) vs the prior, from a base hour above
+`MERIDIAN_FADE_MIN_WINDOW_USD` ($2k/window)) close the venue's seats to cash
+(mech fade-exit) and lock re-entry until the latest hour recovers to 70% of
+the pre-fade base or `MERIDIAN_FADE_LOCKOUT_MIN` (240m) ages out. Seats
+younger than `MERIDIAN_FADE_MIN_SEAT_AGE_H` (2h) are exempt, so a fresh
+pullback bid is never closed by the fade that preceded it. Thin or
+volume-less tape never judges. `MERIDIAN_VOLUME_FADE=off` disables. The
+floor and dump exits still bound everything underneath.
+
 ## Custody and money flow
 
 - Execution wallet `0xDFF0Cf4f...` (hot, key in Railway env + gitignored

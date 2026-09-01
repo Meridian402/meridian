@@ -157,6 +157,95 @@ export function dumpMintRefusal(symbol: string, nowMs = Date.now()): string | nu
   return mintRefusal(loadLockouts()[symbol.toUpperCase()], latest.get(symbol.toUpperCase()), nowMs);
 }
 
+// ── THE VOLUME-FADE EXIT (2026-09-01, operator: "exit at the tops once
+// volume dies down"). Every other exit is price-driven; this one leaves a
+// venue when the REASON to be there leaves. Two consecutive fading hours
+// (each down FADE_DROP_PCT vs the hour before, from a base hour that carried
+// real flow) close the venue's seats to cash and lock re-entry until flow
+// returns or the lockout ages out. The post-mortem's leak #2: day-3 pools
+// held at day-1 conviction, earning $9/hr while carrying $200 floor events.
+export const FADE_ARMED = !switchedOff(process.env.MERIDIAN_VOLUME_FADE);
+const FADE_DROP_PCT = Number(process.env.MERIDIAN_FADE_DROP_PCT ?? 30);
+const FADE_MIN_WINDOW_USD = Number(process.env.MERIDIAN_FADE_MIN_WINDOW_USD ?? 2000);
+const FADE_LOCKOUT_MS = Number(process.env.MERIDIAN_FADE_LOCKOUT_MIN ?? 240) * 60_000;
+const FADE_LOCKOUT_PATH = dataPath("fade-lockout.json");
+let fadeLockouts: Record<string, { until: number; refUsd: number }> | null = null;
+function loadFadeLockouts(): Record<string, { until: number; refUsd: number }> {
+  if (fadeLockouts) return fadeLockouts;
+  try {
+    fadeLockouts = existsSync(FADE_LOCKOUT_PATH) ? (JSON.parse(readFileSync(FADE_LOCKOUT_PATH, "utf8")) as Record<string, { until: number; refUsd: number }>) : {};
+  } catch {
+    fadeLockouts = {};
+  }
+  return fadeLockouts;
+}
+
+/** PURE: mean scan-window USD per full hour bucket, newest first
+ *  ([now-1h,now), [now-2h,now-1h), [now-3h,now-2h)). NaN when a bucket has
+ *  under 3 volume-carrying samples: never judge a fade on a thin tape. */
+export function hourlyWindowUsd(samples: readonly BleedSample[], nowMs: number): [number, number, number] {
+  const mean = (a: number[]): number => (a.length >= 3 ? a.reduce((s, x) => s + x, 0) / a.length : NaN);
+  const bucket = (k: number): number[] => samples.filter((s) => s.usd != null && s.ts >= nowMs - k * 3_600_000 && s.ts < nowMs - (k - 1) * 3_600_000).map((s) => s.usd!);
+  return [mean(bucket(1)), mean(bucket(2)), mean(bucket(3))];
+}
+
+/** PURE: two consecutive fading hours from a base hour that carried real
+ *  flow. Any thin/missing bucket refuses to act: silence is not a fade. */
+export function volumeFadeVerdict(
+  samples: readonly BleedSample[],
+  nowMs: number,
+  opts?: { dropPct?: number; minWindowUsd?: number },
+): { fading: boolean; reason: string; refUsd: number } {
+  const drop = (opts?.dropPct ?? FADE_DROP_PCT) / 100;
+  const minUsd = opts?.minWindowUsd ?? FADE_MIN_WINDOW_USD;
+  const [h1, h2, h3] = hourlyWindowUsd(samples, nowMs);
+  if ([h1, h2, h3].some((x) => Number.isNaN(x))) return { fading: false, reason: "tape too thin to judge a fade", refUsd: 0 };
+  if (h3 < minUsd) return { fading: false, reason: `base hour ~$${Math.round(h3)}/window is below the $${minUsd} bar; nothing to fade from`, refUsd: h3 };
+  const fading = h1 < h2 * (1 - drop) && h2 < h3 * (1 - drop);
+  const reason = fading
+    ? `volume faded two hours running: ~$${Math.round(h3)} -> $${Math.round(h2)} -> $${Math.round(h1)} per window`
+    : `flow holding (~$${Math.round(h3)} -> $${Math.round(h2)} -> $${Math.round(h1)} per window)`;
+  return { fading, reason, refUsd: h3 };
+}
+
+/** The venue-level fade reading for the pilot guard, from the live series. */
+export function fadeVerdictFor(symbol: string, nowMs = Date.now()): { fading: boolean; reason: string; refUsd: number } {
+  loadBleedSeries();
+  return volumeFadeVerdict(bleedSeries.get(symbol.toUpperCase()) ?? [], nowMs);
+}
+
+export function recordFadeExit(symbol: string, refUsd: number, nowMs = Date.now()): void {
+  const l = loadFadeLockouts();
+  l[symbol.toUpperCase()] = { until: nowMs + FADE_LOCKOUT_MS, refUsd };
+  try {
+    writeFileSync(FADE_LOCKOUT_PATH, JSON.stringify(l));
+  } catch (err) {
+    console.error(`[dumpWatch] fade lockout save failed (in-memory only until restart): ${err instanceof Error ? err.message.slice(0, 80) : err}`);
+  }
+  appendLedger("dump-watch.jsonl", { ts: nowMs, kind: "fade-exit-lockout", symbol: symbol.toUpperCase(), untilTs: nowMs + FADE_LOCKOUT_MS, refUsd });
+}
+
+/** PURE: is re-entry refused after a fade exit? The lockout releases EARLY
+ *  when the latest full hour recovers to 70% of the pre-fade base: "do not
+ *  re-arm until flow returns" is about flow, not the clock. */
+export function fadeRefusal(
+  lock: { until: number; refUsd: number } | undefined,
+  latestHourUsd: number,
+  nowMs: number,
+): string | null {
+  if (!lock || nowMs >= lock.until) return null;
+  if (!Number.isNaN(latestHourUsd) && latestHourUsd >= lock.refUsd * 0.7) return null;
+  return `volume-fade lockout: this venue's flow died and has not returned (need ~$${Math.round(lock.refUsd * 0.7)}/window, seeing ${Number.isNaN(latestHourUsd) ? "a thin tape" : `~$${Math.round(latestHourUsd)}`}); ${Math.ceil((lock.until - nowMs) / 60_000)}m to age out (MERIDIAN_VOLUME_FADE=off disables)`;
+}
+
+/** The live fade gate openInPool consults next to dumpMintRefusal. */
+export function fadeMintRefusal(symbol: string, nowMs = Date.now()): string | null {
+  if (!FADE_ARMED) return null;
+  loadBleedSeries();
+  const [h1] = hourlyWindowUsd(bleedSeries.get(symbol.toUpperCase()) ?? [], nowMs);
+  return fadeRefusal(loadFadeLockouts()[symbol.toUpperCase()], h1, nowMs);
+}
+
 /** When this venue's post-dump-exit lockout ends, if one is active. The dump
  *  bid runs INSIDE this window on purpose: the lockout forbids re-entering at
  *  spot, not standing below the fall with a resting bid. */
@@ -180,6 +269,9 @@ export interface BleedSample {
   ts: number;
   px: number;
   sellSharePct: number;
+  /** USD volume seen in the scan window that produced this sample. Optional:
+   *  samples persisted before 2026-09-01 lack it; the fade verdict skips them. */
+  usd?: number;
 }
 
 export interface BleedReading {
@@ -272,11 +364,11 @@ export function bleedVerdict(
   };
 }
 
-function recordBleedSample(symbol: string, px: number, sellSharePct: number): void {
+function recordBleedSample(symbol: string, px: number, sellSharePct: number, usd?: number): void {
   loadBleedSeries();
   const now = Date.now();
   const arr = bleedSeries.get(symbol) ?? [];
-  arr.push({ ts: now, px, sellSharePct });
+  arr.push({ ts: now, px, sellSharePct, usd });
   // Trim beyond the window so the file and memory stay bounded.
   const cutoff = now - BLEED_WINDOW_HOURS * 3_600_000;
   bleedSeries.set(symbol, arr.filter((s) => s.ts >= cutoff));
@@ -434,7 +526,7 @@ async function scanSymbol(symbol: string): Promise<DumpReading | null> {
   const r: DumpReading = { symbol, at: Date.now(), swaps: n, recentSellSharePct: v.sharePct, accel: v.accel, velPct: Math.round(velPct * 10) / 10, pressure: v.pressure, reason: v.reason };
   latest.set(symbol, r);
   // Feed the hours-scale bleed series with this tick's closing price + flow.
-  recordBleedSample(symbol, rows[rows.length - 1].memePx, v.sharePct);
+  recordBleedSample(symbol, rows[rows.length - 1].memePx, v.sharePct, rows.reduce((s, x) => s + x.usdg, 0));
   return r;
 }
 

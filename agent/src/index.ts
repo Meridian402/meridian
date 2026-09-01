@@ -790,7 +790,7 @@ app.get("/api/desk-journal", (_req: Request, res: Response) => {
       .map((e) => {
         const kind = String(e.kind ?? "");
         if (kind === "collect") return { ts: e.ts, kind: "collect", feesUsdAtRead: e.feesUsd, symbol: e.symbol };
-        if (kind === "floor-exit" || kind === "break-exit" || kind === "dump-exit" || kind === "recenter-abort") {
+        if (kind === "floor-exit" || kind === "break-exit" || kind === "dump-exit" || kind === "fade-exit" || kind === "recenter-abort") {
           return { ts: e.ts, kind: "stop-loss", symbol: e.symbol, exit: kind };
         }
         return { ts: e.ts, kind, symbol: e.symbol };

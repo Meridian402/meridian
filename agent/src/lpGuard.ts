@@ -34,7 +34,7 @@ import { withHouseWalletLock, operatorWaiting } from "./houseWallet.js";
 import { walletOpsAvailable } from "./risk.js";
 import { memeRotorTick } from "./memeGuard.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
-import { dumpMintRefusal } from "./dumpWatch.js";
+import { dumpMintRefusal, fadeMintRefusal } from "./dumpWatch.js";
 import { readFileSync as _rf, writeFileSync as _wf, existsSync as _ex } from "node:fs";
 import { dataPath } from "./dataDir.js";
 
@@ -321,6 +321,12 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
   const dumpBlock = dumpMintRefusal(symbol);
   if (dumpBlock) {
     throw new Error(dumpBlock);
+  }
+  // The volume-fade gate (2026-09-01): a venue closed because its flow died
+  // is not re-entered until the flow returns (or the lockout ages out).
+  const fadeBlock = fadeMintRefusal(symbol);
+  if (fadeBlock) {
+    throw new Error(fadeBlock);
   }
   // Never start what we cannot finish: an open is up to three wallet ops
   // (funding swap, token buy, mint). Whole sequence fits or none of it runs.
