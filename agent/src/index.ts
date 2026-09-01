@@ -2444,6 +2444,10 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
   const symbol = String((req.body ?? {}).symbol ?? "").toUpperCase();
   const widthPct = Number((req.body ?? {}).widthPct);
   const maxUsd = Number((req.body ?? {}).maxUsd);
+  // bidOnly (2026-09-01, operator: "entries on big pullbacks"): enter as an
+  // all-USDG bid with its top price edge at spot, the same shape the guard's
+  // above re-centers use. Fills only on the retrace; can never buy a top.
+  const bidOnly = (req.body ?? {}).bidOnly === true;
   if (!symbol || !isTradable(symbol)) {
     res.status(400).json({ ok: false, error: `symbol must be a tradable pool (${tradableSymbols().join(", ")})` });
     return;
@@ -2460,6 +2464,7 @@ app.post("/api/lp-open", async (req: Request, res: Response) => {
           symbol,
           Number.isFinite(widthPct) && widthPct > 0 ? widthPct : 20,
           Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : undefined,
+          { bidOnly },
         ),
       { operator: true },
     );
