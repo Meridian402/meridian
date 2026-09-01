@@ -60,3 +60,4 @@ agent/usdg-pool-index.json
 agent/daily-print-*.png
 agent/daily-print-card.html
 agent/daily-print-state.json
+agent/launch-watch-state.json

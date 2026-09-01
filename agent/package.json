@@ -13,6 +13,8 @@
     "swarm-once": "tsx --env-file=.env src/swarm/runOnce.ts",
     "test": "tsx --test test/**/*.test.ts",
     "backtest": "tsx src/backtest/simulate.ts",
+    "launch-watch": "tsx --env-file=.env src/launch/watch.ts",
+    "launch-watch:report": "tsx src/launch/watch.ts --report",
     "backtest:legacy-momentum": "tsx src/backtest/simulate.legacy-momentum.ts"
   },
   "dependencies": {
