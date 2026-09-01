@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd } from "../src/pilotGuard.js";
 import { bidBelowBounds } from "../src/venues/lpPositions.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
 
@@ -71,6 +71,15 @@ test("pennies wait for the gas guard; a guard of 0 only refuses an empty seat", 
   assert.equal(collectDue(undefined, 1_000_000, 0.4, 5 * MIN, 1), false, "paying ~$0.19 of gas to move $0.40 is refused");
   assert.equal(collectDue(undefined, 1_000_000, 0.05, 5 * MIN, 0), true);
   assert.equal(collectDue(undefined, 1_000_000, 0, 5 * MIN, 0), false);
+});
+
+// ── deposit inference (2026-09-01): a bid is not half of a bigger seat ───────
+
+test("a balanced mint's deposit is twice its USDG side; a single-sided bid's is its USDG side alone", () => {
+  assert.equal(inferredDepositUsd(true, 495, 12345), 990, "balanced: half the budget went in as token");
+  assert.equal(inferredDepositUsd(true, 990, 0), 990, "bid: the whole budget IS the USDG side; doubling it floored a healthy seat");
+  assert.equal(inferredDepositUsd(false, 990, 0), 0);
+  assert.equal(inferredDepositUsd(true, 0, 0), 0);
 });
 
 // ── re-center: patience first ────────────────────────────────────────────────

@@ -137,6 +137,17 @@ export function collectDue(lastCollectMs: number | undefined, now: number, accru
   return lastCollectMs == null || now - lastCollectMs >= everyMs - tickMs / 2;
 }
 
+/** PURE: a seat's deposit when no lineage exists. Balanced mints put half
+ *  the budget in USDG, so deposit ~ usdgIn * 2; a single-sided bid puts the
+ *  WHOLE budget in USDG, and doubling it invented a phantom deposit whose
+ *  80% floor sat above the seat's real value: the first live bid entry
+ *  (BONER #1454582, 2026-09-01 22:05) was floor-exited two minutes after
+ *  placement, at full health, by exactly this. */
+export function inferredDepositUsd(hasCostBasis: boolean | undefined, usdgIn: number, tokenIn: number): number {
+  if (hasCostBasis !== true || usdgIn <= 0) return 0;
+  return tokenIn > 1e-9 ? usdgIn * 2 : usdgIn;
+}
+
 /** PURE: has the floor been breached? Fees are deliberately EXCLUDED
  *  (bleed audit, 2026-08-18): counting fees toward the floor spent earned
  *  income as extra drawdown room, so the better a seat had done, the deeper
@@ -542,7 +553,7 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
   // it gets closed. Worst case is bounded by construction. Deposit basis is
   // the LINEAGE deposit when this band came from a re-center chain, else
   // ~2x the recorded USDG side (balanced mint); no basis falls back to env.
-  const mintDepositUsd = p.hasCostBasis && p.usdgIn > 0 ? p.usdgIn * 2 : 0;
+  const mintDepositUsd = inferredDepositUsd(p.hasCostBasis, p.usdgIn, p.tokenIn);
   const depositUsd = loadLineage()[key] ?? mintDepositUsd;
   const floorUsd = effectiveFloorUsd(depositUsd);
   if (floorBreached(p.valueUsd, floorUsd)) {
