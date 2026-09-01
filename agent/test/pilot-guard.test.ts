@@ -15,18 +15,19 @@ const MIN = 60_000;
 const mk = (ticks: number[], now: number, stepMs = 3 * MIN) =>
   ticks.map((tick, i) => ({ t: now - (ticks.length - 1 - i) * stepMs, tick }));
 
-// ── out of range, which side (2026-09-01): below holds, above re-centers ─────
+// ── out of range, which side (2026-09-01) ────────────────────────────────────
 
-test("below the band the seat is not managed: the floor and the dump exit are its only exits", () => {
-  assert.equal(outOfRangeManaged(true, false), false, "a below-band re-center sells the bottom; the replay showed it giving the fees back");
+test("the below-band clock is ON by default: the replay with the settle test and break exit modeled had it worth +$10 to +$32 per event", () => {
+  assert.equal(outOfRangeManaged(true), true);
 });
 
-test("above the band (all USDG, nothing to realize) the fast re-center still runs", () => {
+test("with below-band management switched off, a seat below its band holds for the floor and the dump exit", () => {
+  assert.equal(outOfRangeManaged(true, false), false);
+});
+
+test("above the band (all USDG, nothing to realize) the fast re-center always runs", () => {
   assert.equal(outOfRangeManaged(false, false), true);
-});
-
-test("the operator can switch below-band re-centers back on", () => {
-  assert.equal(outOfRangeManaged(true, true), true);
+  assert.equal(outOfRangeManaged(false, true), true);
 });
 
 // ── re-center: patience first ────────────────────────────────────────────────

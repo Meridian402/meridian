@@ -118,21 +118,27 @@ Taker exits route through UniversalRouter
 a second verified UR exists at 0x06AfBA43 with 36k). V4_SWAP command 0x10;
 Permit2 needs a UR spender approval separate from the PositionManager's.
 
-**Seat width and the below-band hold (2026-09-01).** The pilot guard's
-re-band width was hardcoded at 20 (±10%), so whatever width an operator
-opened, the first re-center pulled it back to ±10%. Replaying the pilot rule
-on the real BONER and MICRODUCK Swap logs (14h from entry, $485 seats, the
-same 30/12-minute waits and 80% floor): ±10% sat in range 9-46% of the time
-and floored in five of six windows; ±20-30% bands stayed in range 85-100%
-and netted more on half the fee density. Below-band re-centers were the
-loss maker (sell the fallen token, re-buy it lower: today's 10:12 BONER
-re-entry netted -$17 at ±10% on a tape that finished +4%), above-band
-re-centers earned their keep on the up-trending MICRODUCK. Changes:
-`MERIDIAN_REBAND_WIDTH_PCT` (default 50, about -20%/+25%) replaces the
-constant; below-band re-centers and the break exit are OFF by default
-(`MERIDIAN_PILOT_RECENTER_BELOW=on` restores them), so below its band a
-seat holds for the 80% floor or the dump exit; above the band the 12-minute
-re-center still runs, at the re-band width. Operator opens at width 50.
+**Seat width (2026-09-01).** The pilot guard's re-band width was hardcoded
+at 20 (±10%), so whatever width an operator opened, the first re-center
+pulled it back to ±10%. Replaying the guard's actual rule (30/12-minute
+waits, settle test, 45-minute break exit, 80% floor) on the real BONER and
+MICRODUCK Swap logs, 14h from entry with $485 seats: ±10% sat in range
+9-34% of the time; width 50 (about -20%/+25%) sat in range 64-89% with
+later and fewer floor events, for about the same net (+$204 vs +$202 across
+the two pools). The width change buys uptime and fewer forced exits, not
+more dollars. `MERIDIAN_REBAND_WIDTH_PCT` (default 50) replaces the
+constant; operator opens at width 50.
+Same day, corrected within the hour: below-band re-centers were switched
+off on a first replay that skipped the settle test and the break exit. With
+both modeled, every below-band event on those tapes was worth +$10 to +$32
+per seat (sell half early, earn on the bounce, realize at the band edge
+instead of the floor), and the day's real loss was an ABOVE re-center that
+re-bought BONER at +25.6% before a 17% drop. The below clock is back on by
+default; `MERIDIAN_PILOT_RECENTER_BELOW=off` holds instead (floor and dump
+exit only). Also that day: the wallet-ops runaway cap sat at 39/40 and
+refused an operator open, so `MERIDIAN_MAX_DAILY_WALLET_OPS` went 40 to 100
+and `MERIDIAN_COLLECT_THRESHOLD_USD` 3 to 10 (the $3 collects were spending
+the budget).
 
 ## Custody and money flow
 

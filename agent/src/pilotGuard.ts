@@ -4,13 +4,12 @@
 // small: it does exactly three things and nothing else.
 //
 //   1. COLLECT fees on a threshold while a position is in range.
-//   2. RE-CENTER a position that ran out ABOVE its range (all USDG, nothing
-//      to realize), but only once the tape has STABILIZED: out for a minimum
-//      age AND no longer moving away. Below the band it HOLDS for the floor
-//      or the dump signal (since 2026-09-01; MERIDIAN_PILOT_RECENTER_BELOW=on
-//      restores the old below-band clock). Re-centering into a falling
-//      market is the meme desk's bleed pattern, and it is the one move this
-//      guard exists to refuse.
+//   2. RE-CENTER a position that fell out of range, but only once the tape
+//      has STABILIZED: out for a minimum age AND no longer moving away.
+//      Re-centering into a falling market is the meme desk's bleed pattern,
+//      and it is the one move this guard exists to refuse. (Below-band
+//      management can be switched off with MERIDIAN_PILOT_RECENTER_BELOW=off,
+//      leaving the floor and the dump exit as the only below-band exits.)
 //   3. THE FLOOR: position worth below a hard dollar floor -> withdraw to
 //      cash and stop. Bounded worst case, no debate at 3am.
 //
@@ -51,12 +50,15 @@ const RECENTER_ABOVE_MIN_MS = Number(process.env.MERIDIAN_PILOT_RECENTER_ABOVE_M
 // the fee density. Total width: 50 => about -20%/+25% in price.
 const REBAND_WIDTH_PCT = Number(process.env.MERIDIAN_REBAND_WIDTH_PCT ?? 50);
 const REBAND_LABEL = `-${(100 * (1 - 1 / (1 + REBAND_WIDTH_PCT / 200))).toFixed(0)}%/+${(REBAND_WIDTH_PCT / 2).toFixed(0)}%`;
-// BELOW-BAND RE-CENTERS OFF by default (same date). A below-band re-center
-// sells the fallen token and re-buys it lower; the replay showed it giving
-// back most of what the band had earned. Below the band the seat now waits
-// for the floor or the dump exit, the two bounds on principal. Above the
-// band (all USDG, nothing to realize) the fast re-center still runs.
-const RECENTER_BELOW = (process.env.MERIDIAN_PILOT_RECENTER_BELOW ?? "off") === "on";
+// THE BELOW-BAND CLOCK STAYS ON (2026-09-01, operator's question). It was
+// switched off for an hour on a replay that skipped the settle test and the
+// break exit; with both modeled, every below-band event on the BONER and
+// MICRODUCK tapes was worth +$10 to +$32 on a $485 seat (sell half early,
+// earn on the bounce, realize at the band edge instead of the floor). The
+// day's actual loss was an ABOVE re-center that re-bought at +25.6% before
+// a 17% drop. Off is available for a venue that keeps V-recovering through
+// its old band; it leaves the floor and the dump exit as the only exits.
+const RECENTER_BELOW = (process.env.MERIDIAN_PILOT_RECENTER_BELOW ?? "on") !== "off";
 /** Price still moving away faster than this (pct over the stability window) blocks a re-center. */
 const STABLE_DRIFT_PCT = 1.0;
 const STABILITY_WINDOW_MS = 30 * 60 * 1000;
@@ -104,8 +106,8 @@ export function recenterVerdict(
 }
 
 /** PURE: may an out-of-range seat be managed (re-centered, break-exited) on
- *  this side of its band? Below-band management is off unless the operator
- *  switches it back on; the floor and the dump exit apply regardless. */
+ *  this side of its band? Above: always. Below: unless the operator switched
+ *  below-band management off; the floor and the dump exit apply regardless. */
 export function outOfRangeManaged(belowBand: boolean, recenterBelow = RECENTER_BELOW): boolean {
   return !belowBand || recenterBelow;
 }
@@ -513,9 +515,9 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
     return;
   }
 
-  // 2. OUT OF RANGE. Below: hold for the floor or the dump exit (unless
-  // below-band re-centers are switched on). Above: wait for stabilization,
-  // then re-center at the re-band width.
+  // 2. OUT OF RANGE: wait for stabilization, then re-center at the re-band
+  // width. (With below-band management switched off, a seat below its band
+  // holds for the floor or the dump exit instead.)
   const token = tokenAddressFor(p.symbol);
   if (!token) return;
   const tokenIsC0 = token.toLowerCase() < USDG.toLowerCase();
