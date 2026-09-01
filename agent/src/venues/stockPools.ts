@@ -110,6 +110,14 @@ const POOLS: Record<string, PoolEntry> = {
   // so probe stays probation-sized. 148 other initialized BONER pools are
   // sniper-bot dust; this tier is the live hookless one.
   BONER: { token: "0x98096d17e191b3da1d5f99a6d7b3584351b11e18" as Address, quote: "USDG", fee: 9000, tickSpacing: 90 },
+  // microduck (operator add 2026-09-01, capped $500 seat on a 3-day record).
+  // PONS v2 launch token (curve paired to the NVDA stock token, phase 2, 1%
+  // creator tax on curve trades only); contract unverified but its runtime
+  // bytecode matches the verified PonsV2LauncherToken (GPRO) except immutables.
+  // Measured 08-29..08-31 on this hookless 0.78% USDG pool: $4.2M-$5.4M/day,
+  // $33k-$42k/day to LPs, price 0.011-0.018 throughout, 131 senders, top two
+  // arb bots 62% of swaps, ~$73k in range so a $500 seat is ~0.7% share.
+  MICRODUCK: { token: "0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725" as Address, quote: "USDG", fee: 7800, tickSpacing: 78 },
   // SPCX still EXCLUDED. Removed 2026-07-16 after a real mint reverted (0x70a08…):
   // SPCX (SpaceX) is a TRANSFER-RESTRICTED token, so our wallet couldn't receive
   // or LP it. Re-checked 2026-07-21: a USDG→SPCX swap now LANDS in faithful

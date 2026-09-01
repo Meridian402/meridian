@@ -66,6 +66,10 @@ const LP_POOLS: Record<string, { token: Address; fee: number; tickSpacing: numbe
   // stockPools.POOLS). Dry-test contract like its neighbors: operator-mintable,
   // invisible to the autonomous rotor until a mint lands.
   BONER: { token: "0x98096d17e191b3da1d5f99a6d7b3584351b11e18" as Address, fee: 9000, tickSpacing: 90 },
+  // microduck (operator add 2026-09-01; provenance + measurements in
+  // stockPools.POOLS). Dry-test contract like its neighbors: operator-mintable,
+  // invisible to the autonomous rotor until a mint lands.
+  MICRODUCK: { token: "0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725" as Address, fee: 7800, tickSpacing: 78 },
 };
 // The trusted, mint-proven baseline. Kept SEPARATE from the qualifier so these
 // five are always deployable even before the qualifier's cache has warmed, and
