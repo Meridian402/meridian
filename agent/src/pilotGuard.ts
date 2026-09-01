@@ -128,9 +128,13 @@ export function outOfRangeManaged(belowBand: boolean, recenterBelow = RECENTER_B
  *  elapsed since its last collect (or it has not collected this process
  *  life) AND the accrued fees clear the gas guard. Nothing accrued, nothing
  *  to collect, whatever the guard. */
-export function collectDue(lastCollectMs: number | undefined, now: number, accruedUsd: number, everyMs = COLLECT_EVERY_MS, minUsd = COLLECT_MIN_USD): boolean {
+export function collectDue(lastCollectMs: number | undefined, now: number, accruedUsd: number, everyMs = COLLECT_EVERY_MS, minUsd = COLLECT_MIN_USD, tickMs = CHECK_MS): boolean {
   if (!(accruedUsd > 0) || accruedUsd < minUsd) return false;
-  return lastCollectMs == null || now - lastCollectMs >= everyMs;
+  // Half a tick of slack: the tick that lands right at the cadence can read a
+  // few milliseconds short of it and push the collect to the NEXT tick, which
+  // turned a 5-minute clock into 5-or-7.5 (seen 15:06 on day one). With the
+  // slack, every second tick collects.
+  return lastCollectMs == null || now - lastCollectMs >= everyMs - tickMs / 2;
 }
 
 /** PURE: has the floor been breached? Fees are deliberately EXCLUDED

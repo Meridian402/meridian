@@ -36,12 +36,15 @@ test("a seat that has not collected this process life collects on the first tick
   assert.equal(collectDue(undefined, 1_000_000, 1.5, 5 * MIN, 1), true);
 });
 
-test("inside the cadence it waits, whatever has accrued", () => {
-  assert.equal(collectDue(1_000_000 - 4 * MIN, 1_000_000, 40, 5 * MIN, 1), false);
+test("inside the cadence it waits, whatever has accrued: one 150s tick after a collect is never its turn", () => {
+  assert.equal(collectDue(1_000_000 - 150_000, 1_000_000, 40, 5 * MIN, 1, 150_000), false);
+  assert.equal(collectDue(1_000_000 - 3 * MIN, 1_000_000, 40, 5 * MIN, 1, 150_000), false, "3 minutes is still short of the 3.75-minute slack window");
 });
 
-test("at the cadence it collects", () => {
-  assert.equal(collectDue(1_000_000 - 5 * MIN, 1_000_000, 1.5, 5 * MIN, 1), true);
+test("at the cadence it collects, and a tick that lands a hair short still counts (half-tick slack)", () => {
+  assert.equal(collectDue(1_000_000 - 5 * MIN, 1_000_000, 1.5, 5 * MIN, 1, 150_000), true);
+  assert.equal(collectDue(1_000_000 - 5 * MIN + 40, 1_000_000, 1.5, 5 * MIN, 1, 150_000), true, "299.96s since the last collect is this tick's turn, not the next one's");
+  assert.equal(collectDue(1_000_000 - 150_000, 1_000_000, 1.5, 5 * MIN, 1, 150_000), false, "one tick after a collect is inside the cadence");
 });
 
 test("pennies wait for the gas guard; a guard of 0 only refuses an empty seat", () => {
