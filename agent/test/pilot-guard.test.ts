@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged } from "../src/pilotGuard.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
 
 /**
@@ -14,6 +14,20 @@ import { skimAmountUsd } from "../src/treasurySkim.js";
 const MIN = 60_000;
 const mk = (ticks: number[], now: number, stepMs = 3 * MIN) =>
   ticks.map((tick, i) => ({ t: now - (ticks.length - 1 - i) * stepMs, tick }));
+
+// ── out of range, which side (2026-09-01): below holds, above re-centers ─────
+
+test("below the band the seat is not managed: the floor and the dump exit are its only exits", () => {
+  assert.equal(outOfRangeManaged(true, false), false, "a below-band re-center sells the bottom; the replay showed it giving the fees back");
+});
+
+test("above the band (all USDG, nothing to realize) the fast re-center still runs", () => {
+  assert.equal(outOfRangeManaged(false, false), true);
+});
+
+test("the operator can switch below-band re-centers back on", () => {
+  assert.equal(outOfRangeManaged(true, true), true);
+});
 
 // ── re-center: patience first ────────────────────────────────────────────────
 

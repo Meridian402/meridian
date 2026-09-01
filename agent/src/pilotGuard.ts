@@ -4,10 +4,13 @@
 // small: it does exactly three things and nothing else.
 //
 //   1. COLLECT fees on a threshold while a position is in range.
-//   2. RE-CENTER a position that fell out of range, but only once the tape
-//      has STABILIZED: out for a minimum age AND no longer moving away.
-//      Re-centering into a falling market is the meme desk's bleed pattern,
-//      and it is the one move this guard exists to refuse.
+//   2. RE-CENTER a position that ran out ABOVE its range (all USDG, nothing
+//      to realize), but only once the tape has STABILIZED: out for a minimum
+//      age AND no longer moving away. Below the band it HOLDS for the floor
+//      or the dump signal (since 2026-09-01; MERIDIAN_PILOT_RECENTER_BELOW=on
+//      restores the old below-band clock). Re-centering into a falling
+//      market is the meme desk's bleed pattern, and it is the one move this
+//      guard exists to refuse.
 //   3. THE FLOOR: position worth below a hard dollar floor -> withdraw to
 //      cash and stop. Bounded worst case, no debate at 3am.
 //
@@ -41,7 +44,19 @@ const FLOOR_USD = Number(process.env.MERIDIAN_PILOT_FLOOR_USD ?? 120);
 // a pumping pool is fees not earned. Down waits for proof; up only debounces.
 const RECENTER_BELOW_MIN_MS = Number(process.env.MERIDIAN_PILOT_RECENTER_MIN ?? 30) * 60 * 1000;
 const RECENTER_ABOVE_MIN_MS = Number(process.env.MERIDIAN_PILOT_RECENTER_ABOVE_MIN ?? 12) * 60 * 1000;
-const REBAND_WIDTH_PCT = 20; // ±10%, the width the pilot proved
+// THE RE-BAND WIDTH (2026-09-01, operator: "open at more width"). ±10% was
+// the pilot's width. Replayed on the BONER and MICRODUCK Swap logs it sat
+// out of range most of the day and floored in five of six windows, while
+// ±20-30% bands stayed in range 85-100% of the time and netted more on half
+// the fee density. Total width: 50 => about -20%/+25% in price.
+const REBAND_WIDTH_PCT = Number(process.env.MERIDIAN_REBAND_WIDTH_PCT ?? 50);
+const REBAND_LABEL = `-${(100 * (1 - 1 / (1 + REBAND_WIDTH_PCT / 200))).toFixed(0)}%/+${(REBAND_WIDTH_PCT / 2).toFixed(0)}%`;
+// BELOW-BAND RE-CENTERS OFF by default (same date). A below-band re-center
+// sells the fallen token and re-buys it lower; the replay showed it giving
+// back most of what the band had earned. Below the band the seat now waits
+// for the floor or the dump exit, the two bounds on principal. Above the
+// band (all USDG, nothing to realize) the fast re-center still runs.
+const RECENTER_BELOW = (process.env.MERIDIAN_PILOT_RECENTER_BELOW ?? "off") === "on";
 /** Price still moving away faster than this (pct over the stability window) blocks a re-center. */
 const STABLE_DRIFT_PCT = 1.0;
 const STABILITY_WINDOW_MS = 30 * 60 * 1000;
@@ -86,6 +101,13 @@ export function recenterVerdict(
     return { act: false, reason: `tape still moving away ${awayPct.toFixed(1)}% over the window; waiting for it to settle` };
   }
   return { act: true, reason: `out ${Math.round(outFor / 60000)}m and the tape has settled (${awayPct >= 0 ? "-" : "+"}${Math.abs(awayPct).toFixed(1)}% window move)` };
+}
+
+/** PURE: may an out-of-range seat be managed (re-centered, break-exited) on
+ *  this side of its band? Below-band management is off unless the operator
+ *  switches it back on; the floor and the dump exit apply regardless. */
+export function outOfRangeManaged(belowBand: boolean, recenterBelow = RECENTER_BELOW): boolean {
+  return !belowBand || recenterBelow;
 }
 
 /** PURE: has the floor been breached? Fees are deliberately EXCLUDED
@@ -491,12 +513,9 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
     return;
   }
 
-  // 2. OUT OF RANGE: wait for stabilization, then re-center at the proven width.
-  if (!outSince.has(key)) {
-    outSince.set(key, now);
-    console.error(`[pilotGuard] #${p.tokenId} (${p.symbol}) left its band; watching for stabilization before any re-center`);
-    return;
-  }
+  // 2. OUT OF RANGE. Below: hold for the floor or the dump exit (unless
+  // below-band re-centers are switched on). Above: wait for stabilization,
+  // then re-center at the re-band width.
   const token = tokenAddressFor(p.symbol);
   if (!token) return;
   const tokenIsC0 = token.toLowerCase() < USDG.toLowerCase();
@@ -505,6 +524,16 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
   // token is currency0, and as tick rises when it is currency1.
   const belowBand = tokenIsC0 ? tick < p.tickLower : tick >= p.tickUpper;
   const awayIsTickDown = tokenIsC0 ? belowBand : !belowBand;
+  if (!outSince.has(key)) {
+    outSince.set(key, now);
+    console.error(
+      outOfRangeManaged(belowBand)
+        ? `[pilotGuard] #${p.tokenId} (${p.symbol}) left its band ${belowBand ? "below" : "above"}; watching for stabilization before any re-center`
+        : `[pilotGuard] #${p.tokenId} (${p.symbol}) fell below its band; holding for the floor or the dump exit (below-band re-centers off)`,
+    );
+    return;
+  }
+  if (!outOfRangeManaged(belowBand)) return; // quiet hold below the band; the floor above already had its say
   // Below: the slow clock (drift realization risk). Above: the fast clock
   // (all-USDG, nothing to realize, missed fees are the only cost).
   const minOut = belowBand ? RECENTER_BELOW_MIN_MS : RECENTER_ABOVE_MIN_MS;
@@ -570,7 +599,7 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
     console.error(`[pilotGuard] re-center of ${p.symbol} deferred: not enough op budget for the full withdraw+reopen sequence`);
     return;
   }
-  console.error(`[pilotGuard] re-centering #${p.tokenId} (${p.symbol}): ${verdict.reason}; re-banding ~$${budget.toFixed(2)} at ±${REBAND_WIDTH_PCT / 2}%`);
+  console.error(`[pilotGuard] re-centering #${p.tokenId} (${p.symbol}): ${verdict.reason}; re-banding ~$${budget.toFixed(2)} at width ${REBAND_WIDTH_PCT} (${REBAND_LABEL})`);
   await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "recenter-close" });
   outSince.delete(key);
   try {
@@ -613,7 +642,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect >=$${COLLECT_THRESHOLD_USD}, re-center ${RECENTER_BELOW_MIN_MS / 60000}m below / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect >=$${COLLECT_THRESHOLD_USD}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}), floor $${FLOOR_USD}`,
   );
   return timer;
 }

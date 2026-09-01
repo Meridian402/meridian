@@ -118,6 +118,22 @@ Taker exits route through UniversalRouter
 a second verified UR exists at 0x06AfBA43 with 36k). V4_SWAP command 0x10;
 Permit2 needs a UR spender approval separate from the PositionManager's.
 
+**Seat width and the below-band hold (2026-09-01).** The pilot guard's
+re-band width was hardcoded at 20 (±10%), so whatever width an operator
+opened, the first re-center pulled it back to ±10%. Replaying the pilot rule
+on the real BONER and MICRODUCK Swap logs (14h from entry, $485 seats, the
+same 30/12-minute waits and 80% floor): ±10% sat in range 9-46% of the time
+and floored in five of six windows; ±20-30% bands stayed in range 85-100%
+and netted more on half the fee density. Below-band re-centers were the
+loss maker (sell the fallen token, re-buy it lower: today's 10:12 BONER
+re-entry netted -$17 at ±10% on a tape that finished +4%), above-band
+re-centers earned their keep on the up-trending MICRODUCK. Changes:
+`MERIDIAN_REBAND_WIDTH_PCT` (default 50, about -20%/+25%) replaces the
+constant; below-band re-centers and the break exit are OFF by default
+(`MERIDIAN_PILOT_RECENTER_BELOW=on` restores them), so below its band a
+seat holds for the 80% floor or the dump exit; above the band the 12-minute
+re-center still runs, at the re-band width. Operator opens at width 50.
+
 ## Custody and money flow
 
 - Execution wallet `0xDFF0Cf4f...` (hot, key in Railway env + gitignored
