@@ -304,7 +304,7 @@ export function isUndersizedMint(deployedUsd: number, budgetUsd: number): boolea
   return budgetUsd > 0 && deployedUsd < budgetUsd * 0.55;
 }
 
-export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_PCT, maxUsd?: number): Promise<{ tokenId: string; symbol: string }> {
+export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_PCT, maxUsd?: number, opts?: { bidOnly?: boolean }): Promise<{ tokenId: string; symbol: string }> {
   // Every seat entry funnels through here (operator lp-open, pilot re-center,
   // open-deploy), so this is the one gate the portfolio breaker needs on the
   // USDG side. A stand-down means the whole book just lost its limit with
@@ -357,7 +357,9 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
     // ~1.5x, nothing realized. Excess token above the mint's half-budget is
     // now SOLD first, so the re-open funds its own USDG side and the drift
     // the guard waited out is actually realized, not re-risked.
-    const excessTokenUsd = tokenHaveUsd - maxUsd / 2;
+    // A bid-only open wants NO token side: the whole budget is the USDG bid.
+    const tokenTargetUsd = opts?.bidOnly ? 0 : maxUsd / 2;
+    const excessTokenUsd = tokenHaveUsd - tokenTargetUsd;
     if (excessTokenUsd > 5 && (prices[symbol] ?? 0) > 0) {
       try {
         const sold = await realSellStockForUsdg({ fromSymbol: symbol, amountTokens: excessTokenUsd / prices[symbol] });
@@ -368,8 +370,8 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
         console.error(`[lpGuard] excess-token sell failed, opening with what we hold: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
       }
     }
-    const buyUsd = Math.max(0, maxUsd / 2 - tokenHaveUsd);
-    const usdgNeed = maxUsd / 2 + buyUsd; // mint side + what the token buy will spend
+    const buyUsd = Math.max(0, tokenTargetUsd - tokenHaveUsd);
+    const usdgNeed = (opts?.bidOnly ? maxUsd : maxUsd / 2) + buyUsd; // mint side + what the token buy will spend
     if (usdgHave < usdgNeed * 0.99) {
       const ethUsd = await fetchEthUsd();
       const ethHaveUsd = (Number(await client.getBalance({ address: signer.address })) / 1e18) * ethUsd;
@@ -388,14 +390,14 @@ export async function openInPool(symbol: string, widthPct: number = TIGHT_WIDTH_
     let lastErr: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const pos = await mintRange({ symbol, widthPct, maxUsd });
+        const pos = await mintRange({ symbol, widthPct, maxUsd, bidOnly: opts?.bidOnly });
         // THE SLIVER-MINT ABORT (2026-08-30). A mint that deployed a fraction
         // of its budget is a malfunction, not a position: proceeding hands a
         // mis-sized seat to the guard, whose lineage floor then exits it in
         // theatrical confusion (measured live: $76 minted against $444, floor
         // fired within minutes). Unwind it on the spot and fail loudly so the
         // caller treats the re-center as failed rather than half-done.
-        const deployedUsd = pos.usdgIn * 2; // balanced mint: the USDG side is half
+        const deployedUsd = opts?.bidOnly ? pos.usdgIn : pos.usdgIn * 2; // balanced mint: the USDG side is half; a bid deploys on one side
         if (isUndersizedMint(deployedUsd, maxUsd)) {
           console.error(`[lpGuard] UNDERSIZED MINT: #${pos.tokenId} deployed ~$${deployedUsd.toFixed(2)} of the $${maxUsd} budget; unwinding instead of pretending`);
           // The unwind itself can fail (RPC hiccup, the runaway-ops cap).

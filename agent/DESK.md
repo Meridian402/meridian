@@ -153,6 +153,18 @@ send, so a failed collect waits a full cadence rather than retrying every
 tick. Gas math: two busy seats at this cadence can spend $50+ a day, which
 is why the guard exists on quiet tape.
 
+**Never re-buy the top (2026-09-01, from the give-back post-mortem).** The
+day's two big losses both started as ABOVE re-centers minting balanced bands
+at a pump's pause (BONER re-bought at +25.6%, MICRODUCK two ticks off the
+high; ~$208 of a -$168 day). Above re-centers now re-arm as an all-USDG BID
+whose top price edge sits at spot, spanning what the balanced band's lower
+half would have covered, full budget on one side (2x the retrace-side fee
+density). The retrace fills us at chosen prices; a continued run costs only
+missed fees; the mint buys no token at all. Below re-centers stay balanced.
+Plumbing: mintRange bidOnly -> bidBelowBounds(depth 0, width/2) with the
+dump bid's 2x maxUsd convention; openInPool passes {bidOnly}; the pilot
+sets it for every above re-center. Post-mortem artifact: "The Give-Back".
+
 ## Custody and money flow
 
 - Execution wallet `0xDFF0Cf4f...` (hot, key in Railway env + gitignored

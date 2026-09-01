@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue } from "../src/pilotGuard.js";
+import { bidBelowBounds } from "../src/venues/lpPositions.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
 
 /**
@@ -28,6 +29,25 @@ test("with below-band management switched off, a seat below its band holds for t
 test("above the band (all USDG, nothing to realize) the fast re-center always runs", () => {
   assert.equal(outOfRangeManaged(false, false), true);
   assert.equal(outOfRangeManaged(false, true), true);
+});
+
+// ── the re-center bid (2026-09-01): never re-buy the top ─────────────────────
+
+test("depth-0 bid bounds sit strictly out of range with the top price edge at spot (USDG currency0)", () => {
+  // USDG is currency0 (token is currency1): token price falls as the tick
+  // rises, so the bid occupies ticks ABOVE spot and holds only USDG.
+  const b = bidBelowBounds(303046, 90, false, 0, 25);
+  assert.ok(b.tickLower > 303046, "strictly above the current tick: the mint pulls only USDG");
+  assert.ok(b.tickLower - 303046 <= 90, "top price edge lands within one spacing of spot");
+  const span = b.tickUpper - b.tickLower;
+  const wantTicks = Math.log(1.25) / Math.log(1.0001); // widthPct 25 one-sided = the width-50 balanced band's lower half
+  assert.ok(Math.abs(span - wantTicks) <= 2 * 90, "the bid spans the balanced band's lower half");
+});
+
+test("depth-0 bid bounds mirror for a currency0 token", () => {
+  const b = bidBelowBounds(1000, 90, true, 0, 25);
+  assert.ok(b.tickUpper <= 1000, "price falls with the tick: the bid occupies ticks below spot");
+  assert.ok(1000 - b.tickUpper <= 90, "top price edge within one spacing of spot");
 });
 
 // ── collect cadence (2026-09-01): a clock, gas-guarded ───────────────────────

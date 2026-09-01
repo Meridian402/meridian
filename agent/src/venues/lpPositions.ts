@@ -378,8 +378,8 @@ export function computeMintPlan(args: {
   };
 }
 
-export async function mintRange(params: { symbol: string; widthPct: number; maxUsd?: number }): Promise<LpPositionRecord> {
-  const { symbol, widthPct, maxUsd } = params;
+export async function mintRange(params: { symbol: string; widthPct: number; maxUsd?: number; bidOnly?: boolean }): Promise<LpPositionRecord> {
+  const { symbol, widthPct, maxUsd, bidOnly } = params;
   guardWalletOp(`lp-mint ${symbol}`); // global runaway breaker (counts every deploy attempt)
   recordWalletOp(0, "lp-mint");
   const k = poolKeyOf(symbol);
@@ -398,7 +398,17 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
   // ONE BRAIN: the desk mints through the exact same planner a gated self-serve
   // user signs, so the customer path can never drift from Merd's own. Recipient
   // is the desk signer here; the advice API passes the user's wallet instead.
-  const plan = computeMintPlan({ key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient: signer.address, maxUsd, nowMs: Date.now() });
+  // BID-ONLY (2026-09-01, the give-back post-mortem): an all-USDG band whose
+  // top price edge sits at spot, spanning the same range the balanced band's
+  // lower half would have covered (widthPct/2 in bidBelowBounds' one-sided
+  // width convention). The full budget concentrates on the retrace side and
+  // the mint buys NO token, so a re-center can never buy a top. Single-sided
+  // ranges follow the dump bid's maxUsd convention: computeMintPlan splits
+  // the cap per side, so the one live side gets maxUsd only if we pass 2x.
+  const bounds = bidOnly
+    ? bidBelowBounds(tick, k.tickSpacing, k.currency0.toLowerCase() !== USDG.toLowerCase(), 0, widthPct / 2)
+    : undefined;
+  const plan = computeMintPlan({ key: k, sqrtP, tick, widthPct, bal0Raw, bal1Raw, recipient: signer.address, maxUsd: bidOnly && maxUsd ? maxUsd * 2 : maxUsd, nowMs: Date.now(), bounds });
   const { tickLower, tickUpper, liquidity } = plan;
 
   if (!nativeLeg) await ensureApprovedForPM(k.currency0);

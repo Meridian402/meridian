@@ -630,11 +630,20 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
     console.error(`[pilotGuard] re-center of ${p.symbol} deferred: not enough op budget for the full withdraw+reopen sequence`);
     return;
   }
-  console.error(`[pilotGuard] re-centering #${p.tokenId} (${p.symbol}): ${verdict.reason}; re-banding ~$${budget.toFixed(2)} at width ${REBAND_WIDTH_PCT} (${REBAND_LABEL})`);
+  // NEVER RE-BUY THE TOP (2026-09-01, the give-back post-mortem). An above
+  // re-center used to mint a balanced band at spot, buying half a budget of
+  // token at what is often a pump's pause: both of the day's large losses
+  // (BONER re-bought at +25.6%, MICRODUCK two ticks off the high) started
+  // exactly there. Above re-centers now re-arm as an all-USDG bid whose top
+  // edge sits at spot: the retrace fills us at prices we chose, a continued
+  // run costs only missed fees, and a top can never be bought. Below
+  // re-centers stay balanced (the seat is all token; balance IS the fix).
+  const bidSide = !belowBand;
+  console.error(`[pilotGuard] re-centering #${p.tokenId} (${p.symbol}): ${verdict.reason}; re-banding ~$${budget.toFixed(2)} at width ${REBAND_WIDTH_PCT} (${REBAND_LABEL})${bidSide ? " as a BID, top edge at spot" : ""}`);
   await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "recenter-close" });
   outSince.delete(key);
   try {
-    const pos = await openInPool(p.symbol, REBAND_WIDTH_PCT, budget);
+    const pos = await openInPool(p.symbol, REBAND_WIDTH_PCT, budget, { bidOnly: bidSide });
     // The new band inherits the ORIGINAL deposit: the floor keeps bounding
     // the seat's cumulative loss, not each band's local one.
     if (depositUsd > 0) setLineage(String(pos.tokenId), depositUsd);
@@ -673,7 +682,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard $${COLLECT_MIN_USD}), re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard $${COLLECT_MIN_USD}), re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }
