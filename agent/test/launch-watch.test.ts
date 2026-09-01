@@ -69,7 +69,7 @@ test("seatValueUsd is the deposit at entry, all-USDG above the band, all-token b
 
 test("simulateSeat earns pro-rata fees, scales at ignition, and exits on the time stop", () => {
   const s = tape(2000, { start: 0, usd: 500, L: 1e17, senders: 40, stepSec: 15 }); // 8.3h of steady $500 swaps
-  const r = simulateSeat(s, 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: 300, maxAgeSec: 6 * 3600, rolloverDropPct: 30, crowdingMultiple: 3, outOfRangeExitSec: 1800 });
+  const r = simulateSeat(s, 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: 300, maxAgeSec: 6 * 3600, rolloverDropPct: 30, crowdingMultiple: 3, outOfRangeExitSec: 1800, floorFrac: 0.6 });
   assert.equal(r.exitReason, "time stop");
   assert.equal(r.scaledTs, 300);
   assert.ok(r.feesUsd > 0);
@@ -77,13 +77,25 @@ test("simulateSeat earns pro-rata fees, scales at ignition, and exits on the tim
   assert.ok(r.netUsd > 0 && r.netUsd < r.feesUsd, `net ${r.netUsd} fees ${r.feesUsd}`);
 });
 
+test("simulateSeat floors out of a dump instead of riding it for the whole out-of-range window", () => {
+  // Price collapses to a quarter within minutes: without the floor the sim
+  // held this for outOfRangeExitSec and marked the entire ride.
+  const px = (sqrtP: number) => sqrtP * sqrtP;
+  const mk = (t: number, sqrtP: number): SwapSample => ({ t, sqrtP, px: px(sqrtP), usd: 100, L: 1e18, sender: "0xa" });
+  const tape = [mk(0, 1), mk(60, 0.95), mk(120, 0.85), mk(180, 0.7), mk(240, 0.5), mk(3000, 0.4), mk(3600, 0.3)];
+  const r = simulateSeat(tape, 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: null, maxAgeSec: 24 * 3600, rolloverDropPct: 30, crowdingMultiple: 100, outOfRangeExitSec: 1800, floorFrac: 0.6 });
+  assert.equal(r.exitReason, "floor", "the hard bound fires before the slow exits");
+  assert.ok(r.exitTs !== null && r.exitTs <= 300, "floored during the collapse, not after the window");
+  assert.ok(r.netUsd > -150 * 0.65, "loss bounded near (1 - floorFrac) of capital plus costs");
+});
+
 test("simulateSeat exits when the pool gets crowded and reports no tape on empty input", () => {
   const s = tape(50, { start: 0, L: 1e17 });
   s[30].L = 5e17;
-  const r = simulateSeat(s, 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: null, maxAgeSec: 6 * 3600, rolloverDropPct: 30, crowdingMultiple: 3, outOfRangeExitSec: 1800 });
+  const r = simulateSeat(s, 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: null, maxAgeSec: 6 * 3600, rolloverDropPct: 30, crowdingMultiple: 3, outOfRangeExitSec: 1800, floorFrac: 0.6 });
   assert.equal(r.exitReason, "crowded out");
   assert.equal(r.exitTs, s[30].t);
-  assert.equal(simulateSeat([], 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: null, maxAgeSec: 1, rolloverDropPct: 30, crowdingMultiple: 3, outOfRangeExitSec: 1 }).exitReason, "no tape");
+  assert.equal(simulateSeat([], 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: null, maxAgeSec: 1, rolloverDropPct: 30, crowdingMultiple: 3, outOfRangeExitSec: 1, floorFrac: 0.6 }).exitReason, "no tape");
 });
 
 test("simulateSeat exits on a two-hour volume roll-over", () => {
@@ -92,7 +104,7 @@ test("simulateSeat exits on a two-hour volume roll-over", () => {
   const c = tape(360, { start: 7200, usd: 500, stepSec: 10, L: 1e17 }); // hour 2: -50%
   const d = tape(360, { start: 10800, usd: 200, stepSec: 10, L: 1e17 }); // hour 3: -60%
   const e = tape(60, { start: 14400, usd: 200, stepSec: 10, L: 1e17 }); // hour 4: the check runs here
-  const r = simulateSeat([...a, ...b, ...c, ...d, ...e], 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: null, maxAgeSec: 24 * 3600, rolloverDropPct: 30, crowdingMultiple: 100, outOfRangeExitSec: 1800 });
+  const r = simulateSeat([...a, ...b, ...c, ...d, ...e], 0.03, true, { probeUsd: 150, scaleUsd: 1500, width: 1.5, ignitionTs: null, maxAgeSec: 24 * 3600, rolloverDropPct: 30, crowdingMultiple: 100, outOfRangeExitSec: 1800, floorFrac: 0.6 });
   assert.equal(r.exitReason, "volume roll-over");
   assert.equal(r.exitTs, 14400);
 });

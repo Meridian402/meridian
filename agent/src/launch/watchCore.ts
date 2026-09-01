@@ -140,6 +140,11 @@ export interface SimPlan {
   rolloverDropPct: number; // 30 = an hour down 30% vs the prior hour
   crowdingMultiple: number; // exit when pool L >= multiple x entry L
   outOfRangeExitSec: number; // exit after this long outside the band
+  /** Hard floor: exit when the seat marks below this fraction of its capital
+   *  (the spec's 60%). The first report week ran WITHOUT this check and the
+   *  simulation rode dumps unbounded for the out-of-range window, marking
+   *  -$600..-$900 rides no live desk would ever hold (2026-09-01). */
+  floorFrac: number;
 }
 
 export interface SimResult {
@@ -206,7 +211,9 @@ export function simulateSeat(swaps: readonly SwapSample[], feeRate: number, usdg
     lastT = x.t;
     const h = Math.floor((x.t - s[0].t) / 3600);
     hourly.set(h, (hourly.get(h) ?? 0) + x.usd);
-    // exits, checked after the swap is credited
+    // exits, checked after the swap is credited; the floor first: it is the
+    // hard bound every other exit is allowed to be slower than.
+    if (seatValueUsd(L, x.sqrtP, lo, hi, usdgIs0, x.px) < plan.floorFrac * capital) return finish(x, "floor");
     if (x.t - entry.t >= plan.maxAgeSec) return finish(x, "time stop");
     if (outSince != null && x.t - outSince >= plan.outOfRangeExitSec) return finish(x, "out of range too long");
     if (x.L >= entryPoolL * plan.crowdingMultiple) return finish(x, "crowded out");

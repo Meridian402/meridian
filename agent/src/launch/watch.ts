@@ -55,6 +55,7 @@ const PLAN: SimPlan = {
   ignitionTs: null,
   maxAgeSec: Number(process.env.LAUNCH_WATCH_MAX_AGE_H ?? 6) * 3600,
   rolloverDropPct: Number(process.env.LAUNCH_WATCH_ROLLOVER_PCT ?? 30),
+  floorFrac: Number(process.env.LAUNCH_WATCH_FLOOR_FRAC ?? 0.6),
   crowdingMultiple: Number(process.env.LAUNCH_WATCH_CROWDING_X ?? 3),
   outOfRangeExitSec: Number(process.env.LAUNCH_WATCH_OUT_OF_RANGE_MIN ?? 30) * 60,
 };
@@ -324,6 +325,14 @@ async function evaluate(state: State): Promise<void> {
 
 function report(state: State): void {
   const rows = Object.values(state.pools).filter((p) => p.kind === "side" && p.swaps.length > 0);
+  // Recompute every sim fresh from the stored tapes so the report always
+  // reflects the CURRENT plan and exits, not whatever code stamped p.sim
+  // when the row was live (the floor fix would otherwise take a day to show).
+  for (const p of rows) {
+    const launch = state.launches[p.token];
+    const ignitionTs = launch?.ignitionTs ?? ignitionTime(p.swaps[0].t, p.swaps, IGNITION);
+    p.sim = simulateSeat(p.swaps, p.fee / 1e6, p.usdgIs0, { ...PLAN, ignitionTs });
+  }
   rows.sort((a, b) => (b.sim?.feesUsd ?? 0) - (a.sim?.feesUsd ?? 0));
   console.log(`launch-watch report, ${Object.keys(state.launches).length} launches seen, ${rows.length} side pools with swaps\n`);
   console.log("symbol      tier   age(h) src      gate  first-swap  ignition  swaps    volume      fees(pool)  sim fees  sim net   exit");
