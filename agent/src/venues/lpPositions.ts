@@ -451,7 +451,8 @@ export async function mintRange(params: { symbol: string; widthPct: number; maxU
     hasCostBasis: true,
   };
   appendLedger("lp-positions.jsonl", record);
-  recordExecution({ ts: Date.now(), kind: "lp-mint", fromSymbol: "USDG", toSymbol: symbol, amountUsd: usdgIn * 2, success: true, txHash: hash });
+  // A balanced mint deployed ~2x its USDG side; a single-sided bid deployed exactly its USDG side (the 2x here overstated bid mints in every executions consumer, audit 2026-09-01).
+  recordExecution({ ts: Date.now(), kind: "lp-mint", fromSymbol: "USDG", toSymbol: symbol, amountUsd: usdgIn * (tokenIn > 1e-9 ? 2 : 1), success: true, txHash: hash });
   // Attribution: cash-boundary model counts only the USDG side as cash out.
   // The token side was cash out when it was BOUGHT (its own token-buy row);
   // counting it again here would double it.
@@ -1201,7 +1202,8 @@ export function lastMintedPosition(): { symbol: string; depositUsd: number } | n
       if (r.symbol && r.usdgIn != null) last = r as LpPositionRecord; // a mint row (closure rows have no symbol/usdgIn)
     } catch {}
   }
-  return last ? { symbol: last.symbol, depositUsd: last.usdgIn * 2 } : null; // balanced mint ≈ 2× the USDG side
+  // Balanced mint ~ 2x the USDG side; a single-sided bid IS its USDG side (audit 2026-09-01, same class as the bid-floor bug).
+  return last ? { symbol: last.symbol, depositUsd: last.usdgIn * ((last.tokenIn ?? 0) > 1e-9 ? 2 : 1) } : null;
 }
 
 /** Pull a position: remove all (or part of) its liquidity and take both
