@@ -3,7 +3,8 @@
 // first pilot slid out of its band with no reflexes at all, and deliberately
 // small: it does exactly three things and nothing else.
 //
-//   1. COLLECT fees on a threshold while a position is in range.
+//   1. COLLECT fees on a clock (every few minutes, gas-guarded) while a
+//      position is in range.
 //   2. RE-CENTER a position that fell out of range, but only once the tape
 //      has STABILIZED: out for a minimum age AND no longer moving away.
 //      Re-centering into a falling market is the meme desk's bleed pattern,
@@ -32,8 +33,19 @@ import { dataPath } from "./dataDir.js";
 import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
 import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff } from "./dumpWatch.js";
 
-const CHECK_MS = 3 * 60 * 1000;
-const COLLECT_THRESHOLD_USD = Number(process.env.MERIDIAN_COLLECT_THRESHOLD_USD ?? 3);
+// The tick is half the collect cadence so a 5-minute collect lands on the
+// interval instead of on the next 3-minute wake (2026-09-01, operator:
+// collects every 5 minutes, not at a dollar amount).
+const CHECK_MS = 150 * 1000;
+// COLLECT ON A CLOCK, NOT A THRESHOLD (2026-09-01). An in-range seat collects
+// on the first tick at or past MERIDIAN_COLLECT_EVERY_MIN since its last
+// collect. The gas guard: a collect is ~145k gas, about $0.19 at ETH $2,433,
+// so a seat that has accrued less than MERIDIAN_COLLECT_MIN_USD waits for the
+// next tick rather than paying gas to move pennies (0 disables the guard).
+// Collects never counted toward the wallet-ops runaway cap (only buys, sells,
+// mints and skims do), so the cadence is bounded by gas alone.
+const COLLECT_EVERY_MS = Number(process.env.MERIDIAN_COLLECT_EVERY_MIN ?? 5) * 60 * 1000;
+const COLLECT_MIN_USD = Number(process.env.MERIDIAN_COLLECT_MIN_USD ?? 1);
 const FLOOR_USD = Number(process.env.MERIDIAN_PILOT_FLOOR_USD ?? 120);
 // THE WAIT IS ASYMMETRIC (operator insight, 2026-08-14). The two exits are
 // not the same trade. Exit BELOW: the position holds the fallen token, and
@@ -112,6 +124,15 @@ export function outOfRangeManaged(belowBand: boolean, recenterBelow = RECENTER_B
   return !belowBand || recenterBelow;
 }
 
+/** PURE: is an in-range seat due for a collect? Due when the cadence has
+ *  elapsed since its last collect (or it has not collected this process
+ *  life) AND the accrued fees clear the gas guard. Nothing accrued, nothing
+ *  to collect, whatever the guard. */
+export function collectDue(lastCollectMs: number | undefined, now: number, accruedUsd: number, everyMs = COLLECT_EVERY_MS, minUsd = COLLECT_MIN_USD): boolean {
+  if (!(accruedUsd > 0) || accruedUsd < minUsd) return false;
+  return lastCollectMs == null || now - lastCollectMs >= everyMs;
+}
+
 /** PURE: has the floor been breached? Fees are deliberately EXCLUDED
  *  (bleed audit, 2026-08-18): counting fees toward the floor spent earned
  *  income as extra drawdown room, so the better a seat had done, the deeper
@@ -131,6 +152,7 @@ export function effectiveFloorUsd(depositUsd: number, envFloorUsd = FLOOR_USD): 
 }
 
 const outSince = new Map<string, number>();
+const lastCollect = new Map<string, number>();
 const tickHistory = new Map<string, TickSample[]>();
 
 /** PURE: is the hands-off board falling together? (bleed program phase 2.)
@@ -506,9 +528,12 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
 
   if (p.inRange) {
     outSince.delete(key);
-    // 1. COLLECT while earning, same threshold discipline as the stock guard.
-    if (fees >= COLLECT_THRESHOLD_USD) {
+    // 1. COLLECT on the clock while earning. The clock is stamped BEFORE the
+    // send so a collect that fails waits a full cadence instead of retrying
+    // every tick.
+    if (collectDue(lastCollect.get(key), now, fees)) {
       console.error(`[pilotGuard] collecting $${fees.toFixed(2)} from #${p.tokenId} (${p.symbol})`);
+      lastCollect.set(key, now);
       await collectFees({ tokenId: p.tokenId, symbol: p.symbol });
       appendLedger("pilot-guard.jsonl", { ts: now, kind: "collect", tokenId: p.tokenId, symbol: p.symbol, feesUsd: fees });
     }
@@ -644,7 +669,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect >=$${COLLECT_THRESHOLD_USD}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard $${COLLECT_MIN_USD}), re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}), floor $${FLOOR_USD}`,
   );
   return timer;
 }

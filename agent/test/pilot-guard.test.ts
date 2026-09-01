@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue } from "../src/pilotGuard.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
 
 /**
@@ -28,6 +28,26 @@ test("with below-band management switched off, a seat below its band holds for t
 test("above the band (all USDG, nothing to realize) the fast re-center always runs", () => {
   assert.equal(outOfRangeManaged(false, false), true);
   assert.equal(outOfRangeManaged(false, true), true);
+});
+
+// ── collect cadence (2026-09-01): a clock, gas-guarded ───────────────────────
+
+test("a seat that has not collected this process life collects on the first tick with fees above the gas guard", () => {
+  assert.equal(collectDue(undefined, 1_000_000, 1.5, 5 * MIN, 1), true);
+});
+
+test("inside the cadence it waits, whatever has accrued", () => {
+  assert.equal(collectDue(1_000_000 - 4 * MIN, 1_000_000, 40, 5 * MIN, 1), false);
+});
+
+test("at the cadence it collects", () => {
+  assert.equal(collectDue(1_000_000 - 5 * MIN, 1_000_000, 1.5, 5 * MIN, 1), true);
+});
+
+test("pennies wait for the gas guard; a guard of 0 only refuses an empty seat", () => {
+  assert.equal(collectDue(undefined, 1_000_000, 0.4, 5 * MIN, 1), false, "paying ~$0.19 of gas to move $0.40 is refused");
+  assert.equal(collectDue(undefined, 1_000_000, 0.05, 5 * MIN, 0), true);
+  assert.equal(collectDue(undefined, 1_000_000, 0, 5 * MIN, 0), false);
 });
 
 // ── re-center: patience first ────────────────────────────────────────────────

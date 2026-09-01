@@ -136,9 +136,22 @@ instead of the floor), and the day's real loss was an ABOVE re-center that
 re-bought BONER at +25.6% before a 17% drop. The below clock is back on by
 default; `MERIDIAN_PILOT_RECENTER_BELOW=off` holds instead (floor and dump
 exit only). Also that day: the wallet-ops runaway cap sat at 39/40 and
-refused an operator open, so `MERIDIAN_MAX_DAILY_WALLET_OPS` went 40 to 100
-and `MERIDIAN_COLLECT_THRESHOLD_USD` 3 to 10 (the $3 collects were spending
-the budget).
+refused an operator open, so `MERIDIAN_MAX_DAILY_WALLET_OPS` went 40 to 100.
+(The collect threshold was raised to $10 at the same time on the wrong
+belief that collects count toward the cap. They never did: only buys, sells,
+mints, skims and rotations are recorded in the wallet ledger. Corrected the
+same afternoon.)
+
+**Collects on a clock (2026-09-01, operator).** The dollar threshold is
+gone. An in-range seat collects on the first tick at or past
+`MERIDIAN_COLLECT_EVERY_MIN` (5) minutes since its last collect, and the
+guard tick is 150s so the cadence lands on the interval. Gas guard:
+`MERIDIAN_COLLECT_MIN_USD` (1); a collect is ~145k gas, about $0.19 at ETH
+$2,433, so a seat holding pennies waits for the next tick instead of paying
+gas to move them (0 disables the guard). The clock is stamped before the
+send, so a failed collect waits a full cadence rather than retrying every
+tick. Gas math: two busy seats at this cadence can spend $50+ a day, which
+is why the guard exists on quiet tape.
 
 ## Custody and money flow
 
