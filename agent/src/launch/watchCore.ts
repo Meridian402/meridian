@@ -249,3 +249,40 @@ export function hourlyTable(swaps: readonly SwapSample[], feeRate: number): { ho
   }
   return [...out.values()].map((e) => ({ ...e, senders: e.senders.size }));
 }
+
+// --- the candidate feed (2026-09-02) ------------------------------------------
+// One day of the watcher's tape said minute-one probes lose at every filter
+// (-$7k/day on 274 gated launches) while joining a pool AFTER it has proved an
+// hour of flow was the one shape that netted positive, which is also how the
+// desk's real winners (BONER, MICRODUCK) were found by hand. This is that rule,
+// read-only: the runner logs a candidate, the operator decides, the desk's
+// rails hold it. Reads ONLY the hour before `atTs`, never the future.
+export interface CandidateConfig {
+  minUsd: number; // prior-hour volume bar
+  maxMovePct: number; // |price move| over the prior hour, first swap to last
+  minSenders: number; // distinct senders in the prior hour
+}
+export interface CandidateVerdict {
+  ok: boolean;
+  reason: string;
+  volUsd: number;
+  movePct: number;
+  senders: number;
+  swaps: number;
+  poolL: number;
+  px: number;
+}
+/** PURE: did the hour ending at `atTs` prove flow worth joining? */
+export function candidateVerdict(swaps: readonly SwapSample[], atTs: number, cfg: CandidateConfig): CandidateVerdict {
+  const win = swaps.filter((x) => x.t >= atTs - 3600 && x.t < atTs).sort((a, b) => a.t - b.t);
+  if (win.length === 0) return { ok: false, reason: "no swaps in the prior hour", volUsd: 0, movePct: 0, senders: 0, swaps: 0, poolL: 0, px: 0 };
+  const volUsd = win.reduce((s, x) => s + x.usd, 0);
+  const first = win[0], last = win[win.length - 1];
+  const movePct = first.px > 0 ? (last.px / first.px - 1) * 100 : 0;
+  const senders = new Set(win.map((x) => x.sender.toLowerCase())).size;
+  const out = { volUsd: Math.round(volUsd), movePct: Math.round(movePct * 10) / 10, senders, swaps: win.length, poolL: last.L, px: last.px };
+  if (volUsd < cfg.minUsd) return { ok: false, reason: `prior hour $${Math.round(volUsd).toLocaleString()} is under the $${cfg.minUsd.toLocaleString()} bar`, ...out };
+  if (Math.abs(movePct) > cfg.maxMovePct) return { ok: false, reason: `price moved ${movePct.toFixed(0)}% over the prior hour, past the ${cfg.maxMovePct}% bar`, ...out };
+  if (senders < cfg.minSenders) return { ok: false, reason: `${senders} senders in the prior hour, under ${cfg.minSenders}`, ...out };
+  return { ok: true, reason: `$${Math.round(volUsd).toLocaleString()} over the prior hour from ${senders} senders, price ${movePct >= 0 ? "+" : ""}${movePct.toFixed(0)}%`, ...out };
+}

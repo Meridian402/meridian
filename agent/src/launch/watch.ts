@@ -15,7 +15,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "../dataDir.js";
 import { appendLedger } from "../ledger.js";
 import { PONS_V2, factoryAbi } from "./ponsV2.js";
-import { gateToken, ignitionTime, simulateSeat, hourlyTable, type SwapSample, type SimPlan, type SimResult, Q96 } from "./watchCore.js";
+import { gateToken, ignitionTime, simulateSeat, hourlyTable, type SwapSample, type SimPlan, type SimResult, Q96, candidateVerdict } from "./watchCore.js";
 
 const RPC = process.env.LAUNCH_WATCH_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
 const POLL_MS = Number(process.env.LAUNCH_WATCH_POLL_MS ?? 3000);
@@ -59,6 +59,18 @@ const PLAN: SimPlan = {
   crowdingMultiple: Number(process.env.LAUNCH_WATCH_CROWDING_X ?? 3),
   outOfRangeExitSec: Number(process.env.LAUNCH_WATCH_OUT_OF_RANGE_MIN ?? 30) * 60,
 };
+// THE CANDIDATE FEED (2026-09-02, read-only). At hour h after a side pool's
+// first swap, if the PRIOR hour cleared the flow bar with a contained price and
+// enough distinct senders, log it as a candidate for the operator to consider
+// under the desk's rails. Scored afterwards as a seat of CAND_SEAT_USD from the
+// candidate moment so the rule's own record accumulates in the report.
+const CANDIDATE = {
+  hours: String(process.env.LAUNCH_WATCH_CAND_HOURS ?? "1,2,3").split(",").map(Number).filter((n) => Number.isFinite(n) && n > 0),
+  minUsd: Number(process.env.LAUNCH_WATCH_CAND_MIN_USD ?? 100_000),
+  maxMovePct: Number(process.env.LAUNCH_WATCH_CAND_MAX_MOVE_PCT ?? 50),
+  minSenders: Number(process.env.LAUNCH_WATCH_CAND_MIN_SENDERS ?? 10),
+  seatUsd: Number(process.env.LAUNCH_WATCH_CAND_SEAT_USD ?? 500),
+};
 const IGNITION = { windowSec: 600, minSwaps: Number(process.env.LAUNCH_WATCH_IGN_SWAPS ?? 60), minSenders: Number(process.env.LAUNCH_WATCH_IGN_SENDERS ?? 20), minUsd: Number(process.env.LAUNCH_WATCH_IGN_USD ?? 10000) };
 
 const initEvent = parseAbiItem("event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)");
@@ -100,6 +112,19 @@ interface TrackedPool {
   lastReportHour: number;
   sim: SimResult | null;
   closed: boolean;
+  candidates?: Candidate[];
+  candidateChecked?: number[];
+}
+interface Candidate {
+  hour: number;
+  ts: number; // the mark: first swap + hour * 3600
+  volUsd: number;
+  movePct: number;
+  senders: number;
+  poolL: number;
+  px: number;
+  /** Filled in when the pool closes (or by the report while it is open). */
+  outcome?: { netUsd: number; feesUsd: number; exitReason: string; hours: number };
 }
 interface State {
   lastBlock: string;
@@ -298,6 +323,19 @@ async function evaluate(state: State): Promise<void> {
       const launch = state.launches[p.token];
       const ignitionTs = launch?.ignitionTs ?? ignitionTime(p.swaps[0].t, p.swaps, IGNITION);
       const gateOk = launch ? launch.gate?.ok === true : false;
+      // Candidate marks: each configured hour is judged once, on the hour
+      // before it, and only once the mark has actually passed.
+      for (const h of CANDIDATE.hours) {
+        const at = p.swaps[0].t + h * 3600;
+        if (now < at || (p.candidateChecked ?? []).includes(h)) continue;
+        (p.candidateChecked ??= []).push(h);
+        const v = candidateVerdict(p.swaps, at, CANDIDATE);
+        if (!v.ok) continue;
+        const c: Candidate = { hour: h, ts: at, volUsd: v.volUsd, movePct: v.movePct, senders: v.senders, poolL: v.poolL, px: v.px };
+        (p.candidates ??= []).push(c);
+        appendLedger(LEDGER, { ts: Date.now(), kind: "candidate", id: p.id, token: p.token, symbol: launch?.symbol ?? "", tier: p.fee / 1e4, gateOk, launchSource: launch?.source ?? null, hour: h, atTs: at, volUsd: v.volUsd, movePct: v.movePct, senders: v.senders, swaps: v.swaps, poolL: String(v.poolL), px: v.px });
+        log(`CANDIDATE ${launch?.symbol || p.token.slice(0, 10)} tier ${p.fee / 1e4}% at h${h} (${new Date(at * 1000).toISOString().slice(11, 16)}Z): ${v.reason}; gate ${gateOk ? "PASS" : launch ? "FAIL" : "none"}, pool ${p.id.slice(0, 10)}`);
+      }
       p.sim = simulateSeat(p.swaps, p.fee / 1e6, p.usdgIs0, { ...PLAN, ignitionTs });
       const hour = Math.floor((now - p.swaps[0].t) / 3600);
       if (hour > p.lastReportHour) {
@@ -311,6 +349,7 @@ async function evaluate(state: State): Promise<void> {
     const deadAfter = (p.kind === "hooked" ? DEAD_HOOKED_MIN : DEAD_SIDE_MIN) * 60;
     if ((p.swaps.length === 0 && age > deadAfter) || age > 24 * 3600) {
       p.closed = true;
+      for (const c of p.candidates ?? []) if (!c.outcome) c.outcome = scoreCandidate(p, c);
       if (p.swaps.length > 0) appendLedger(LEDGER, { ts: Date.now(), kind: "closed", id: p.id, token: p.token, symbol: state.launches[p.token]?.symbol ?? "", swaps: p.swaps.length, sim: p.sim });
       p.swaps = p.swaps.slice(-50); // keep the state file small; the ledger has the history
     }
@@ -321,6 +360,15 @@ async function evaluate(state: State): Promise<void> {
   const referenced = new Set(Object.values(state.pools).filter((p) => !p.closed).map((p) => p.token));
   for (const [id, p] of Object.entries(state.pools)) if (p.closed && now - p.createdTs > 24 * 3600) delete state.pools[id];
   for (const [token, l] of Object.entries(state.launches)) if (l.ignitionTs == null && !referenced.has(token) && now - l.ts > 2 * 3600) delete state.launches[token];
+}
+
+/** What a CAND_SEAT_USD seat entered at the candidate mark did on the tape from
+ *  there, with the watcher's own exits. Never scaled, never re-centered. */
+function scoreCandidate(p: TrackedPool, c: Candidate): NonNullable<Candidate["outcome"]> {
+  const tape = p.swaps.filter((x) => x.t >= c.ts);
+  if (tape.length === 0) return { netUsd: 0, feesUsd: 0, exitReason: "no tape after the mark", hours: 0 };
+  const r = simulateSeat(tape, p.fee / 1e6, p.usdgIs0, { ...PLAN, probeUsd: CANDIDATE.seatUsd, scaleUsd: CANDIDATE.seatUsd, ignitionTs: null });
+  return { netUsd: r.netUsd, feesUsd: r.feesUsd, exitReason: r.exitReason, hours: r.exitTs != null ? Math.round(((r.exitTs - c.ts) / 3600) * 10) / 10 : 0 };
 }
 
 function report(state: State): void {
@@ -343,6 +391,18 @@ function report(state: State): void {
     const ign = l?.ignitionTs != null ? `+${Math.round((l.ignitionTs - l.ts) / 60)}m` : "-";
     console.log(`${(l?.symbol || p.token.slice(0, 10)).padEnd(11)} ${(p.fee / 1e4).toFixed(2).padStart(5)}% ${((Date.now() / 1000 - p.createdTs) / 3600).toFixed(1).padStart(6)} ${(l?.source ?? "unknown").padEnd(8)} ${(l?.gate ? (l.gate.ok ? "PASS" : "FAIL") : "-").padEnd(5)} ${`+${Math.round(first)}s`.padStart(10)} ${ign.padStart(9)} ${String(p.swaps.length).padStart(6)} $${Math.round(vol).toLocaleString().padStart(10)} $${Math.round(vol * p.fee / 1e6).toLocaleString().padStart(10)} $${String(p.sim?.feesUsd ?? 0).padStart(8)} $${String(p.sim?.netUsd ?? 0).padStart(8)}   ${p.sim?.exitReason ?? ""}`);
   }
+  const cands = Object.values(state.pools).flatMap((p) => (p.candidates ?? []).map((c) => ({ p, c, o: c.outcome ?? scoreCandidate(p, c) })));
+  if (cands.length) {
+    cands.sort((a, b) => b.c.ts - a.c.ts);
+    const net = cands.reduce((s, x) => s + x.o.netUsd, 0);
+    const wins = cands.filter((x) => x.o.netUsd > 0).length;
+    console.log(`\ncandidates (hour-${CANDIDATE.hours.join("/")} flow >= ${CANDIDATE.minUsd.toLocaleString()}, move <= ${CANDIDATE.maxMovePct}%, senders >= ${CANDIDATE.minSenders}), scored as a ${CANDIDATE.seatUsd} seat from the mark: ${cands.length} so far, net ${net.toFixed(0)}, hit ${cands.length ? Math.round((100 * wins) / cands.length) : 0}%`);
+    console.log("mark (UTC)   symbol      tier   h  prior-hour vol   move   senders  gate   seat net   seat fees  exit");
+    for (const { p, c, o } of cands) {
+      const l = state.launches[p.token];
+      console.log(`${new Date(c.ts * 1000).toISOString().slice(5, 16)} ${(l?.symbol || p.token.slice(0, 10)).padEnd(11)} ${(p.fee / 1e4).toFixed(2).padStart(5)}% ${String(c.hour).padStart(2)}  ${c.volUsd.toLocaleString().padStart(12)} ${(c.movePct >= 0 ? "+" : "") + c.movePct.toFixed(0)}%`.padEnd(70) + `${String(c.senders).padStart(4)}     ${(l?.gate ? (l.gate.ok ? "PASS" : "FAIL") : "-").padEnd(5)} ${o.netUsd.toFixed(0).padStart(7)}  ${o.feesUsd.toFixed(0).padStart(7)}  ${o.exitReason}${p.closed ? "" : " (open)"}`);
+    }
+  }
   const fails = Object.values(state.launches).filter((l) => l.gate && !l.gate.ok);
   if (fails.length) console.log(`\ngate failures: ${fails.map((l) => `${l.symbol || l.token.slice(0, 10)} (${l.gate!.reason})`).join("; ")}`);
 }
@@ -353,7 +413,7 @@ async function main(): Promise<void> {
     report(state);
     return;
   }
-  log(`armed: rpc ${new URL(RPC).hostname}, poll ${POLL_MS}ms, tier >= ${MIN_TIER / 1e4}%, probe $${PLAN.probeUsd} -> scale $${PLAN.scaleUsd} at ignition (${IGNITION.minSwaps} swaps, ${IGNITION.minSenders} senders, $${IGNITION.minUsd} in ${IGNITION.windowSec / 60}m), band x${PLAN.width}, exits: ${PLAN.maxAgeSec / 3600}h / roll-over ${PLAN.rolloverDropPct}% / crowding ${PLAN.crowdingMultiple}x. READ-ONLY.`);
+  log(`armed: rpc ${new URL(RPC).hostname}, poll ${POLL_MS}ms, tier >= ${MIN_TIER / 1e4}%, probe $${PLAN.probeUsd} -> scale $${PLAN.scaleUsd} at ignition (${IGNITION.minSwaps} swaps, ${IGNITION.minSenders} senders, $${IGNITION.minUsd} in ${IGNITION.windowSec / 60}m), band x${PLAN.width}, exits: ${PLAN.maxAgeSec / 3600}h / roll-over ${PLAN.rolloverDropPct}% / crowding ${PLAN.crowdingMultiple}x; candidates at h${CANDIDATE.hours.join("/")} on >= ${CANDIDATE.minUsd.toLocaleString()} prior-hour volume, <= ${CANDIDATE.maxMovePct}% move, >= ${CANDIDATE.minSenders} senders, scored as a ${CANDIDATE.seatUsd} seat. READ-ONLY.`);
   const started = Date.now();
   let lastEval = 0;
   let failures = 0;

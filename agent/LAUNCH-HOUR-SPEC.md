@@ -1,7 +1,7 @@
 # The Launch-Hour Desk (spec v0.1, 2026-09-01)
 
-Status: DIRECTION AGREED, NOTHING BUILT, NO CAPITAL. First deliverable is a
-read-only watcher. The live desk (DESK.md) is untouched by this document.
+Status: D1 WATCHER LIVE (09-01), D1.5 CANDIDATE FEED LIVE (09-02), D2 NOT ARMED,
+NO CAPITAL AUTOMATED. The live desk (DESK.md) is untouched by this document.
 
 ## Thesis, measured on 2026-08-31 / 09-01 tapes
 
@@ -82,6 +82,29 @@ D1. WATCHER, read-only, no signer, no deploy. src/launch/watch.ts run with tsx
 D2. PROBES armed (create-or-join + probe only, capped at 10/day), rails and
     attribution live, watcher keeps scoring what scaling would have done.
 D3. SCALING armed once D2 shows probes and ignition agree with the watcher.
+
+## D1.5, the candidate feed (2026-09-02, built, read-only)
+
+One day of D1 tape (979 side pools with swaps, 294 gate-PASS launches) re-scored
+for the D2 shape: a $150 probe at minute one on every gated launch nets about
+-$7,200/day (hit 34%, floor on 98 of 274); the D1 probe-then-scale plan nets
+about -$38,700/day; a USDG-only bid probe nets about -$7,400. No minute-one
+signal (ignition, early swaps, senders, volume, tier, source, pair, latency)
+selects a profitable subset. The arming criterion above is not met, so D2 is
+NOT armed.
+
+What did net positive on the same tape is joining AFTER proof: at hour 1 with
+the prior hour >= $100k and the price moved < 50%, a $500 seat with the
+watcher's exits netted roughly +$230 to +$380/day over 22-28 entries at a 50-55%
+hit rate (worst -$416). That is how BONER and MICRODUCK were actually found.
+
+So the watcher now emits a CANDIDATE line (ledger kind "candidate") when a side
+pool clears that bar at hour 1, 2 or 3 after its first swap, and the report
+scores every candidate as a $500 seat from the mark so the rule keeps its own
+record. Knobs: LAUNCH_WATCH_CAND_HOURS (1,2,3), LAUNCH_WATCH_CAND_MIN_USD
+(100000), LAUNCH_WATCH_CAND_MAX_MOVE_PCT (50), LAUNCH_WATCH_CAND_MIN_SENDERS (10),
+LAUNCH_WATCH_CAND_SEAT_USD (500). The operator decides; the desk's rails hold
+the seat. Capital is still not automated.
 
 ## Reuse
 

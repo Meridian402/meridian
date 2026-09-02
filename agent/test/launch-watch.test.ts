@@ -116,3 +116,35 @@ test("hourlyTable aggregates per hour with distinct senders", () => {
   assert.equal(t[0].senders, 7);
   assert.equal(Math.round(t[0].fees), 60);
 });
+
+// --- candidate feed ------------------------------------------------------------
+import { candidateVerdict } from "../src/launch/watchCore.js";
+
+const flow = (t0: number, n: number, usdEach: number, pxFrom: number, pxTo: number, senders: number): SwapSample[] =>
+  Array.from({ length: n }, (_, i) => ({ t: t0 + (i * 3600) / n, usd: usdEach, px: pxFrom + ((pxTo - pxFrom) * i) / (n - 1), sqrtP: 1, L: 1e18, sender: `0x${String(i % senders).padStart(40, "0")}` }));
+
+test("candidateVerdict passes an hour of real flow with a contained price and enough distinct senders", () => {
+  const swaps = flow(1000, 200, 600, 1.0, 1.2, 25); // $120k, +20%, 25 senders
+  const v = candidateVerdict(swaps, 1000 + 3600, { minUsd: 100_000, maxMovePct: 50, minSenders: 10 });
+  assert.equal(v.ok, true);
+  assert.equal(v.volUsd, 120_000);
+  assert.equal(v.movePct, 20);
+  assert.equal(v.senders, 25);
+  assert.match(v.reason, /120,000/);
+});
+
+test("candidateVerdict fails closed on thin flow, a big move, or too few senders, and names which", () => {
+  assert.match(candidateVerdict(flow(0, 50, 100, 1, 1.1, 20), 3600, { minUsd: 100_000, maxMovePct: 50, minSenders: 10 }).reason, /under the \$100,000 bar/);
+  assert.match(candidateVerdict(flow(0, 200, 600, 1, 2.5, 20), 3600, { minUsd: 100_000, maxMovePct: 50, minSenders: 10 }).reason, /moved 150%/);
+  assert.match(candidateVerdict(flow(0, 200, 600, 1, 1.1, 3), 3600, { minUsd: 100_000, maxMovePct: 50, minSenders: 10 }).reason, /3 senders/);
+});
+
+test("candidateVerdict reads only the hour before the mark, never the future or earlier hours", () => {
+  const earlier = flow(0, 200, 600, 1, 1.1, 20); // hour 0: $120k
+  const quiet = flow(3600, 10, 50, 1.1, 1.1, 5); // hour 1: $500
+  const later = flow(7200, 200, 600, 1.1, 1.2, 20); // hour 2: $120k
+  const v = candidateVerdict([...earlier, ...quiet, ...later], 7200, { minUsd: 100_000, maxMovePct: 50, minSenders: 10 });
+  assert.equal(v.ok, false, "the hour ending at the mark is the quiet one");
+  assert.equal(v.volUsd, 500);
+  assert.equal(candidateVerdict([], 7200, { minUsd: 1, maxMovePct: 50, minSenders: 1 }).reason, "no swaps in the prior hour");
+});
