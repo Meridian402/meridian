@@ -184,7 +184,7 @@ export async function submitXPost(wallet: string, url: string): Promise<XPostRes
   if (required > 0) {
     const held = await merdHeldUsd(w as Address);
     const gate = holdGateRefusal(held, required);
-    if (gate) return { ok: false, message: `${gate}. the contract address is in the tokenomics tab.` };
+    if (gate) return { ok: false, message: `${gate}. the contract address is in the site footer.` };
   }
 
   const rows = readRows();
