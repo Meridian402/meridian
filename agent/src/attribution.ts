@@ -32,7 +32,7 @@ export interface AttributionRow {
   tokenId?: string;
   /** mint | token-buy | collect | withdraw | floor-exit | recenter-close |
    *  lp-close | breaker-flatten | sell | band-mint | catch-mint | stop-exit |
-   *  sweep | rotate | breaker-withdraw | stale-withdraw */
+   *  sweep | rotate | breaker-withdraw | stale-withdraw | migrate-out */
   mech: string;
   usdIn: number;
   usdOut: number;
@@ -53,6 +53,25 @@ const FILE = "attribution.jsonl";
 export function gasUsdOf(gasUsed: bigint, effectiveGasPrice: bigint | undefined, ethUsd: number): number {
   if (!effectiveGasPrice || !Number.isFinite(ethUsd) || ethUsd <= 0) return 0;
   return (Number(gasUsed * effectiveGasPrice) / 1e18) * ethUsd;
+}
+
+/** PURE: gas a receipt burned, in wei. viem receipts carry both fields. */
+export function receiptGasWei(r: { gasUsed: bigint; effectiveGasPrice?: bigint | null }): bigint {
+  return r.effectiveGasPrice ? r.gasUsed * r.effectiveGasPrice : 0n;
+}
+
+/** PURE: the native ETH a withdraw actually returned to the wallet. A balance
+ *  delta across the transaction is net of the gas it paid, so gas is added
+ *  back here and stated separately on the row. Never negative. */
+export function withdrawnEthWei(balanceBefore: bigint, balanceAfter: bigint, gasWei: bigint): bigint {
+  const wei = balanceAfter - balanceBefore + gasWei;
+  return wei > 0n ? wei : 0n;
+}
+
+/** PURE: wei to USD at a stamped price. 0 when the price is unknown, so the
+ *  caller flags the row approx instead of writing a confident zero. */
+export function weiToUsd(wei: bigint, ethUsd: number): number {
+  return Number.isFinite(ethUsd) && ethUsd > 0 ? (Number(wei) / 1e18) * ethUsd : 0;
 }
 
 /** Record one operation. `gasWei` (gasUsed * effectiveGasPrice) is converted
@@ -111,14 +130,50 @@ export interface VenueAttribution {
   gasUsd: number;
   /** usdOut - usdIn - gasUsd: exact realized flow, negative = the venue took money. */
   netUsd: number;
+  /** The same net over LIVE rows only (no backfill, no estimates). Equal to
+   *  netUsd for a venue the accountant has watched from its first mint. */
+  exactNetUsd: number;
+  approxOps: number;
   byMech: Record<string, { ops: number; usdIn: number; usdOut: number; feeUsd: number }>;
   hasApprox: boolean;
 }
 
-/** PURE: fold rows into the per-venue truth table, worst venue first. */
+export interface AttributionTotals {
+  usdIn: number;
+  usdOut: number;
+  feeUsd: number;
+  gasUsd: number;
+  netUsd: number;
+  ops: number;
+}
+
+/** A row the accountant wrote at the call site with every number in hand,
+ *  as opposed to one reconstructed from a journal with documented holes. */
+export const isExactRow = (r: Pick<AttributionRow, "approx" | "backfilled">): boolean => !r.approx && !r.backfilled;
+
+function foldTotals(rows: readonly AttributionRow[]): AttributionTotals {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const t = { usdIn: 0, usdOut: 0, feeUsd: 0, gasUsd: 0, ops: 0 };
+  for (const r of rows) {
+    t.usdIn += r.usdIn;
+    t.usdOut += r.usdOut;
+    t.feeUsd += r.feeUsd;
+    t.gasUsd += r.gasUsd;
+    t.ops += 1;
+  }
+  return { usdIn: r2(t.usdIn), usdOut: r2(t.usdOut), feeUsd: r2(t.feeUsd), gasUsd: r2(t.gasUsd), netUsd: r2(t.usdOut - t.usdIn - t.gasUsd), ops: t.ops };
+}
+
+/** PURE: fold rows into the per-venue truth table, worst venue first.
+ *  `totals` is every row; `exact` and `approx` split the same rows into
+ *  what the accountant measured live and what was reconstructed from history
+ *  with known holes. Summing the two into one number is how the meme sleeve
+ *  came to read as a five-figure loss (2026-09-01); read `exact` for truth. */
 export function aggregateAttribution(rows: readonly AttributionRow[]): {
   venues: VenueAttribution[];
-  totals: { usdIn: number; usdOut: number; feeUsd: number; gasUsd: number; netUsd: number; ops: number };
+  totals: AttributionTotals;
+  exact: AttributionTotals;
+  approx: AttributionTotals;
 } {
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const byVenue = new Map<string, VenueAttribution>();
@@ -126,7 +181,7 @@ export function aggregateAttribution(rows: readonly AttributionRow[]): {
     const key = `${r.sleeve}:${r.venue}`;
     let v = byVenue.get(key);
     if (!v) {
-      v = { venue: r.venue, sleeve: r.sleeve, ops: 0, usdIn: 0, usdOut: 0, feeUsd: 0, gasUsd: 0, netUsd: 0, byMech: {}, hasApprox: false };
+      v = { venue: r.venue, sleeve: r.sleeve, ops: 0, usdIn: 0, usdOut: 0, feeUsd: 0, gasUsd: 0, netUsd: 0, exactNetUsd: 0, approxOps: 0, byMech: {}, hasApprox: false };
       byVenue.set(key, v);
     }
     v.ops += 1;
@@ -134,6 +189,8 @@ export function aggregateAttribution(rows: readonly AttributionRow[]): {
     v.usdOut += r.usdOut;
     v.feeUsd += r.feeUsd;
     v.gasUsd += r.gasUsd;
+    if (isExactRow(r)) v.exactNetUsd += r.usdOut - r.usdIn - r.gasUsd;
+    else v.approxOps += 1;
     if (r.approx) v.hasApprox = true;
     const m = (v.byMech[r.mech] ??= { ops: 0, usdIn: 0, usdOut: 0, feeUsd: 0 });
     m.ops += 1;
@@ -143,6 +200,7 @@ export function aggregateAttribution(rows: readonly AttributionRow[]): {
   }
   const venues = [...byVenue.values()].map((v) => {
     v.netUsd = r2(v.usdOut - v.usdIn - v.gasUsd);
+    v.exactNetUsd = r2(v.exactNetUsd);
     v.usdIn = r2(v.usdIn);
     v.usdOut = r2(v.usdOut);
     v.feeUsd = r2(v.feeUsd);
@@ -155,18 +213,7 @@ export function aggregateAttribution(rows: readonly AttributionRow[]): {
     return v;
   });
   venues.sort((a, b) => a.netUsd - b.netUsd);
-  const totals = venues.reduce(
-    (t, v) => ({
-      usdIn: r2(t.usdIn + v.usdIn),
-      usdOut: r2(t.usdOut + v.usdOut),
-      feeUsd: r2(t.feeUsd + v.feeUsd),
-      gasUsd: r2(t.gasUsd + v.gasUsd),
-      netUsd: r2(t.netUsd + v.netUsd),
-      ops: t.ops + v.ops,
-    }),
-    { usdIn: 0, usdOut: 0, feeUsd: 0, gasUsd: 0, netUsd: 0, ops: 0 },
-  );
-  return { venues, totals };
+  return { venues, totals: foldTotals(rows), exact: foldTotals(rows.filter(isExactRow)), approx: foldTotals(rows.filter((r) => !isExactRow(r))) };
 }
 
 // THE REALIZED-P&L ADMISSION GATE (bleed program phase 2). The audit's V4:
@@ -270,12 +317,16 @@ export function venueChurnAdmits(sleeve: Sleeve, venue: string): { ok: boolean; 
 export function printAttributionReport(daysBack = 1): void {
   const rows = readAttributionRows(Date.now() - daysBack * 24 * 3600e3);
   if (rows.length === 0) return;
-  const { venues, totals } = aggregateAttribution(rows);
-  console.error(`[attribution] last ${daysBack}d, ${totals.ops} ops: in $${totals.usdIn}, out $${totals.usdOut}, fees $${totals.feeUsd}, gas $${totals.gasUsd}, NET $${totals.netUsd}`);
+  const { venues, totals, exact, approx } = aggregateAttribution(rows);
+  console.error(`[attribution] last ${daysBack}d, ${totals.ops} ops: in ${totals.usdIn}, out ${totals.usdOut}, fees ${totals.feeUsd}, gas ${totals.gasUsd}, NET ${totals.netUsd}`);
+  if (approx.ops > 0) {
+    console.error(`[attribution]   exact (live rows): NET ${exact.netUsd} over ${exact.ops} ops; approx (backfilled history, known holes): NET ${approx.netUsd} over ${approx.ops} ops, not summable with the above`);
+  }
   for (const v of venues) {
     const mechs = Object.entries(v.byMech)
-      .map(([m, x]) => `${m} ${x.ops}x ${(x.usdOut - x.usdIn) >= 0 ? "+" : ""}$${(x.usdOut - x.usdIn).toFixed(2)}`)
+      .map(([m, x]) => `${m} ${x.ops}x ${(x.usdOut - x.usdIn) >= 0 ? "+" : ""}${(x.usdOut - x.usdIn).toFixed(2)}`)
       .join(", ");
-    console.error(`[attribution]   ${v.sleeve}:${v.venue}: net ${v.netUsd >= 0 ? "+" : ""}$${v.netUsd} (fees $${v.feeUsd}, gas $${v.gasUsd})${v.hasApprox ? " ~approx" : ""} [${mechs}]`);
+    const exactNote = v.approxOps > 0 ? ` ~approx (exact rows net ${v.exactNetUsd >= 0 ? "+" : ""}${v.exactNetUsd})` : "";
+    console.error(`[attribution]   ${v.sleeve}:${v.venue}: net ${v.netUsd >= 0 ? "+" : ""}${v.netUsd} (fees ${v.feeUsd}, gas ${v.gasUsd})${exactNote} [${mechs}]`);
   }
 }

@@ -13,6 +13,7 @@ import { getAgentSigner, getPublicClient, getWalletClient } from "./venues/signe
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { TREASURY_WALLET } from "./merd/wallets.js";
 import { guardWalletOp, recordWalletOp } from "./risk.js";
+import { registerLoop, beat } from "./liveness.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { recordExecution } from "./executionsLog.js";
 import { appendLedger } from "./ledger.js";
@@ -50,10 +51,11 @@ async function runSkim(): Promise<void> {
 
 export function startTreasurySkim(): NodeJS.Timeout | undefined {
   if (!getAgentSigner()) return undefined;
+  registerLoop("treasurySkim", CHECK_MS, { money: true });
   const tick = () =>
-    void withHouseWalletLock("treasurySkim", runSkim).catch((err) =>
-      console.error(`[skim] failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`),
-    );
+    void withHouseWalletLock("treasurySkim", runSkim)
+      .catch((err) => console.error(`[skim] failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`))
+      .finally(() => beat("treasurySkim"));
   const timer = setInterval(tick, CHECK_MS);
   timer.unref?.();
   setTimeout(tick, 90 * 1000).unref?.(); // first pass shortly after boot, off the boot rush

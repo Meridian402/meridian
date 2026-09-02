@@ -212,6 +212,17 @@ treasury, ratchets) and WORKING (quotes marked live, breathes). Band badges
 (earning / waiting / filled) compare served ranges to a pool tick the
 visitor's own browser reads from the chain.
 
+**Meme sleeve attribution is complete as of 2026-09-01.** Until then the
+rotor's breaker-withdraw, stale-withdraw and migrate paths wrote no attribution
+row at all, and a stop-exit recorded only the token sale, not the ETH side the
+withdraws returned. So the sleeve's ledger read as cash that went in and never
+came back: the "-$15.9k" the 08-05 to 09-01 window showed was mostly that hole,
+not a measured loss (the book reconciliation puts the sleeve's real cost near
+$1-1.5k). Every meme cash boundary now writes an exact row with gas stamped from
+the receipt, and `/api/attribution` splits `exact` (live rows) from `approx`
+(backfilled history with known holes) so the two are never summed as one.
+Run the meme rotor again only against `exact`.
+
 ## Public narration
 
 - `GET /api/desk-journal`: the last 100 journal entries, public. Kinds:
@@ -327,6 +338,21 @@ the other.
 The open half is sizing. Deployed capital should track measured pulse, so a
 weekend book is a weekend-sized book. That is the same missing volume floor
 described above and it is the single biggest remaining leak.
+
+## Liveness (2026-09-01)
+
+Every autonomous loop stamps a heartbeat when a tick completes, never when it
+starts, so a hung await starves its own beat (`src/liveness.ts`). Money loops:
+lpGuard, memeRotor, pilotGuard, dumpWatch, lpAllocator, treasurySkim,
+dailyReconcile. Report-only: memeFast, bookSnapshot, backups. `/health` lists
+every loop with its age against a stale threshold (3x its period, 10-minute
+floor) and answers 503 naming the culprit when a money loop is stale; `/api/ops`
+carries the same table. Railway does not poll the healthcheck after a deploy, so
+the recovery is in-process: a money loop stale past 4x its period (30-minute
+floor, `MERIDIAN_LOOP_EXIT_MIN`, 0 disables) exits the process for a supervised
+restart, the same doctrine as the house-lock ceiling and deliberately above it
+so the lock watchdog fires first when the lock is the cause. Born from the
+31.6-hour dark window of 2026-08-21/22: a live process, a dead desk.
 
 ## Incident log (selected)
 

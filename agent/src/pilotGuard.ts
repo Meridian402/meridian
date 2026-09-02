@@ -24,6 +24,7 @@ import { realSellStockForUsdg, tokenAddressFor, poolFeePct, USDG } from "./venue
 import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
 import { getAgentSigner } from "./venues/signer.js";
+import { registerLoop, beat } from "./liveness.js";
 import { withHouseWalletLock, operatorWaiting } from "./houseWallet.js";
 import { appendLedger } from "./ledger.js";
 import { enqueuePendingSell, retryPendingSells, sellSymbolsOrEnqueue } from "./pendingSells.js";
@@ -710,9 +711,13 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
 export function startPilotGuard(): NodeJS.Timeout | undefined {
   if (!getAgentSigner()) return undefined;
   let running = false;
+  registerLoop("pilotGuard", CHECK_MS, { money: true });
   const tickFn = async () => {
-    if (running) return;
-    if (operatorWaiting()) return; // yield to the human; next tick is 3 minutes away
+    if (running) return; // a hung tick must starve the heartbeat, so no beat here
+    if (operatorWaiting()) {
+      beat("pilotGuard"); // yielding to the human is a live decision, not a stall
+      return; // next tick is 3 minutes away
+    }
     running = true;
     try {
       await withHouseWalletLock("pilotGuard.tick", runTick);
@@ -720,6 +725,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
       console.error(`[pilotGuard] tick failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
     } finally {
       running = false;
+      beat("pilotGuard");
     }
   };
   const timer = setInterval(() => void tickFn(), CHECK_MS);

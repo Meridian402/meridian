@@ -29,6 +29,7 @@ import { getScanClient } from "./venues/signer.js";
 import { usdgPoolIdFor, tokenIsCurrency0 } from "./venues/stockPools.js";
 import { openPositionsOnChain, ENGINE_SYMBOLS } from "./venues/lpPositions.js";
 import { appendLedger } from "./ledger.js";
+import { registerLoop, beat } from "./liveness.js";
 import { dataPath } from "./dataDir.js";
 
 const POOL_MANAGER = "0x8366a39CC670B4001A1121B8F6A443A643e40951" as const;
@@ -586,7 +587,8 @@ export function startDumpWatch(): NodeJS.Timeout | undefined {
   console.log(
     `[dumpWatch] crowding sampler on: share-of-pool per watched symbol every ${Math.round(CROWD_MS / 60000)}m to crowding.jsonl (measurement only)`,
   );
-  const t = setInterval(() => void tick(), WATCH_MS);
+  registerLoop("dumpWatch", WATCH_MS, { money: true });
+  const t = setInterval(() => void tick().finally(() => beat("dumpWatch")), WATCH_MS);
   t.unref?.();
   void tick();
   return t;

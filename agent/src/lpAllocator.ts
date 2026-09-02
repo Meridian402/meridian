@@ -15,6 +15,7 @@ import { openPositionsOnChain, lpPositionsWithValue, configuredPool, LP_BASELINE
 import { poolCandidates, poolFeePct, poolPricesUsd, WETH } from "./venues/stockPools.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { readStockBalances } from "./venues/positionAccounting.js";
+import { registerLoop, beat } from "./liveness.js";
 import { dataPath } from "./dataDir.js";
 
 const BASELINE_SYMBOLS = new Set(LP_BASELINE_SYMBOLS);
@@ -395,11 +396,14 @@ export function startLpAllocator(): NodeJS.Timeout {
     return day >= 1 && day <= 5 && mins >= 810 && mins < 1200;
   };
   let last = 0;
+  // Registered at the slow cadence: a healthy allocator completes a pass at
+  // least hourly, so stale means three hours of silence, fatal means four.
+  registerLoop("lpAllocator", 60 * 60 * 1000, { money: true });
   const timer = setInterval(() => {
     const gap = isMarketHours() ? 30 * 60 * 1000 : 60 * 60 * 1000;
     if (Date.now() - last >= gap) {
       last = Date.now();
-      void tick();
+      void tick().finally(() => beat("lpAllocator"));
     }
   }, 5 * 60 * 1000);
   timer.unref?.();

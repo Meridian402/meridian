@@ -14,6 +14,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type pg from "pg";
+import { registerLoop, beat } from "./liveness.js";
 import { dataPath } from "./dataDir.js";
 import { getPool } from "./db.js";
 
@@ -198,6 +199,7 @@ export function startBackups(): void {
     }
   };
   void run(true);
-  const timer = setInterval(() => void run(false), INTERVAL_MS);
+  registerLoop("backups", INTERVAL_MS);
+  const timer = setInterval(() => void run(false).finally(() => beat("backups")), INTERVAL_MS);
   timer.unref?.();
 }

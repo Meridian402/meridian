@@ -52,6 +52,7 @@ import { withHouseWalletLock } from "./houseWallet.js";
 import { walletOps24h } from "./risk.js";
 import { securityHeaders, globalRateLimit, authRateLimit, routeKey } from "./httpGuards.js";
 import { startBackups, backupStatus } from "./backup.js";
+import { livenessSnapshot, startLivenessWatchdog } from "./liveness.js";
 import { initLedger, ledgerStatus } from "./ledger.js";
 import { scheduleOpenDeploy, runOpenDeploy, openDeployPreview } from "./openDeploy.js";
 import { lpProfit } from "./lpProfit.js";
@@ -192,6 +193,7 @@ app.get("/api/ops", async (req: Request, res: Response) => {
     yields: yieldSummary(), // measured syrupUSDG APY (pool-price drift) + $INDEX distribution APR
     backups: backupStatus(), // Postgres mirror of the durable files: alive, last run, restores
     ledger: ledgerStatus(), // real-time row mirror: ready, inserted, failed, backfilled
+    loops: livenessSnapshot(), // heartbeat per autonomous loop: age against its stale threshold
     requests: {
       total: reqStats.total,
       perMin: Math.round((reqStats.total / windowSec) * 60),
@@ -394,8 +396,14 @@ async function checkPayment(req: Request, res: Response): Promise<boolean> {
   return true;
 }
 
+// Honest health: the process being up is not the desk being alive. Every
+// autonomous loop stamps a heartbeat when a tick completes (src/liveness.ts);
+// a money loop gone quiet flips this to 503 naming the culprit, which is what
+// an external uptime probe should page on. Railway does not poll this after a
+// deploy, so the restart itself comes from the in-process watchdog.
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ ok: true, service: "meridian-mcp", version: "0.1.0" });
+  const live = livenessSnapshot();
+  res.status(live.ok ? 200 : 503).json({ ok: live.ok, service: "meridian-mcp", version: "0.1.0", uptimeSec: Math.round(process.uptime()), stale: live.stale, loops: live.loops });
 });
 
 // The RWA universe the research swarm has gathered. Read-only, open (the census
@@ -427,7 +435,7 @@ app.get("/api/attribution", (req: Request, res: Response) => {
       days,
       rowCount: rows.length,
       ...aggregateAttribution(rows),
-      note: "net = usdOut - usdIn - gas per venue over the window; exact over closed cycles. Rows marked approx are backfilled history with known holes (see /api/admin/attribution-backfill output).",
+      note: "net = usdOut - usdIn - gas per venue over the window; exact over closed cycles. totals holds every row; exact and approx split the same rows into live accountant rows and backfilled history with known holes (see /api/admin/attribution-backfill output). Read exact for the live era; the two are not summable.",
     });
   } catch (err) {
     res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -2941,6 +2949,7 @@ if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();
 if (process.env.MERIDIAN_RUN_YIELD_LOGGER === "1") startYieldLogger();
 void logFundingHealthAtBoot(); // says what the wallets can actually pay for, before anything needs them to
 startBackups(); // Postgres mirror of the durable JSONL/JSON state + boot-time restore
+startLivenessWatchdog(); // a money loop that stops completing ticks ends the process; Railway restarts it
 void initLedger(); // row-level Postgres ledger: table + one-time history backfill, then live dual-writes
 scheduleOpenDeploy(); // one-shot capital deployment at the next open, if a plan is configured
 

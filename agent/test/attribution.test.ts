@@ -149,3 +149,49 @@ test("churn brake: backfilled and approx rows never count toward the streak", ()
   assert.equal(v.ok, true, "only one live, non-backfilled cycle exists; the brake needs 3");
   assert.equal(v.cycles, 1);
 });
+
+// --- exact vs approx: the two must never be summed into one number ----------
+import { receiptGasWei, withdrawnEthWei, weiToUsd } from "../src/attribution.js";
+
+test("exact and approx totals split the same rows; the headline still holds every row", () => {
+  const { venues, totals, exact, approx } = aggregateAttribution([
+    row({ venue: "STONKBROKER", sleeve: "meme", mech: "band-mint", usdIn: 500, backfilled: true, approx: true }),
+    row({ venue: "STONKBROKER", sleeve: "meme", mech: "collect", usdOut: 12, feeUsd: 12, backfilled: true, approx: true }),
+    row({ venue: "STONKBROKER", sleeve: "meme", mech: "breaker-withdraw", usdOut: 470, gasUsd: 0.01 }),
+    row({ venue: "PONS", mech: "collect", usdOut: 9, feeUsd: 9 }),
+  ]);
+  assert.equal(totals.ops, 4);
+  assert.equal(totals.netUsd, -9.01, "every row, the number the history-with-holes produces");
+  assert.equal(exact.ops, 2);
+  assert.equal(exact.netUsd, 478.99, "live rows only: what the accountant actually measured");
+  assert.equal(approx.ops, 2);
+  assert.equal(approx.netUsd, -488, "the reconstructed history, reported on its own line");
+  const stonk = venues.find((v) => v.venue === "STONKBROKER")!;
+  assert.equal(stonk.hasApprox, true);
+  assert.equal(stonk.approxOps, 2);
+  assert.equal(stonk.exactNetUsd, 469.99, "per venue too, so a mixed venue can be read either way");
+  const pons = venues.find((v) => v.venue === "PONS")!;
+  assert.equal(pons.exactNetUsd, pons.netUsd, "a venue watched from its first row reads the same both ways");
+});
+
+test("a window with no history rows has exact equal to totals and an empty approx", () => {
+  const { totals, exact, approx } = aggregateAttribution([row({ mech: "collect", usdOut: 3, feeUsd: 3 })]);
+  assert.deepEqual(exact, totals);
+  assert.equal(approx.ops, 0);
+  assert.equal(approx.netUsd, 0);
+});
+
+test("withdrawn ETH adds the gas back: the balance delta understates what came home", () => {
+  const before = 1_000_000_000_000_000_000n; // 1 ETH
+  const after = 1_049_990_000_000_000_000n; // +0.05 ETH returned, minus 0.00001 ETH gas
+  const gas = 10_000_000_000_000n;
+  assert.equal(withdrawnEthWei(before, after, gas), 50_000_000_000_000_000n);
+  assert.equal(withdrawnEthWei(after, before, gas), 0n, "a withdraw that returned nothing never reads negative");
+});
+
+test("receipt gas and wei pricing", () => {
+  assert.equal(receiptGasWei({ gasUsed: 21_000n, effectiveGasPrice: 100_000_000n }), 2_100_000_000_000n);
+  assert.equal(receiptGasWei({ gasUsed: 21_000n, effectiveGasPrice: null }), 0n, "a receipt without a price stamps zero, not a crash");
+  assert.equal(weiToUsd(500_000_000_000_000_000n, 2000), 1000);
+  assert.equal(weiToUsd(500_000_000_000_000_000n, 0), 0, "unknown price is zero so the caller can flag approx");
+});

@@ -44,7 +44,8 @@ import { getPublicClient, getWalletClient, getAgentSigner, getAgentAddress } fro
 import { TREASURY_WALLET } from "./merd/wallets.js";
 import { withHouseWalletLock } from "./houseWallet.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
-import { attribute, venueEarnsAdmission } from "./attribution.js";
+import { attribute, venueEarnsAdmission, receiptGasWei, withdrawnEthWei, weiToUsd } from "./attribution.js";
+import { registerLoop, beat } from "./liveness.js";
 import { discoverOwnedPositions } from "./venues/lpPositions.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { candidateVenues, analyzeEthPools, vetRow, type CandidateVenue, type AnalystRow } from "./signals/tokenAnalyst.js";
@@ -556,7 +557,9 @@ export function startMemeFastWatch(): () => void {
       onError: () => { /* transient; the poller retries on its own */ },
     });
   let unwatch = subscribe();
+  registerLoop("memeFast", 60_000);
   const resub = setInterval(() => {
+    beat("memeFast");
     saveRotorState(); // the fast watcher accumulates tick history between rotor passes
     if (venueByToken.size !== watchedCount) {
       watchedCount = venueByToken.size;
@@ -1790,6 +1793,7 @@ async function withdrawEthSides(): Promise<void> {
   const client = getPublicClient();
   const wallet = getWalletClient();
   const bands = await memeBandsLive();
+  const ethUsd = await fetchEthUsd().catch(() => 0);
   for (const b of bands) {
     if (b.side !== "eth") continue;
     const reg = venueByToken.get(b.token.toLowerCase());
@@ -1804,10 +1808,16 @@ async function withdrawEthSides(): Promise<void> {
       if (liq === 0n) continue;
       const wd = buildNativeWithdraw(reg, BigInt(b.tokenId), liq, signer.address);
       await client.call({ account: signer.address, to: wd.to, data: wd.data });
+      const before = await client.getBalance({ address: signer.address });
       const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
       const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
       if (r.status !== "success") throw new Error(`withdraw reverted ${h}`);
-      appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "breaker-withdraw", pool: reg.symbol, tokenId: b.tokenId, txs: [h] })}\n`);
+      const gasWei = receiptGasWei(r);
+      const ethBack = withdrawnEthWei(before, await client.getBalance({ address: signer.address }), gasWei);
+      appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "breaker-withdraw", pool: reg.symbol, tokenId: b.tokenId, ethWithdrawn: formatEther(ethBack), txs: [h] })}\n`);
+      // Cash boundary: the band's ETH is back in the wallet. Unrecorded until
+      // 2026-09-01, which left every breaker exit reading as cash that never returned.
+      void attribute({ sleeve: "meme", venue: reg.symbol, tokenId: b.tokenId, mech: "breaker-withdraw", usdIn: 0, usdOut: weiToUsd(ethBack, ethUsd), feeUsd: 0, ethUsd, gasWei, tx: h, ...(ethUsd > 0 ? {} : { approx: true }) });
     } catch (err) {
       console.error(`[memeRotor] stage-1 withdraw of #${b.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
     }
@@ -1828,12 +1838,17 @@ async function withdrawBandToCash(reg: EthPool, b: MemeBand): Promise<void> {
     args: [BigInt(b.tokenId)],
   });
   if (liq === 0n) return;
+  const ethUsd = await fetchEthUsd().catch(() => 0);
   const wd = buildNativeWithdraw(reg, BigInt(b.tokenId), liq, signer.address);
   await client.call({ account: signer.address, to: wd.to, data: wd.data });
+  const before = await client.getBalance({ address: signer.address });
   const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
   const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
   if (r.status !== "success") throw new Error(`stale withdraw reverted ${h}`);
-  appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "stale-withdraw", pool: reg.symbol, tokenId: b.tokenId, reason: "5% out of range in a dead pool", txs: [h] })}\n`);
+  const gasWei = receiptGasWei(r);
+  const ethBack = withdrawnEthWei(before, await client.getBalance({ address: signer.address }), gasWei);
+  appendFileSync(ROTATION_JOURNAL, `${JSON.stringify({ ts: Date.now(), kind: "stale-withdraw", pool: reg.symbol, tokenId: b.tokenId, reason: "5% out of range in a dead pool", ethWithdrawn: formatEther(ethBack), txs: [h] })}\n`);
+  void attribute({ sleeve: "meme", venue: reg.symbol, tokenId: b.tokenId, mech: "stale-withdraw", usdIn: 0, usdOut: weiToUsd(ethBack, ethUsd), feeUsd: 0, ethUsd, gasWei, tx: h, ...(ethUsd > 0 ? {} : { approx: true }) });
   console.log(`[memeRotor] stale band #${b.tokenId} (${reg.symbol}) withdrawn to cash: 5%+ out of range, pool too quiet to requote into`);
 }
 
@@ -1873,6 +1888,8 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
   const wallet = getWalletClient();
   const signer = getAgentSigner()!;
   const txs: string[] = [];
+  const before = await client.getBalance({ address: signer.address });
+  let withdrawGasWei = 0n;
 
   for (const b of stuck) {
     const liq = await client.readContract({
@@ -1887,8 +1904,10 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
     const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
     const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`stop-loss withdraw reverted ${h}`);
+    withdrawGasWei += receiptGasWei(r);
     txs.push(h);
   }
+  const ethWithdrawn = withdrawnEthWei(before, await client.getBalance({ address: signer.address }), withdrawGasWei);
 
   const bal = await client.readContract({
     address: reg.token,
@@ -1913,13 +1932,17 @@ async function liquidateInventory(reg: EthPool, stuck: MemeBand[], ethUsd: numbe
       tokensSold: formatEther(bal - remaining),
       tokensRemaining: formatEther(remaining),
       ethRealized: formatEther(ethRealized),
+      ethWithdrawn: formatEther(ethWithdrawn),
       txs,
     })}\n`,
   );
   console.log(
     `[memeRotor] STOP-LOSS ${reg.symbol} (${reason}): sold ${formatEther(bal - remaining)} tokens for ${formatEther(ethRealized)} ETH${remaining > 0n ? `, ${formatEther(remaining)} continues next pass` : ", flat"}`,
   );
-  void attribute({ sleeve: "meme", venue: reg.symbol, mech: "stop-exit", usdIn: 0, usdOut: (Number(ethRealized) / 1e18) * ethUsd, feeUsd: 0, ethUsd, tx: txs[0] });
+  // Cash back = the ETH side the withdraws returned PLUS what the token sale
+  // realized. The withdrawn ETH was the missing half of every meme stop until
+  // 2026-09-01, which is why the sleeve's history reads as pure cash out.
+  void attribute({ sleeve: "meme", venue: reg.symbol, mech: "stop-exit", usdIn: 0, usdOut: weiToUsd(ethWithdrawn + ethRealized, ethUsd), feeUsd: 0, ethUsd, gasWei: withdrawGasWei, tx: txs[0], ...(ethUsd > 0 ? {} : { approx: true }) });
 }
 
 // --- Expansion: breadth without waiting for failure --------------------------
@@ -2547,6 +2570,7 @@ async function migrate(
 
   const before = await client.getBalance({ address: signer.address });
   const withdrawnTxs: string[] = [];
+  let withdrawGasWei = 0n;
   for (const b of movable) {
     const liq = await client.readContract({
       address: POSITION_MANAGER,
@@ -2560,6 +2584,7 @@ async function migrate(
     const h = await wallet.sendTransaction({ to: wd.to, data: wd.data });
     const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`migration withdraw reverted ${h}`);
+    withdrawGasWei += receiptGasWei(r);
     withdrawnTxs.push(h);
   }
   const recovered = (await client.getBalance({ address: signer.address })) - before;
@@ -2604,6 +2629,12 @@ async function migrate(
   console.log(
     `[memeRotor] MIGRATED (${opts.reason}) ${srcReg.symbol} -> ${destPool.symbol}: ${formatEther(mintWei)} ETH into #${newId}, ${formatEther(recovered - mintWei)} ETH held back`,
   );
+  // Two rows: cash back from the source (what the withdraws returned, gas
+  // added back) and cash into the destination (what was re-minted). Anything
+  // held back shows as source cash out that never went back in, which is
+  // exactly what it is. Unrecorded live until 2026-09-01.
+  void attribute({ sleeve: "meme", venue: srcReg.symbol, mech: "migrate-out", usdIn: 0, usdOut: weiToUsd(recovered + withdrawGasWei, ethUsd), feeUsd: 0, ethUsd, gasWei: withdrawGasWei, tx: withdrawnTxs[0] });
+  void attribute({ sleeve: "meme", venue: destPool.symbol, tokenId: newId ?? undefined, mech: "band-mint", usdIn: weiToUsd(mintWei, ethUsd), usdOut: 0, feeUsd: 0, ethUsd, gasWei: receiptGasWei(r), tx: h });
 }
 
 async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = reg.offsetAbove, drift: number | null = null): Promise<void> {
@@ -2632,6 +2663,7 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
   const wdHash = await wallet.sendTransaction({ to: wd.to, data: wd.data });
   const wdRcpt = await client.waitForTransactionReceipt({ hash: wdHash, timeout: 90_000 });
   if (wdRcpt.status !== "success") throw new Error(`withdraw reverted ${wdHash}`);
+  let gasWei = receiptGasWei(wdRcpt);
   const [ethAfter, tokAfter] = await Promise.all([client.getBalance({ address: signer.address }), tokenBal()]);
   const ethDelta = ethAfter - ethBefore;
   const tokDelta = tokAfter - tokBefore;
@@ -2647,6 +2679,7 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
     const h = await wallet.sendTransaction({ to: mint.to, data: mint.data, value: mint.value });
     const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`eth mint reverted ${h}`);
+    gasWei += receiptGasWei(r);
     txs.push(h);
     const id = mintedIdFrom(r.logs);
     if (id) newIds.push(id);
@@ -2658,6 +2691,7 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
     const h = await wallet.sendTransaction({ to: mint.to, data: mint.data });
     const r = await client.waitForTransactionReceipt({ hash: h, timeout: 90_000 });
     if (r.status !== "success") throw new Error(`token mint reverted ${h}`);
+    gasWei += receiptGasWei(r);
     txs.push(h);
     const id = mintedIdFrom(r.logs);
     if (id) newIds.push(id);
@@ -2682,7 +2716,7 @@ async function rotate(reg: EthPool, b: MemeBand, ethUsd: number, offsetAbove = r
   // the two legs so a skipped leg (ETH banked to float) shows as cash out.
   const rotateOutUsd = ethDelta > 0n ? (Number(ethDelta) / 1e18) * ethUsd : 0;
   const remintedUsd = newIds.length > 0 && ethDelta > 0n && (Number(ethDelta) / 1e18) * ethUsd >= MIN_LEG_USD ? rotateOutUsd : 0;
-  void attribute({ sleeve: "meme", venue: reg.symbol, tokenId: b.tokenId, mech: "rotate", usdIn: remintedUsd, usdOut: rotateOutUsd, feeUsd: 0, ethUsd, tx: txs[0] });
+  void attribute({ sleeve: "meme", venue: reg.symbol, tokenId: b.tokenId, mech: "rotate", usdIn: remintedUsd, usdOut: rotateOutUsd, feeUsd: 0, ethUsd, gasWei, tx: txs[0] });
 }
 
 // --- Risk state persistence: a deploy must not lobotomize the desk -----------

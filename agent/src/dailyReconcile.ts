@@ -9,6 +9,7 @@
 // principal, never on a token mark.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { encodeFunctionData, parseAbiItem } from "viem";
+import { registerLoop, beat } from "./liveness.js";
 import { dataPath } from "./dataDir.js";
 import { readAttributionRows } from "./attribution.js";
 import { appendLedger } from "./ledger.js";
@@ -196,7 +197,8 @@ export function startDailyReconcile(): NodeJS.Timeout | undefined {
     return;
   }
   console.log(`[reconcile] armed: at each ET day close, skim ${Math.round(SKIM_PCT * 100)}% of the day's collected fees to the treasury, compound the rest (min $${MIN_COMPOUND_USD})`);
-  const t = setInterval(() => void tick(), CHECK_MS);
+  registerLoop("dailyReconcile", CHECK_MS, { money: true });
+  const t = setInterval(() => void tick().finally(() => beat("dailyReconcile")), CHECK_MS);
   t.unref?.();
   void tick();
   return t;

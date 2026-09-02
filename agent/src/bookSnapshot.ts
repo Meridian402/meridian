@@ -10,6 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parseAbiItem, type Address } from "viem";
 import { appendLedger } from "./ledger.js";
+import { registerLoop, beat } from "./liveness.js";
 import { dataPath } from "./dataDir.js";
 import { getPublicClient, getAgentSigner } from "./venues/signer.js";
 import { fetchEthUsd } from "./venues/uniswapV4.js";
@@ -177,7 +178,8 @@ export function startBookSnapshotter(): NodeJS.Timeout | undefined {
       console.error(`[bookSnap] write failed: ${err instanceof Error ? err.message.slice(0, 160) : err}`);
     }
   };
-  const timer = setInterval(() => void snap(), 2 * 60 * 1000);
+  registerLoop("bookSnapshot", 2 * 60 * 1000);
+  const timer = setInterval(() => void snap().finally(() => beat("bookSnapshot")), 2 * 60 * 1000);
   timer.unref?.();
   void snap();
   return timer;

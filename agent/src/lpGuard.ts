@@ -31,6 +31,7 @@ import { readStockBalances } from "./venues/positionAccounting.js";
 import { latestScan, scanOpportunities } from "./lpAllocator.js";
 import { parseAbiItem, type Address } from "viem";
 import { withHouseWalletLock, operatorWaiting } from "./houseWallet.js";
+import { registerLoop, beat } from "./liveness.js";
 import { walletOpsAvailable } from "./risk.js";
 import { memeRotorTick } from "./memeGuard.js";
 import { portfolioStoodDown } from "./portfolioBreaker.js";
@@ -586,12 +587,17 @@ export function startLpGuard(): NodeJS.Timeout {
   // act on the same position concurrently — a real double-spend risk on money.
   let checking = false;
   let checkingSince = 0;
+  // Heartbeats (src/liveness.ts): stamped when a tick COMPLETES or deliberately
+  // yields, never on the in-flight skip, so a hung tick starves its own beat.
+  registerLoop("lpGuard", CHECK_MS, { money: true });
+  registerLoop("memeRotor", 90 * 1000, { money: true });
   const check = async () => {
     // Operator priority: never START a multi-minute hold while a human's
     // request is queued. The tick fires again in 5 minutes; the operator's
     // HTTP edge does not wait that politely.
     if (operatorWaiting()) {
       console.error("[lpGuard] yielding this tick: an operator request is waiting on the house lock");
+      beat("lpGuard");
       return;
     }
     if (checking) {
@@ -616,6 +622,7 @@ export function startLpGuard(): NodeJS.Timeout {
       await withHouseWalletLock("lpGuard.tick", runCheck);
     } finally {
       checking = false;
+      beat("lpGuard");
     }
   };
   const runCheck = async () => {
@@ -718,8 +725,13 @@ export function startLpGuard(): NodeJS.Timeout {
   // legacy tick, and the legacy stock checks stay at CHECK_MS untouched.
   const memeTimer = setInterval(
     () => {
-      if (operatorWaiting()) return; // yield to the human
-      void withHouseWalletLock("memeRotor.fastTick", () => memeRotorTick({ fast: true })).catch(() => {});
+      if (operatorWaiting()) {
+        beat("memeRotor"); // yielding to the human is a live decision, not a stall
+        return;
+      }
+      void withHouseWalletLock("memeRotor.fastTick", () => memeRotorTick({ fast: true }))
+        .catch(() => {})
+        .finally(() => beat("memeRotor"));
     },
     90 * 1000,
   );
