@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, type AutoEntryCandidate } from "../src/pilotGuard.js";
+import { flowUsdPerHour } from "../src/dumpWatch.js";
 import { bidBelowBounds } from "../src/venues/lpPositions.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
 
@@ -225,4 +226,83 @@ test("a bid that cannot survive its own fill is refused outright", () => {
   assert.equal(v.act, false);
   assert.match(v.reason, /under its own/);
   assert.equal(dumpBidDecision({ ...BID_BASE, bidUsd: 150 }).act, true, "$150 clears max(120, 120) with 10% room");
+});
+
+/**
+ * AUTO-ENTRY (2026-09-03): the pilot may open a seat on its own only under the
+ * hand rules, and it picks the venue with the most last-hour flow.
+ */
+const cand = (over: Partial<AutoEntryCandidate> & { symbol: string }): AutoEntryCandidate => ({
+  flowUsdPerHour: 300_000,
+  admitted: true,
+  admissionNetUsd: 150,
+  hasSeat: false,
+  lockedOut: false,
+  denied: false,
+  ...over,
+});
+const baseArgs = {
+  enabled: true,
+  now: 1_000_000_000,
+  openSeats: 0,
+  maxSeats: 2,
+  cashUsd: 2_000,
+  reserveUsd: 300,
+  seatUsd: 700,
+  gasEth: 0.08,
+  minGasEth: 0.01,
+  stoodDown: false,
+  opsAvailable: true,
+  entriesToday: 0,
+  perDay: 6,
+  minFlowUsdPerHour: 150_000,
+  cooldownMs: 120 * 60_000,
+};
+
+test("auto-entry: the desk gates refuse before any venue is looked at", () => {
+  const c = [cand({ symbol: "MICRODUCK" })];
+  assert.equal(autoEntryVerdict({ ...baseArgs, enabled: false, candidates: c }).act, false, "switch off");
+  assert.equal(autoEntryVerdict({ ...baseArgs, stoodDown: true, candidates: c }).act, false, "stand-down");
+  assert.equal(autoEntryVerdict({ ...baseArgs, openSeats: 2, candidates: c }).act, false, "seat cap");
+  assert.equal(autoEntryVerdict({ ...baseArgs, gasEth: 0.005, candidates: c }).act, false, "gas line");
+  assert.equal(autoEntryVerdict({ ...baseArgs, cashUsd: 900, candidates: c }).act, false, "seat plus reserve");
+  assert.equal(autoEntryVerdict({ ...baseArgs, opsAvailable: false, candidates: c }).act, false, "ops budget");
+  assert.equal(autoEntryVerdict({ ...baseArgs, entriesToday: 6, candidates: c }).act, false, "daily cap");
+  const ok = autoEntryVerdict({ ...baseArgs, candidates: c });
+  assert.equal(ok.act, true, "all gates clear: it opens");
+  assert.equal(ok.act && ok.symbol, "MICRODUCK");
+});
+
+test("auto-entry: every hand rule applies per venue", () => {
+  const refuse = (over: Partial<AutoEntryCandidate>): string => {
+    const v = autoEntryVerdict({ ...baseArgs, candidates: [cand({ symbol: "BONER", ...over })] });
+    assert.equal(v.act, false);
+    return v.act ? "" : v.reason;
+  };
+  assert.match(refuse({ hasSeat: true }), /seat open/);
+  assert.match(refuse({ denied: true }), /denylist/);
+  assert.match(refuse({ lockedOut: true }), /locked out/);
+  assert.match(refuse({ admitted: false, admissionNetUsd: -47 }), /under admission/);
+  assert.match(refuse({ lastExitMs: baseArgs.now - 30 * 60_000 }), /cooldown/);
+  assert.match(refuse({ flowUsdPerHour: Number.NaN }), /too thin/);
+  assert.match(refuse({ flowUsdPerHour: 40_000 }), /under \$150k\/h/);
+  const after = autoEntryVerdict({ ...baseArgs, candidates: [cand({ symbol: "BONER", lastExitMs: baseArgs.now - 121 * 60_000 })] });
+  assert.equal(after.act, true, "the cooldown has passed");
+});
+
+test("auto-entry: the venue with the most last-hour flow wins", () => {
+  const v = autoEntryVerdict({
+    ...baseArgs,
+    candidates: [cand({ symbol: "CASHCAT", flowUsdPerHour: 220_000 }), cand({ symbol: "MICRODUCK", flowUsdPerHour: 280_000 }), cand({ symbol: "BONER", flowUsdPerHour: 900_000, admitted: false, admissionNetUsd: -47 })],
+  });
+  assert.equal(v.act, true);
+  assert.equal(v.act && v.symbol, "MICRODUCK", "BONER had more flow but is not admitted");
+});
+
+test("flowUsdPerHour scales the hour's mean scan-window volume to USD/hour", () => {
+  const now = 10_000_000;
+  const samples = [1, 2, 3, 4].map((i) => ({ ts: now - i * 10 * 60_000, px: 1, sellSharePct: 50, usd: 15_000 }));
+  assert.equal(flowUsdPerHour(samples, now, 180), 300_000, "15k per 3-minute window is 300k/hour");
+  assert.ok(Number.isNaN(flowUsdPerHour(samples.slice(0, 2), now, 180)), "under 3 samples: no reading");
+  assert.ok(Number.isNaN(flowUsdPerHour(samples, now, 0)), "no window: no reading");
 });

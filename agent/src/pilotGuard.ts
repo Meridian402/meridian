@@ -32,7 +32,7 @@ import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
-import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff, fadeVerdictFor, recordFadeExit, FADE_ARMED } from "./dumpWatch.js";
+import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff, fadeVerdictFor, recordFadeExit, FADE_ARMED, dumpMintRefusal, fadeMintRefusal, venueFlowUsdPerHour } from "./dumpWatch.js";
 
 // The tick is half the collect cadence so a 5-minute collect lands on the
 // interval instead of on the next 3-minute wake (2026-09-01, operator:
@@ -56,6 +56,27 @@ const FLOOR_USD = Number(process.env.MERIDIAN_PILOT_FLOOR_USD ?? 120);
 // MERIDIAN_PILOT_FLOOR_PCT (70 since 2026-09-03); the code default stays 80.
 // Values outside 1..99 fall back to 80. The dump exit stays the collapse bound.
 const FLOOR_PCT = (() => { const v = Number(process.env.MERIDIAN_PILOT_FLOOR_PCT ?? 80); return Number.isFinite(v) && v > 0 && v < 100 ? v : 80; })();
+// AUTO-ENTRY (2026-09-03, operator: "built it"). Until now every fee-earning
+// seat was opened by a human saying go, and the desk sat flat 14 of 24 hours
+// while venues it manages carried $200k-800k/hour. This lets the pilot open a
+// seat itself under exactly the hand rules: a hands-off venue, admitted by its
+// own 7d record, carrying real last-hour flow, no seat there yet, no dump or
+// fade lockout, not on the operator denylist, cash above a reserve, gas above
+// the top-up line, a cap on open seats and on entries per day, and a cooldown
+// after any guard exit in that venue so a floored venue is not re-bought on
+// the next tick. The shape is fixed to the proven one: a bid-only seat, top
+// edge at spot, re-band width. Every existing rail applies from the first
+// second. OFF by default; the operator flips MERIDIAN_PILOT_AUTO_ENTRY=on.
+const AUTO_ENTRY = (process.env.MERIDIAN_PILOT_AUTO_ENTRY ?? "off") === "on";
+const AUTO_ENTRY_USD = Number(process.env.MERIDIAN_PILOT_AUTO_ENTRY_USD ?? 700);
+const AUTO_ENTRY_MAX_SEATS = Number(process.env.MERIDIAN_PILOT_AUTO_MAX_SEATS ?? 2);
+const AUTO_ENTRY_RESERVE_USD = Number(process.env.MERIDIAN_PILOT_AUTO_RESERVE_USD ?? 300);
+const AUTO_ENTRY_MIN_FLOW_USD_H = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_FLOW_USD_H ?? 150_000);
+const AUTO_ENTRY_MIN_GAS_ETH = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_GAS_ETH ?? 0.01);
+const AUTO_ENTRY_COOLDOWN_MS = Number(process.env.MERIDIAN_PILOT_AUTO_COOLDOWN_MIN ?? 120) * 60_000;
+const AUTO_ENTRY_PER_DAY = Number(process.env.MERIDIAN_PILOT_AUTO_PER_DAY ?? 6);
+const AUTO_ENTRY_DENY = new Set((process.env.MERIDIAN_MEME_VENUE_DENYLIST ?? "POOLS").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean));
+const GUARD_EXIT_KINDS = new Set(["floor-exit", "break-exit", "dump-exit", "fade-exit", "recenter-abort"]);
 // THE WAIT IS ASYMMETRIC (operator insight, 2026-08-14). The two exits are
 // not the same trade. Exit BELOW: the position holds the fallen token, and
 // re-centering REALIZES the drift, so patience protects real money there.
@@ -178,6 +199,155 @@ export function effectiveFloorUsd(depositUsd: number, envFloorUsd = FLOOR_USD, f
 
 const outSince = new Map<string, number>();
 const lastCollect = new Map<string, number>();
+
+export interface AutoEntryCandidate {
+  symbol: string;
+  /** last-hour flow, USD/hour; NaN = tape too thin to read */
+  flowUsdPerHour: number;
+  admitted: boolean;
+  admissionNetUsd: number;
+  hasSeat: boolean;
+  lockedOut: boolean;
+  denied: boolean;
+  /** ms timestamp of the venue's last guard exit, if any */
+  lastExitMs?: number;
+}
+
+/**
+ * PURE: may the pilot open a seat on its own right now, and where? The desk
+ * gates come first (switch, stand-down, seat cap, gas, cash, ops budget, daily
+ * cap); then each venue must pass every hand rule; the venue with the most
+ * last-hour flow wins. Exported for tests.
+ */
+export function autoEntryVerdict(args: {
+  enabled: boolean;
+  now: number;
+  openSeats: number;
+  maxSeats: number;
+  cashUsd: number;
+  reserveUsd: number;
+  seatUsd: number;
+  gasEth: number;
+  minGasEth: number;
+  stoodDown: boolean;
+  opsAvailable: boolean;
+  entriesToday: number;
+  perDay: number;
+  minFlowUsdPerHour: number;
+  cooldownMs: number;
+  candidates: readonly AutoEntryCandidate[];
+}): { act: false; reason: string } | { act: true; symbol: string; reason: string } {
+  if (!args.enabled) return { act: false, reason: "auto-entry off (MERIDIAN_PILOT_AUTO_ENTRY)" };
+  if (args.stoodDown) return { act: false, reason: "portfolio stand-down: no new exposure" };
+  if (args.openSeats >= args.maxSeats) return { act: false, reason: `${args.openSeats} seat(s) open, cap ${args.maxSeats}` };
+  if (args.gasEth < args.minGasEth) return { act: false, reason: `gas ${args.gasEth.toFixed(4)} ETH under the ${args.minGasEth} ETH line` };
+  if (args.cashUsd < args.seatUsd + args.reserveUsd) return { act: false, reason: `cash $${args.cashUsd.toFixed(0)} under seat $${args.seatUsd} + reserve $${args.reserveUsd}` };
+  if (!args.opsAvailable) return { act: false, reason: "daily wallet-ops budget exhausted" };
+  if (args.entriesToday >= args.perDay) return { act: false, reason: `${args.entriesToday} auto entries in 24h, cap ${args.perDay}` };
+  const why: string[] = [];
+  let best: AutoEntryCandidate | undefined;
+  for (const c of args.candidates) {
+    if (c.hasSeat) { why.push(`${c.symbol}: seat open`); continue; }
+    if (c.denied) { why.push(`${c.symbol}: denylist`); continue; }
+    if (c.lockedOut) { why.push(`${c.symbol}: locked out`); continue; }
+    if (!c.admitted) { why.push(`${c.symbol}: 7d net $${c.admissionNetUsd.toFixed(0)} under admission`); continue; }
+    if (c.lastExitMs != null && args.now - c.lastExitMs < args.cooldownMs) { why.push(`${c.symbol}: exited ${Math.round((args.now - c.lastExitMs) / 60000)}m ago, cooldown ${Math.round(args.cooldownMs / 60000)}m`); continue; }
+    if (Number.isNaN(c.flowUsdPerHour)) { why.push(`${c.symbol}: tape too thin to read flow`); continue; }
+    if (c.flowUsdPerHour < args.minFlowUsdPerHour) { why.push(`${c.symbol}: flow $${Math.round(c.flowUsdPerHour / 1000)}k/h under $${Math.round(args.minFlowUsdPerHour / 1000)}k/h`); continue; }
+    if (!best || c.flowUsdPerHour > best.flowUsdPerHour) best = c;
+  }
+  if (!best) return { act: false, reason: why.length ? why.join("; ") : "no candidate venues" };
+  return { act: true, symbol: best.symbol, reason: `${best.symbol} carries ~$${Math.round(best.flowUsdPerHour / 1000)}k/h, admitted at $${best.admissionNetUsd.toFixed(0)} 7d` };
+}
+
+/** Pilot journal rows since a timestamp (the file is small; read per tick). */
+function pilotRowsSince(sinceMs: number): Array<{ ts: number; kind: string; symbol?: string }> {
+  try {
+    const p = dataPath("pilot-guard.jsonl");
+    if (!existsSync(p)) return [];
+    return readFileSync(p, "utf8")
+      .trim()
+      .split("\n")
+      .slice(-600)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as { ts: number; kind: string; symbol?: string };
+        } catch {
+          return null;
+        }
+      })
+      .filter((r): r is { ts: number; kind: string; symbol?: string } => !!r && r.ts >= sinceMs);
+  } catch {
+    return [];
+  }
+}
+
+let lastAutoEntryReason = "";
+/** The pilot's own entry: one seat per tick at most, inside the tick's house lock. */
+async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<void> {
+  if (!AUTO_ENTRY) return;
+  const now = Date.now();
+  let cashUsd = 0;
+  let gasEth = 0;
+  try {
+    const client = getPublicClient();
+    const me = getAgentSigner()!.address;
+    const raw = await client.readContract({ address: USDG, abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")], functionName: "balanceOf", args: [me] });
+    cashUsd = Number(raw) / 1e6;
+    gasEth = Number(await client.getBalance({ address: me })) / 1e18;
+  } catch (err) {
+    console.error(`[pilotGuard] auto-entry skipped: balance read failed (${err instanceof Error ? err.message.slice(0, 100) : err})`);
+    return;
+  }
+  const rows = pilotRowsSince(now - 24 * 3_600_000);
+  const entriesToday = rows.filter((r) => r.kind === "auto-entry").length;
+  const candidates: AutoEntryCandidate[] = [...HANDS_OFF_SYMBOLS].map((symbol) => {
+    const adm = venueEarnsAdmission("usdg", symbol, 0);
+    const exits = rows.filter((r) => r.symbol === symbol && GUARD_EXIT_KINDS.has(r.kind));
+    return {
+      symbol,
+      flowUsdPerHour: venueFlowUsdPerHour(symbol, now),
+      admitted: adm.ok,
+      admissionNetUsd: adm.netUsd,
+      hasSeat: positions.some((p) => p.symbol === symbol),
+      lockedOut: dumpMintRefusal(symbol, now) != null || fadeMintRefusal(symbol, now) != null,
+      denied: AUTO_ENTRY_DENY.has(symbol),
+      lastExitMs: exits.length ? Math.max(...exits.map((r) => r.ts)) : undefined,
+    };
+  });
+  const v = autoEntryVerdict({
+    enabled: AUTO_ENTRY,
+    now,
+    openSeats: positions.length,
+    maxSeats: AUTO_ENTRY_MAX_SEATS,
+    cashUsd,
+    reserveUsd: AUTO_ENTRY_RESERVE_USD,
+    seatUsd: AUTO_ENTRY_USD,
+    gasEth,
+    minGasEth: AUTO_ENTRY_MIN_GAS_ETH,
+    stoodDown: portfolioStoodDown(),
+    opsAvailable: walletOpsAvailable(1),
+    entriesToday,
+    perDay: AUTO_ENTRY_PER_DAY,
+    minFlowUsdPerHour: AUTO_ENTRY_MIN_FLOW_USD_H,
+    cooldownMs: AUTO_ENTRY_COOLDOWN_MS,
+    candidates,
+  });
+  if (!v.act) {
+    if (v.reason !== lastAutoEntryReason) console.error(`[pilotGuard] auto-entry holding: ${v.reason}`);
+    lastAutoEntryReason = v.reason;
+    return;
+  }
+  lastAutoEntryReason = "";
+  console.error(`[pilotGuard] AUTO-ENTRY ${v.symbol}: ${v.reason}; opening a $${AUTO_ENTRY_USD} BID at width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}), top edge at spot`);
+  try {
+    const pos = await openInPool(v.symbol, REBAND_WIDTH_PCT, AUTO_ENTRY_USD, { bidOnly: true });
+    appendLedger("pilot-guard.jsonl", { ts: Date.now(), kind: "auto-entry", tokenId: pos.tokenId, symbol: v.symbol, valueUsd: AUTO_ENTRY_USD, reason: v.reason });
+    console.error(`[pilotGuard] ✓ auto-entry opened #${pos.tokenId} in ${v.symbol}`);
+  } catch (err) {
+    console.error(`[pilotGuard] auto-entry into ${v.symbol} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
+  }
+}
 const tickHistory = new Map<string, TickSample[]>();
 
 /** PURE: is the hands-off board falling together? (bleed program phase 2.)
@@ -427,6 +597,8 @@ async function runTick(): Promise<void> {
   // The dump bid places when a venue is FLAT and locked out, so it must run
   // before (and regardless of) the empty-board early return below.
   await maybePlaceDumpBids(positions);
+  // The pilot's own entry runs while FLAT too, so it sits before the early return.
+  await maybeAutoEntry(positions);
   if (positions.length === 0) {
     outSince.clear();
     return;
@@ -744,7 +916,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max(${FLOOR_USD}, ${FLOOR_PCT}% of deposit), re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }

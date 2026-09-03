@@ -339,6 +339,10 @@ The open half is sizing. Deployed capital should track measured pulse, so a
 weekend book is a weekend-sized book. That is the same missing volume floor
 described above and it is the single biggest remaining leak.
 
+## Auto-entry (2026-09-03)
+
+Until 2026-09-03 every fee-earning seat was opened by the operator (or on the operator's go) and the pilot only managed it; the desk sat flat 14 of 24 hours while its own venues carried $200k-800k/hour. `MERIDIAN_PILOT_AUTO_ENTRY=on` lets the pilot open a seat itself, once per tick at most, inside the tick's house lock, under the hand rules: a hands-off venue (MERIDIAN_GUARD_HANDS_OFF), admitted by its own 7d record (venueEarnsAdmission), last-hour flow at or above MERIDIAN_PILOT_AUTO_MIN_FLOW_USD_H (from the dump-watch samples), no seat there, no dump or fade lockout, not on MERIDIAN_MEME_VENUE_DENYLIST, cash at or above seat + MERIDIAN_PILOT_AUTO_RESERVE_USD, gas at or above MERIDIAN_PILOT_AUTO_MIN_GAS_ETH, fewer than MERIDIAN_PILOT_AUTO_MAX_SEATS open, fewer than MERIDIAN_PILOT_AUTO_PER_DAY entries in 24h, and no guard exit in that venue inside MERIDIAN_PILOT_AUTO_COOLDOWN_MIN. The venue with the most flow wins. The shape is the proven one: a bid-only seat of MERIDIAN_PILOT_AUTO_ENTRY_USD at the re-band width, top edge at spot; every rail applies from the first second. Rows land in pilot-guard.jsonl as `auto-entry`; the boot line prints the live settings. Ships OFF.
+
 ## Floor percent (2026-09-03)
 
 The deposit-scaled floor is a knob: floor = max(MERIDIAN_PILOT_FLOOR_USD, MERIDIAN_PILOT_FLOOR_PCT% of the seat's deposit lineage). Code default 80. Production runs 70 since 2026-09-03 on the operator's call ("stop leaving money on the table"): the 08-29..09-02 real-tape replay scored all ten 80% floor exits as bottom sells (holding was +$169 / +$461 / +$586 at 1h / 4h / 8h), the week of 08-27..09-02 gave $690 of $1,121 in fees back through 17 floors, and the median below-band excursion was ~7% with the deepest 19-26%. At 70% the worst case on a $700 seat is $210 instead of $140; the dump exit remains the collapse bound. The dump-bid fill check uses the same percent.

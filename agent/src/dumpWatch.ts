@@ -209,6 +209,22 @@ export function volumeFadeVerdict(
   return { fading, reason, refUsd: h3 };
 }
 
+/** PURE: the newest full hour's flow as USD per hour. The bleed samples carry
+ *  the USD seen in one scan window (LOOKBACK blocks, ~10 blocks/s), so the
+ *  hour's mean window volume scales by windows-per-hour. NaN when the hour
+ *  has under 3 volume-carrying samples: a thin tape is not a flow reading. */
+export function flowUsdPerHour(samples: readonly BleedSample[], nowMs: number, windowSec: number): number {
+  const [h1] = hourlyWindowUsd(samples, nowMs);
+  if (Number.isNaN(h1) || !(windowSec > 0)) return NaN;
+  return h1 * (3600 / windowSec);
+}
+
+/** The venue's last-hour flow (USD/hour) for the pilot's auto-entry, from the live series. */
+export function venueFlowUsdPerHour(symbol: string, nowMs = Date.now()): number {
+  loadBleedSeries();
+  return flowUsdPerHour(bleedSeries.get(symbol.toUpperCase()) ?? [], nowMs, Number(LOOKBACK) / 10);
+}
+
 /** The venue-level fade reading for the pilot guard, from the live series. */
 export function fadeVerdictFor(symbol: string, nowMs = Date.now()): { fading: boolean; reason: string; refUsd: number } {
   loadBleedSeries();
