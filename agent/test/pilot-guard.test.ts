@@ -157,6 +157,8 @@ test("the floor scales with the deposit, so bigger positions keep proportional p
   assert.equal(effectiveFloorUsd(146, 120), 120, "small pilot: the env floor is already the tighter bound");
   assert.equal(effectiveFloorUsd(300, 120), 240, "a $300 position is floored at 80% of deposit, not a fixed $120");
   assert.equal(effectiveFloorUsd(0, 120), 120, "no cost basis falls back to the env floor");
+  assert.equal(effectiveFloorUsd(700, 120, 70), 490, "the floor percent is a knob: 70% of a $700 seat");
+  assert.equal(effectiveFloorUsd(150, 120, 70), 120, "a 70% floor still never drops under the env floor");
 });
 
 // ── the skim: float target, not events ───────────────────────────────────────

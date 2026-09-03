@@ -48,6 +48,14 @@ const CHECK_MS = 150 * 1000;
 const COLLECT_EVERY_MS = Number(process.env.MERIDIAN_COLLECT_EVERY_MIN ?? 5) * 60 * 1000;
 const COLLECT_MIN_USD = Number(process.env.MERIDIAN_COLLECT_MIN_USD ?? 1);
 const FLOOR_USD = Number(process.env.MERIDIAN_PILOT_FLOOR_USD ?? 120);
+// THE FLOOR PERCENT (operator decision 2026-09-03: "stop leaving money on the
+// table"). The deposit-scaled floor was a fixed 80%; the real-tape replay
+// (08-29..09-02) scored all ten floor exits as bottom sells (+$169/+$461/+$586
+// vs holding at 1h/4h/8h) and the median below-band excursion was ~7%,
+// deepest 19-26%, so 80% sold most bounces. Live value is the Railway var
+// MERIDIAN_PILOT_FLOOR_PCT (70 since 2026-09-03); the code default stays 80.
+// Values outside 1..99 fall back to 80. The dump exit stays the collapse bound.
+const FLOOR_PCT = (() => { const v = Number(process.env.MERIDIAN_PILOT_FLOOR_PCT ?? 80); return Number.isFinite(v) && v > 0 && v < 100 ? v : 80; })();
 // THE WAIT IS ASYMMETRIC (operator insight, 2026-08-14). The two exits are
 // not the same trade. Exit BELOW: the position holds the fallen token, and
 // re-centering REALIZES the drift, so patience protects real money there.
@@ -161,10 +169,11 @@ export function floorBreached(valueUsd: number, floorUsd = FLOOR_USD): boolean {
 /** PURE: the floor for a position, SCALED to what actually went in. The env
  *  floor was calibrated to the first ~$146 pilot; left fixed, a $300
  *  position would tolerate a 60% loss before it tripped. The floor is the
- *  larger of the env floor and 80% of the deposit, so protection scales with
- *  the position automatically. depositUsd 0/unknown falls back to the env. */
-export function effectiveFloorUsd(depositUsd: number, envFloorUsd = FLOOR_USD): number {
-  return depositUsd > 0 ? Math.max(envFloorUsd, 0.8 * depositUsd) : envFloorUsd;
+ *  larger of the env floor and FLOOR_PCT% of the deposit (env
+ *  MERIDIAN_PILOT_FLOOR_PCT, default 80), so protection scales with the
+ *  position automatically. depositUsd 0/unknown falls back to the env. */
+export function effectiveFloorUsd(depositUsd: number, envFloorUsd = FLOOR_USD, floorPct = FLOOR_PCT): number {
+  return depositUsd > 0 ? Math.max(envFloorUsd, (depositUsd * floorPct) / 100) : envFloorUsd;
 }
 
 const outSince = new Map<string, number>();
@@ -311,6 +320,8 @@ export function dumpBidDecision(args: {
   usdgAvailUsd: number;
   bidUsd: number;
   envFloorUsd: number;
+  /** deposit-scaled floor percent; defaults to the live FLOOR_PCT */
+  floorPct?: number;
   bidsToday: number;
   bidsPerDay: number;
   stoodDown: boolean;
@@ -320,7 +331,7 @@ export function dumpBidDecision(args: {
   // instantly floor-selling: the filled seat's floor is max(env, 80% of
   // deposit), and the fill lands with the value roughly at deposit. Demand
   // 10% of clearance so a normal fill never starts life below its floor.
-  const fillFloor = Math.max(args.envFloorUsd, 0.8 * args.bidUsd);
+  const fillFloor = Math.max(args.envFloorUsd, (args.bidUsd * (args.floorPct ?? FLOOR_PCT)) / 100);
   if (args.bidUsd * 0.9 <= fillFloor) {
     return { act: false, reason: `bid size $${args.bidUsd} would sit under its own $${fillFloor.toFixed(0)} floor at fill; raise MERIDIAN_DUMP_BID_USD` };
   }
@@ -382,6 +393,7 @@ async function maybePlaceDumpBids(positions: readonly LpPositionValue[]): Promis
       usdgAvailUsd,
       bidUsd: DUMP_BID_USD,
       envFloorUsd: FLOOR_USD,
+      floorPct: FLOOR_PCT,
       bidsToday: dumpBidsPlacedTodayET(),
       bidsPerDay: DUMP_BIDS_PER_DAY,
       stoodDown: portfolioStoodDown(),
@@ -732,7 +744,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard $${COLLECT_MIN_USD}), re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max(${FLOOR_USD}, ${FLOOR_PCT}% of deposit), re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }

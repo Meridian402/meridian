@@ -339,6 +339,10 @@ The open half is sizing. Deployed capital should track measured pulse, so a
 weekend book is a weekend-sized book. That is the same missing volume floor
 described above and it is the single biggest remaining leak.
 
+## Floor percent (2026-09-03)
+
+The deposit-scaled floor is a knob: floor = max(MERIDIAN_PILOT_FLOOR_USD, MERIDIAN_PILOT_FLOOR_PCT% of the seat's deposit lineage). Code default 80. Production runs 70 since 2026-09-03 on the operator's call ("stop leaving money on the table"): the 08-29..09-02 real-tape replay scored all ten 80% floor exits as bottom sells (holding was +$169 / +$461 / +$586 at 1h / 4h / 8h), the week of 08-27..09-02 gave $690 of $1,121 in fees back through 17 floors, and the median below-band excursion was ~7% with the deepest 19-26%. At 70% the worst case on a $700 seat is $210 instead of $140; the dump exit remains the collapse bound. The dump-bid fill check uses the same percent.
+
 ## Liveness (2026-09-01)
 
 Every autonomous loop stamps a heartbeat when a tick completes, never when it
