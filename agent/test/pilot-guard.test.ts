@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, bidShareOfPool, paybackFeePerHour, recenterPaysBack, type AutoEntryCandidate } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, bidShareOfPool, paybackFeePerHour, recenterPaysBack, idleBidVerdict, gasRefillVerdict, type AutoEntryCandidate } from "../src/pilotGuard.js";
 import { flowUsdPerHour } from "../src/dumpWatch.js";
 import { bidBelowBounds } from "../src/venues/lpPositions.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
@@ -350,4 +350,24 @@ test("payback gate: a fresh venue is judged on the density estimate, not on fees
   assert.equal(paybackFeePerHour(48, 0, 1), 2, "a worked venue's banked fees still win when they are higher");
   assert.equal(paybackFeePerHour(0, 0, Number.NaN), 0, "NaN density counts as nothing");
   assert.equal(paybackFeePerHour(0, 0, -3), 0, "negative density counts as nothing");
+});
+
+test("idle-bid exit: an unfilled bid gets the full window across re-centers, then gives the slot back", () => {
+  const now = 5_000_000_000;
+  const max = 180 * 60_000;
+  assert.equal(idleBidVerdict(undefined, now, max).act, false, "a venue with a filled or in-range seat is never idle");
+  assert.equal(idleBidVerdict(now - 170 * 60_000, now, max).act, false, "170m of 180m: still waiting");
+  const v = idleBidVerdict(now - 181 * 60_000, now, max);
+  assert.equal(v.act, true);
+  assert.match(v.reason, /unfilled for 181m/);
+});
+
+test("gas refill: buys only under the line, with cash to spare, and not twice inside the cooldown", () => {
+  const base = { enabled: true, ethBalance: 0.012, minEth: 0.02, cashUsd: 900, refillUsd: 60, minCashAfterUsd: 100, lastRefillMs: undefined, now: 9_000_000_000, cooldownMs: 360 * 60_000 };
+  assert.equal(gasRefillVerdict(base).act, true, "under the line with cash: buy");
+  assert.equal(gasRefillVerdict({ ...base, enabled: false }).act, false, "switch off");
+  assert.equal(gasRefillVerdict({ ...base, ethBalance: 0.05 }).act, false, "above the line: nothing to do");
+  assert.equal(gasRefillVerdict({ ...base, cashUsd: 150 }).act, false, "would leave under the cash floor");
+  assert.equal(gasRefillVerdict({ ...base, lastRefillMs: base.now - 60 * 60_000 }).act, false, "refilled an hour ago: wait");
+  assert.equal(gasRefillVerdict({ ...base, lastRefillMs: base.now - 361 * 60_000 }).act, true, "cooldown over: buy again if still under");
 });

@@ -582,6 +582,20 @@ export async function realSwapEthToUsdg(params: { amountUsd: number }): Promise<
 
 const USDG_DECIMALS = 6; // stock tokens and NATIVE are 18
 
+/** USDG -> native ETH over the bridge tier, for the engine's own gas. The
+ *  treasury key lives off the server by design, so without this the signer
+ *  could run dry with $1,000 of USDG in hand and wait on a human (2026-09-02
+ *  evening: 0.026 ETH, a seat on hold for an hour). Same path as the ETH->USDG
+ *  leg, reversed; a reverted swap throws like every other. */
+export async function realSwapUsdgToEth(params: { amountUsd: number }): Promise<{ hash: Hex; ethReceived: number; gasWei: bigint }> {
+  guardWalletOp(`usdg->eth $${params.amountUsd.toFixed(0)}`);
+  recordWalletOp(params.amountUsd, "usdg-eth");
+  const amountIn = BigInt(Math.round(params.amountUsd * 10 ** USDG_DECIMALS));
+  const { hash, amountOutReal, gasWei } = await swapExactInPath({ currencyIn: USDG, route: [{ outputCurrency: NATIVE, fee: BRIDGE_FEE, tickSpacing: BRIDGE_TICK_SPACING }], amountIn });
+  // amountOutReal is the native balance delta, which already nets the gas the swap itself burned
+  return { hash, ethReceived: Number(amountOutReal + gasWei) / 1e18, gasWei };
+}
+
 /** USD price of one `entry` token, derived on-chain (pool price × quote's USD value) — no off-chain feed needed for this leg, matching uniswapV4.ts's own pattern. */
 async function tokenPriceUsd(entry: PoolEntry): Promise<number> {
   const quoteAddr = quoteAddress(entry.quote);

@@ -20,7 +20,7 @@
 import { lpPositionsWithValue, uncollectedFeesUsd, collectFees, withdrawPosition, poolTick, mintDumpBid, type LpPositionValue } from "./venues/lpPositions.js";
 import { getPublicClient } from "./venues/signer.js";
 import { parseAbiItem } from "viem";
-import { realSellStockForUsdg, tokenAddressFor, poolFeePct, tokenIsCurrency0, USDG } from "./venues/stockPools.js";
+import { realSellStockForUsdg, realSwapUsdgToEth, tokenAddressFor, poolFeePct, tokenIsCurrency0, USDG } from "./venues/stockPools.js";
 import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
 import { getAgentSigner } from "./venues/signer.js";
@@ -76,7 +76,26 @@ const AUTO_ENTRY_MIN_GAS_ETH = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_GAS_ET
 const AUTO_ENTRY_COOLDOWN_MS = Number(process.env.MERIDIAN_PILOT_AUTO_COOLDOWN_MIN ?? 120) * 60_000;
 const AUTO_ENTRY_PER_DAY = Number(process.env.MERIDIAN_PILOT_AUTO_PER_DAY ?? 6);
 const AUTO_ENTRY_DENY = new Set((process.env.MERIDIAN_MEME_VENUE_DENYLIST ?? "POOLS").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean));
-const GUARD_EXIT_KINDS = new Set(["floor-exit", "break-exit", "dump-exit", "fade-exit", "recenter-abort"]);
+const GUARD_EXIT_KINDS = new Set(["floor-exit", "break-exit", "dump-exit", "fade-exit", "recenter-abort", "idle-exit"]);
+// THE IDLE-BID EXIT (2026-09-03, operator: "merd should be managing the whole
+// engine"). A bid-only seat on a venue that only rises never fills: the pilot
+// re-arms it every settle and pays a little churn each time (PONS, four
+// re-arms in three hours for $3 of fees), and nothing ever ended it without a
+// human. Now a venue whose seats have held only USDG out of range for this
+// long, across re-centers, comes home to cash, takes the entry cooldown, and
+// the picker moves on. Generous on purpose: the entry replay scored at-spot
+// re-arms net positive, so a bid gets hours, not minutes, to be met.
+const IDLE_BID_MAX_MS = Number(process.env.MERIDIAN_PILOT_IDLE_BID_MAX_MIN ?? 180) * 60_000;
+// THE GAS REFILL (same day, same reason). The treasury key is off the server
+// by design, so the signer's gas was the one thing only a human could top
+// up. When native ETH falls under the line the engine buys a small amount
+// with its own USDG over the bridge tier, keeps a cash reserve, and waits a
+// cooldown before doing it again.
+const GAS_REFILL = (process.env.MERIDIAN_GAS_REFILL ?? "on") !== "off";
+const GAS_MIN_ETH = Number(process.env.MERIDIAN_GAS_MIN_ETH ?? 0.02);
+const GAS_REFILL_USD = Number(process.env.MERIDIAN_GAS_REFILL_USD ?? 60);
+const GAS_REFILL_MIN_CASH_AFTER_USD = Number(process.env.MERIDIAN_GAS_REFILL_MIN_CASH_AFTER_USD ?? 100);
+const GAS_REFILL_COOLDOWN_MS = Number(process.env.MERIDIAN_GAS_REFILL_COOLDOWN_MIN ?? 360) * 60_000;
 // THE WAIT IS ASYMMETRIC (operator insight, 2026-08-14). The two exits are
 // not the same trade. Exit BELOW: the position holds the fallen token, and
 // re-centering REALIZES the drift, so patience protects real money there.
@@ -288,6 +307,91 @@ export function autoEntryVerdict(args: {
   if (!best) return { act: false, reason: why.length ? why.join("; ") : "no candidate venues" };
   const rate = best.feeUsdPerHour != null && Number.isFinite(best.feeUsdPerHour) ? `, ~$${best.feeUsdPerHour.toFixed(0)}/h for our seat at ${(best.sharePct ?? 0).toFixed(2)}% of the pool` : ", depth unknown";
   return { act: true, symbol: best.symbol, reason: `${best.symbol} carries ~$${Math.round(best.flowUsdPerHour / 1000)}k/h${rate}, admitted at $${best.admissionNetUsd.toFixed(0)} 7d` };
+}
+
+/** PURE: has a venue's bid sat unfilled long enough to give the slot back? */
+export function idleBidVerdict(unfilledSinceMs: number | undefined, now: number, maxMs = IDLE_BID_MAX_MS): { act: boolean; reason: string } {
+  if (unfilledSinceMs == null) return { act: false, reason: "not idle" };
+  const idleMin = Math.round((now - unfilledSinceMs) / 60_000);
+  if (now - unfilledSinceMs < maxMs) return { act: false, reason: `unfilled ${idleMin}m of ${Math.round(maxMs / 60_000)}m` };
+  return { act: true, reason: `unfilled for ${idleMin}m across re-centers; giving the slot back` };
+}
+
+/** PURE: should the engine buy itself gas right now? */
+export function gasRefillVerdict(args: { enabled: boolean; ethBalance: number; minEth: number; cashUsd: number; refillUsd: number; minCashAfterUsd: number; lastRefillMs: number | undefined; now: number; cooldownMs: number }): { act: boolean; reason: string } {
+  if (!args.enabled) return { act: false, reason: "gas refill off (MERIDIAN_GAS_REFILL)" };
+  if (args.ethBalance >= args.minEth) return { act: false, reason: `gas ${args.ethBalance.toFixed(4)} ETH is above the ${args.minEth} ETH line` };
+  if (args.lastRefillMs != null && args.now - args.lastRefillMs < args.cooldownMs) return { act: false, reason: `refilled ${Math.round((args.now - args.lastRefillMs) / 60_000)}m ago; cooldown ${Math.round(args.cooldownMs / 60_000)}m` };
+  if (args.cashUsd - args.refillUsd < args.minCashAfterUsd) return { act: false, reason: `cash $${args.cashUsd.toFixed(0)} cannot spare $${args.refillUsd} and keep $${args.minCashAfterUsd}` };
+  return { act: true, reason: `gas ${args.ethBalance.toFixed(4)} ETH under the ${args.minEth} ETH line; buying ~$${args.refillUsd} of ETH with USDG` };
+}
+
+const venueUnfilledSince = new Map<string, number>();
+let lastGasRefillMs: number | undefined;
+let lastGasReason = "";
+
+/** The engine tops up its own gas from USDG; runs inside the tick's house lock. */
+async function maybeGasRefill(): Promise<void> {
+  if (!GAS_REFILL) return;
+  const now = Date.now();
+  let cashUsd = 0;
+  let ethBalance = 0;
+  try {
+    const client = getPublicClient();
+    const me = getAgentSigner()!.address;
+    ethBalance = Number(await client.getBalance({ address: me })) / 1e18;
+    if (ethBalance >= GAS_MIN_ETH) return; // the common case: one cheap read, no USDG read
+    const raw = await client.readContract({ address: USDG, abi: [parseAbiItem("function balanceOf(address) view returns (uint256)")], functionName: "balanceOf", args: [me] });
+    cashUsd = Number(raw) / 1e6;
+  } catch (err) {
+    console.error(`[pilotGuard] gas refill skipped: balance read failed (${err instanceof Error ? err.message.slice(0, 100) : err})`);
+    return;
+  }
+  const v = gasRefillVerdict({ enabled: GAS_REFILL, ethBalance, minEth: GAS_MIN_ETH, cashUsd, refillUsd: GAS_REFILL_USD, minCashAfterUsd: GAS_REFILL_MIN_CASH_AFTER_USD, lastRefillMs: lastGasRefillMs, now, cooldownMs: GAS_REFILL_COOLDOWN_MS });
+  if (!v.act) {
+    if (v.reason !== lastGasReason) console.error(`[pilotGuard] gas refill holding: ${v.reason}`);
+    lastGasReason = v.reason;
+    return;
+  }
+  lastGasReason = "";
+  if (!walletOpsAvailable(1)) return;
+  console.error(`[pilotGuard] GAS REFILL: ${v.reason}`);
+  try {
+    const r = await realSwapUsdgToEth({ amountUsd: GAS_REFILL_USD });
+    lastGasRefillMs = now;
+    appendLedger("pilot-guard.jsonl", { ts: now, kind: "gas-refill", symbol: "ETH", valueUsd: GAS_REFILL_USD, ethReceived: r.ethReceived, tx: r.hash });
+    console.error(`[pilotGuard] ✓ gas refill: ${r.ethReceived.toFixed(4)} ETH for $${GAS_REFILL_USD} (${r.hash})`);
+  } catch (err) {
+    lastGasRefillMs = now; // a failed buy still waits the cooldown: never loop on a broken route
+    console.error(`[pilotGuard] gas refill failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
+  }
+}
+
+/** A venue whose seats have all sat unfilled (USDG only, out of range) for the idle window comes home. */
+async function idleBidExits(positions: readonly LpPositionValue[], venueOpenUsd: Map<string, number>): Promise<void> {
+  const now = Date.now();
+  for (const symbol of [...venueOpenUsd.keys()]) {
+    if (activeDumpBid(symbol)) continue; // the dump bid has its own clock
+    const seats = positions.filter((p) => p.symbol === symbol);
+    const allUnfilled = seats.length > 0 && seats.every((p) => !p.inRange && p.tokenAmount * p.tokenPriceUsd < Math.max(1, 0.02 * p.valueUsd));
+    if (!allUnfilled) { venueUnfilledSince.delete(symbol); continue; }
+    if (!venueUnfilledSince.has(symbol)) venueUnfilledSince.set(symbol, now);
+    const v = idleBidVerdict(venueUnfilledSince.get(symbol), now);
+    if (!v.act) continue;
+    console.error(`[pilotGuard] IDLE BID: ${symbol} ${v.reason}; closing ${seats.length} seat(s) to cash`);
+    for (const p of seats) {
+      try {
+        await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "idle-exit" });
+        appendLedger("pilot-guard.jsonl", { ts: now, kind: "idle-exit", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd });
+        clearLineage(String(p.tokenId));
+        outSince.delete(String(p.tokenId));
+      } catch (err) {
+        console.error(`[pilotGuard] idle exit of #${p.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+      }
+    }
+    venueUnfilledSince.delete(symbol);
+    venueOpenUsd.delete(symbol);
+  }
 }
 
 /** Measured fee rate first; a depth-less venue ranks by flow below every measured one. */
@@ -653,6 +757,8 @@ async function runTick(): Promise<void> {
   // The dump bid places when a venue is FLAT and locked out, so it must run
   // before (and regardless of) the empty-board early return below.
   await maybePlaceDumpBids(positions);
+  // Gas first: every other action below needs it.
+  await maybeGasRefill();
   // The pilot's own entry runs while FLAT too, so it sits before the early return.
   await maybeAutoEntry(positions);
   if (positions.length === 0) {
@@ -699,8 +805,10 @@ async function runTick(): Promise<void> {
       venueOpenUsd.delete(symbol);
     }
   }
+  // A bid that never fills gives its slot back before anything else is judged.
+  await idleBidExits(positions, venueOpenUsd);
   for (const p of positions) {
-    if (!venueOpenUsd.has(p.symbol)) continue; // venue was fade-closed this tick
+    if (!venueOpenUsd.has(p.symbol)) continue; // venue was fade-closed or idle-closed this tick
     try {
       await managePosition(p, venueOpenUsd.get(p.symbol) ?? p.valueUsd);
     } catch (err) {
@@ -977,7 +1085,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }
