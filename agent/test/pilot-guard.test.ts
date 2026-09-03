@@ -371,3 +371,19 @@ test("gas refill: buys only under the line, with cash to spare, and not twice in
   assert.equal(gasRefillVerdict({ ...base, lastRefillMs: base.now - 60 * 60_000 }).act, false, "refilled an hour ago: wait");
   assert.equal(gasRefillVerdict({ ...base, lastRefillMs: base.now - 361 * 60_000 }).act, true, "cooldown over: buy again if still under");
 });
+
+test("auto-entry: the fee-rate bar keeps a deep pool from taking a slot our seat cannot earn on", () => {
+  const withBar = { ...baseArgs, minFeeUsdPerHour: 6 };
+  const pons = cand({ symbol: "PONS", flowUsdPerHour: 1_100_000, feeUsdPerHour: 3.5, sharePct: 0.09 });
+  const v = autoEntryVerdict({ ...withBar, candidates: [pons] });
+  assert.equal(v.act, false);
+  assert.match(v.act ? "" : v.reason, /~\$3.5\/h for our seat under the \$6\/h bar/);
+  const unknown = autoEntryVerdict({ ...withBar, candidates: [cand({ symbol: "PONS", flowUsdPerHour: 1_100_000 })] });
+  assert.equal(unknown.act, false, "no depth reading cannot clear the bar");
+  assert.match(unknown.act ? "" : unknown.reason, /depth unknown/);
+  const duck = cand({ symbol: "MICRODUCK", flowUsdPerHour: 280_000, feeUsdPerHour: 14, sharePct: 0.6 });
+  const ok = autoEntryVerdict({ ...withBar, candidates: [pons, duck] });
+  assert.equal(ok.act && ok.symbol, "MICRODUCK");
+  const off = autoEntryVerdict({ ...baseArgs, minFeeUsdPerHour: 0, candidates: [pons] });
+  assert.equal(off.act, true, "a zero bar disables the check");
+});

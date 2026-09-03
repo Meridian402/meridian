@@ -72,6 +72,14 @@ const AUTO_ENTRY_USD = Number(process.env.MERIDIAN_PILOT_AUTO_ENTRY_USD ?? 700);
 const AUTO_ENTRY_MAX_SEATS = Number(process.env.MERIDIAN_PILOT_AUTO_MAX_SEATS ?? 2);
 const AUTO_ENTRY_RESERVE_USD = Number(process.env.MERIDIAN_PILOT_AUTO_RESERVE_USD ?? 300);
 const AUTO_ENTRY_MIN_FLOW_USD_H = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_FLOW_USD_H ?? 150_000);
+// THE FEE-RATE BAR (2026-09-03 evening, operator: "our pons position is earning
+// nearly nothing"). Flow alone let PONS take a slot at ~$3-5/h for a $700
+// seat (0.09% of a deep pool), then the bid chased the price up for $27 of
+// churn and $3 of fees. A seat now has to be worth opening: the density
+// estimate for OUR seat must clear this many dollars an hour, and a venue
+// with no depth reading cannot clear it. $6/h is ~20%/day gross on $700,
+// which at this week's keep rate is still a real net. Cash is the alternative.
+const AUTO_ENTRY_MIN_FEE_USD_H = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_FEE_USD_H ?? 6);
 const AUTO_ENTRY_MIN_GAS_ETH = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_GAS_ETH ?? 0.01);
 const AUTO_ENTRY_COOLDOWN_MS = Number(process.env.MERIDIAN_PILOT_AUTO_COOLDOWN_MIN ?? 120) * 60_000;
 const AUTO_ENTRY_PER_DAY = Number(process.env.MERIDIAN_PILOT_AUTO_PER_DAY ?? 6);
@@ -85,7 +93,7 @@ const GUARD_EXIT_KINDS = new Set(["floor-exit", "break-exit", "dump-exit", "fade
 // long, across re-centers, comes home to cash, takes the entry cooldown, and
 // the picker moves on. Generous on purpose: the entry replay scored at-spot
 // re-arms net positive, so a bid gets hours, not minutes, to be met.
-const IDLE_BID_MAX_MS = Number(process.env.MERIDIAN_PILOT_IDLE_BID_MAX_MIN ?? 180) * 60_000;
+const IDLE_BID_MAX_MS = Number(process.env.MERIDIAN_PILOT_IDLE_BID_MAX_MIN ?? 120) * 60_000;
 // THE GAS REFILL (same day, same reason). The treasury key is off the server
 // by design, so the signer's gas was the one thing only a human could top
 // up. When native ETH falls under the line the engine buys a small amount
@@ -279,6 +287,8 @@ export function autoEntryVerdict(args: {
   entriesToday: number;
   perDay: number;
   minFlowUsdPerHour: number;
+  /** the density estimate for our seat must clear this ($/h); 0 disables the bar */
+  minFeeUsdPerHour?: number;
   cooldownMs: number;
   candidates: readonly AutoEntryCandidate[];
 }): { act: false; reason: string } | { act: true; symbol: string; reason: string } {
@@ -299,6 +309,11 @@ export function autoEntryVerdict(args: {
     if (c.lastExitMs != null && args.now - c.lastExitMs < args.cooldownMs) { why.push(`${c.symbol}: exited ${Math.round((args.now - c.lastExitMs) / 60000)}m ago, cooldown ${Math.round(args.cooldownMs / 60000)}m`); continue; }
     if (Number.isNaN(c.flowUsdPerHour)) { why.push(`${c.symbol}: tape too thin to read flow`); continue; }
     if (c.flowUsdPerHour < args.minFlowUsdPerHour) { why.push(`${c.symbol}: flow $${Math.round(c.flowUsdPerHour / 1000)}k/h under $${Math.round(args.minFlowUsdPerHour / 1000)}k/h`); continue; }
+    const bar = args.minFeeUsdPerHour ?? 0;
+    if (bar > 0) {
+      if (c.feeUsdPerHour == null || !Number.isFinite(c.feeUsdPerHour)) { why.push(`${c.symbol}: depth unknown, cannot clear the $${bar}/h bar`); continue; }
+      if (c.feeUsdPerHour < bar) { why.push(`${c.symbol}: ~$${c.feeUsdPerHour.toFixed(1)}/h for our seat under the $${bar}/h bar`); continue; }
+    }
     // Rank by what OUR seat would earn (flow x tier x share). A venue whose
     // depth is unknown ranks by flow alone, behind any venue with a real
     // fee-rate reading: never let a missing sample outrank a measured one.
@@ -478,6 +493,7 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
     entriesToday,
     perDay: AUTO_ENTRY_PER_DAY,
     minFlowUsdPerHour: AUTO_ENTRY_MIN_FLOW_USD_H,
+    minFeeUsdPerHour: AUTO_ENTRY_MIN_FEE_USD_H,
     cooldownMs: AUTO_ENTRY_COOLDOWN_MS,
     candidates,
   });
@@ -1085,7 +1101,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, seat >= $${AUTO_ENTRY_MIN_FEE_USD_H}/h, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }
