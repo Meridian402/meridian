@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, bidShareOfPool, type AutoEntryCandidate } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, bidShareOfPool, paybackFeePerHour, recenterPaysBack, type AutoEntryCandidate } from "../src/pilotGuard.js";
 import { flowUsdPerHour } from "../src/dumpWatch.js";
 import { bidBelowBounds } from "../src/venues/lpPositions.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
@@ -339,4 +339,15 @@ test("bidShareOfPool: v3 math for a bid-only seat against the pool's active liqu
   // USDG as currency0 uses the other leg's formula and still lands in (0, 100)
   const other = bidShareOfPool(700, 10n ** 20n, -276_000, false);
   assert.ok(other > 0 && other < 100, `usdg-first pool share in range: ${other}`);
+});
+
+test("payback gate: a fresh venue is judged on the density estimate, not on fees it has not had time to bank", () => {
+  // the PONS case, 2026-09-03: $0 banked, $0.17 accrued, ~$5/h by density, $2.75 churn
+  const fresh = paybackFeePerHour(0, 0.17, 5);
+  assert.equal(fresh, 5, "density is the floor of the estimate");
+  assert.equal(recenterPaysBack(2.75, fresh), true, "the re-center now pays back inside the horizon");
+  assert.equal(recenterPaysBack(2.75, paybackFeePerHour(0, 0.17, 0)), false, "without a density reading the old refusal stands");
+  assert.equal(paybackFeePerHour(48, 0, 1), 2, "a worked venue's banked fees still win when they are higher");
+  assert.equal(paybackFeePerHour(0, 0, Number.NaN), 0, "NaN density counts as nothing");
+  assert.equal(paybackFeePerHour(0, 0, -3), 0, "negative density counts as nothing");
 });

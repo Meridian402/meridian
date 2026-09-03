@@ -461,6 +461,18 @@ function clearLineage(tokenId: string): void {
 const PAYBACK_HOURS = Number(process.env.MERIDIAN_RECENTER_PAYBACK_HOURS ?? 12);
 
 /** PURE: does a re-center's churn cost pay back within the horizon? */
+/** PURE: the earn rate the payback gate judges against. Fees banked in the
+ *  venue over 24h and the seat's own accrual are the evidence for a venue we
+ *  have worked; a FRESH venue has neither, so its left-behind bid was refused
+ *  forever (PONS 12:30-15:30 on 2026-09-03: "$2.75 churn vs $0.17 expected").
+ *  The density estimate (flow x tier x the share this budget would hold) is
+ *  the same number the auto-entry picker trusted to open the seat, so it is
+ *  the floor of the estimate here. NaN or negative density counts as zero. */
+export function paybackFeePerHour(fee24hUsd: number, accruedUsd: number, densityUsdPerHour: number): number {
+  const d = Number.isFinite(densityUsdPerHour) && densityUsdPerHour > 0 ? densityUsdPerHour : 0;
+  return Math.max(fee24hUsd / 24, accruedUsd / 24, d);
+}
+
 export function recenterPaysBack(costUsd: number, feePerHourUsd: number, horizonHours = PAYBACK_HOURS): boolean {
   return feePerHourUsd * horizonHours >= costUsd;
 }
@@ -890,10 +902,15 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
   // plus a spread-and-gas allowance. The earn rate counts fees banked in
   // 24h plus what this position has accrued uncollected (a young seat's
   // only evidence), read pessimistically over a day.
-  const feePerHour = Math.max(venueFeeUsd24h("usdg", p.symbol), fees) / 24;
+  // A fresh venue has no banked fees: judge it on the same density estimate
+  // the picker opened it on (flow x tier x the share this budget would hold).
+  const depth = venueDepth(p.symbol);
+  const flowNow = venueFlowUsdPerHour(p.symbol, now);
+  const densityRate = depth && !Number.isNaN(flowNow) ? flowNow * ((poolFeePct(p.symbol) || 0.3) / 100) * (bidShareOfPool(budget, depth.activeL, depth.tick, tokenIsCurrency0(p.symbol)) / 100) : 0;
+  const feePerHour = paybackFeePerHour(venueFeeUsd24h("usdg", p.symbol), fees, densityRate);
   const costEstUsd = budget * ((poolFeePct(p.symbol) || 0.3) / 100) * 1.2 + 0.25;
   if (!recenterPaysBack(costEstUsd, feePerHour)) {
-    console.error(`[pilotGuard] re-center of ${p.symbol} refused by the payback gate: ~$${costEstUsd.toFixed(2)} churn vs $${(feePerHour * PAYBACK_HOURS).toFixed(2)} expected fees in ${PAYBACK_HOURS}h`);
+    console.error(`[pilotGuard] re-center of ${p.symbol} refused by the payback gate: ~$${costEstUsd.toFixed(2)} churn vs $${(feePerHour * PAYBACK_HOURS).toFixed(2)} expected fees in ${PAYBACK_HOURS}h (banked $${venueFeeUsd24h("usdg", p.symbol).toFixed(2)}/24h, density ~$${densityRate.toFixed(2)}/h)`);
     return;
   }
   // Never start what we cannot finish: a re-center is up to four wallet ops
