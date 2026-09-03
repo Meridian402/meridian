@@ -20,7 +20,7 @@
 import { lpPositionsWithValue, uncollectedFeesUsd, collectFees, withdrawPosition, poolTick, mintDumpBid, type LpPositionValue } from "./venues/lpPositions.js";
 import { getPublicClient } from "./venues/signer.js";
 import { parseAbiItem } from "viem";
-import { realSellStockForUsdg, tokenAddressFor, poolFeePct, USDG } from "./venues/stockPools.js";
+import { realSellStockForUsdg, tokenAddressFor, poolFeePct, tokenIsCurrency0, USDG } from "./venues/stockPools.js";
 import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
 import { getAgentSigner } from "./venues/signer.js";
@@ -32,7 +32,7 @@ import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
-import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff, fadeVerdictFor, recordFadeExit, FADE_ARMED, dumpMintRefusal, fadeMintRefusal, venueFlowUsdPerHour } from "./dumpWatch.js";
+import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff, fadeVerdictFor, recordFadeExit, FADE_ARMED, dumpMintRefusal, fadeMintRefusal, venueFlowUsdPerHour, venueDepth } from "./dumpWatch.js";
 
 // The tick is half the collect cadence so a 5-minute collect lands on the
 // interval instead of on the next 3-minute wake (2026-09-01, operator:
@@ -211,6 +211,32 @@ export interface AutoEntryCandidate {
   denied: boolean;
   /** ms timestamp of the venue's last guard exit, if any */
   lastExitMs?: number;
+  /** what OUR seat would earn per hour at this flow: flow x tier x share (undefined when depth is unknown) */
+  feeUsdPerHour?: number;
+  /** the seat's share of the pool's active liquidity, percent (undefined when depth is unknown) */
+  sharePct?: number;
+}
+
+/**
+ * PURE: the share of a pool's active liquidity a bid-only seat of seatUsd
+ * would hold, placed with its top edge at spot and the re-band's one-sided
+ * width below it. v3 math on the raw sqrt price; USDG is 6 decimals and every
+ * hands-off token 18, so the seat's L is amount / sqrt-span in raw units.
+ * Fee income is flow x tier x THIS, which is why a $1M/h pool with $700k of
+ * pro liquidity in range pays a $700 seat less than a $300k/h pool with $50k.
+ * Exported for tests.
+ */
+export function bidShareOfPool(seatUsd: number, activeL: bigint, tick: number, tokenIs0: boolean, widthPct = REBAND_WIDTH_PCT): number {
+  if (!(seatUsd > 0) || activeL < 0n) return 0;
+  const sp = Math.exp((tick * Math.log(1.0001)) / 2);
+  const w = Math.sqrt(1 + widthPct / 200);
+  const amount = seatUsd * 1e6;
+  // token is currency0: the bid holds currency1 (USDG) below spot, L = amt1 / (sqrtPb - sqrtPa)
+  // USDG is currency0: the bid holds currency0 above spot, L = amt0 * sqrtPa * sqrtPb / (sqrtPb - sqrtPa)
+  const seatL = tokenIs0 ? amount / (sp - sp / w) : (amount * sp * w) / (w - 1);
+  if (!Number.isFinite(seatL) || seatL <= 0) return 0;
+  const pool = Number(activeL);
+  return (100 * seatL) / (pool + seatL);
 }
 
 /**
@@ -254,10 +280,22 @@ export function autoEntryVerdict(args: {
     if (c.lastExitMs != null && args.now - c.lastExitMs < args.cooldownMs) { why.push(`${c.symbol}: exited ${Math.round((args.now - c.lastExitMs) / 60000)}m ago, cooldown ${Math.round(args.cooldownMs / 60000)}m`); continue; }
     if (Number.isNaN(c.flowUsdPerHour)) { why.push(`${c.symbol}: tape too thin to read flow`); continue; }
     if (c.flowUsdPerHour < args.minFlowUsdPerHour) { why.push(`${c.symbol}: flow $${Math.round(c.flowUsdPerHour / 1000)}k/h under $${Math.round(args.minFlowUsdPerHour / 1000)}k/h`); continue; }
-    if (!best || c.flowUsdPerHour > best.flowUsdPerHour) best = c;
+    // Rank by what OUR seat would earn (flow x tier x share). A venue whose
+    // depth is unknown ranks by flow alone, behind any venue with a real
+    // fee-rate reading: never let a missing sample outrank a measured one.
+    if (!best || gt(rankKey(c), rankKey(best))) best = c;
   }
   if (!best) return { act: false, reason: why.length ? why.join("; ") : "no candidate venues" };
-  return { act: true, symbol: best.symbol, reason: `${best.symbol} carries ~$${Math.round(best.flowUsdPerHour / 1000)}k/h, admitted at $${best.admissionNetUsd.toFixed(0)} 7d` };
+  const rate = best.feeUsdPerHour != null && Number.isFinite(best.feeUsdPerHour) ? `, ~$${best.feeUsdPerHour.toFixed(0)}/h for our seat at ${(best.sharePct ?? 0).toFixed(2)}% of the pool` : ", depth unknown";
+  return { act: true, symbol: best.symbol, reason: `${best.symbol} carries ~$${Math.round(best.flowUsdPerHour / 1000)}k/h${rate}, admitted at $${best.admissionNetUsd.toFixed(0)} 7d` };
+}
+
+/** Measured fee rate first; a depth-less venue ranks by flow below every measured one. */
+function rankKey(c: AutoEntryCandidate): [number, number] {
+  return c.feeUsdPerHour != null && Number.isFinite(c.feeUsdPerHour) ? [1, c.feeUsdPerHour] : [0, c.flowUsdPerHour];
+}
+function gt(a: [number, number], b: [number, number]): boolean {
+  return a[0] !== b[0] ? a[0] > b[0] : a[1] > b[1];
 }
 
 /** Pilot journal rows since a timestamp (the file is small; read per tick). */
@@ -304,9 +342,15 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
   const candidates: AutoEntryCandidate[] = [...HANDS_OFF_SYMBOLS].map((symbol) => {
     const adm = venueEarnsAdmission("usdg", symbol, 0);
     const exits = rows.filter((r) => r.symbol === symbol && GUARD_EXIT_KINDS.has(r.kind));
+    const flow = venueFlowUsdPerHour(symbol, now);
+    const depth = venueDepth(symbol);
+    const sharePct = depth ? bidShareOfPool(AUTO_ENTRY_USD, depth.activeL, depth.tick, tokenIsCurrency0(symbol)) : undefined;
+    const feeUsdPerHour = sharePct != null && !Number.isNaN(flow) ? flow * (poolFeePct(symbol) / 100) * (sharePct / 100) : undefined;
     return {
       symbol,
-      flowUsdPerHour: venueFlowUsdPerHour(symbol, now),
+      flowUsdPerHour: flow,
+      feeUsdPerHour,
+      sharePct,
       admitted: adm.ok,
       admissionNetUsd: adm.netUsd,
       hasSeat: positions.some((p) => p.symbol === symbol),

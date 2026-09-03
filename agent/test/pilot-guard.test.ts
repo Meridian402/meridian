@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, type AutoEntryCandidate } from "../src/pilotGuard.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, bidShareOfPool, type AutoEntryCandidate } from "../src/pilotGuard.js";
 import { flowUsdPerHour } from "../src/dumpWatch.js";
 import { bidBelowBounds } from "../src/venues/lpPositions.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
@@ -305,4 +305,38 @@ test("flowUsdPerHour scales the hour's mean scan-window volume to USD/hour", () 
   assert.equal(flowUsdPerHour(samples, now, 180), 300_000, "15k per 3-minute window is 300k/hour");
   assert.ok(Number.isNaN(flowUsdPerHour(samples.slice(0, 2), now, 180)), "under 3 samples: no reading");
   assert.ok(Number.isNaN(flowUsdPerHour(samples, now, 0)), "no window: no reading");
+});
+
+test("auto-entry: a thin pool with less flow beats a deep pool with more (fee rate ranks)", () => {
+  const v = autoEntryVerdict({
+    ...baseArgs,
+    candidates: [
+      cand({ symbol: "PONS", flowUsdPerHour: 1_100_000, feeUsdPerHour: 3.5, sharePct: 0.09 }),
+      cand({ symbol: "MICRODUCK", flowUsdPerHour: 280_000, feeUsdPerHour: 14, sharePct: 0.6 }),
+    ],
+  });
+  assert.equal(v.act, true);
+  assert.equal(v.act && v.symbol, "MICRODUCK", "PONS has 4x the flow but our seat earns 4x less there");
+  assert.match(v.act ? v.reason : "", /~\$14\/h for our seat at 0.60%/);
+  const noDepth = autoEntryVerdict({
+    ...baseArgs,
+    candidates: [cand({ symbol: "PONS", flowUsdPerHour: 1_100_000 }), cand({ symbol: "CASHCAT", flowUsdPerHour: 200_000, feeUsdPerHour: 1, sharePct: 0.1 })],
+  });
+  assert.equal(noDepth.act && noDepth.symbol, "CASHCAT", "a measured fee rate outranks an unknown depth, whatever the flow");
+  const allUnknown = autoEntryVerdict({ ...baseArgs, candidates: [cand({ symbol: "PONS", flowUsdPerHour: 1_100_000 }), cand({ symbol: "BONER", flowUsdPerHour: 300_000 })] });
+  assert.equal(allUnknown.act && allUnknown.symbol, "PONS", "with no depth anywhere, flow still decides");
+  assert.match(allUnknown.act ? allUnknown.reason : "", /depth unknown/);
+});
+
+test("bidShareOfPool: v3 math for a bid-only seat against the pool's active liquidity", () => {
+  // tick 0 (sqrtP = 1), token is currency0: L = 700e6 / (1 - 1/sqrt(1.25)) = 700e6 / 0.10557
+  const seatL = 700e6 / (1 - 1 / Math.sqrt(1.25));
+  const share = bidShareOfPool(700, BigInt(Math.round(seatL * 99)), 0, true);
+  assert.ok(Math.abs(share - 1) < 0.01, `a seat equal to 1/99 of the pool holds ~1%: ${share}`);
+  assert.ok(bidShareOfPool(700, BigInt(Math.round(seatL * 9)), 0, true) > share * 5, "a pool a tenth as deep gives a much larger share");
+  assert.equal(bidShareOfPool(700, 0n, 0, true), 100, "an empty pool: the seat is the whole pool");
+  assert.equal(bidShareOfPool(0, 1000n, 0, true), 0, "no seat, no share");
+  // USDG as currency0 uses the other leg's formula and still lands in (0, 100)
+  const other = bidShareOfPool(700, 10n ** 20n, -276_000, false);
+  assert.ok(other > 0 && other < 100, `usdg-first pool share in range: ${other}`);
 });

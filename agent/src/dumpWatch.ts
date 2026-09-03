@@ -422,6 +422,8 @@ export interface CrowdingSample {
   activeL: string; // the pool's total in-range liquidity, raw L units
   ourL: string; // our in-range seats' liquidity, same units
   sharePct: number;
+  /** pool tick at the sample, so a would-be seat's liquidity can be sized against activeL */
+  tick?: number;
 }
 
 const crowdLatest = new Map<string, CrowdingSample>();
@@ -429,6 +431,17 @@ let lastCrowdSampleAt = 0;
 
 export function crowdingState(): CrowdingSample[] {
   return [...crowdLatest.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+/** The venue's last depth sample (in-range liquidity + tick), for sizing a would-be seat's share. */
+export function venueDepth(symbol: string): { activeL: bigint; tick: number; at: number } | undefined {
+  const s = crowdLatest.get(symbol.toUpperCase());
+  if (!s || s.tick == null) return undefined;
+  try {
+    return { activeL: BigInt(s.activeL), tick: s.tick, at: s.at };
+  } catch {
+    return undefined;
+  }
 }
 
 /** PURE: our share of the pool's active liquidity, in percent to basis-point
@@ -472,7 +485,7 @@ async function sampleCrowding(
       const ourL = positions
         .filter((p) => p.symbol.toUpperCase() === s && p.tickLower <= tick && tick < p.tickUpper)
         .reduce((sum, p) => sum + BigInt(p.liquidity), 0n);
-      const sample: CrowdingSample = { symbol: s, at: now, activeL: activeL.toString(), ourL: ourL.toString(), sharePct: crowdingSharePct(ourL, activeL) };
+      const sample: CrowdingSample = { symbol: s, at: now, activeL: activeL.toString(), ourL: ourL.toString(), sharePct: crowdingSharePct(ourL, activeL), tick };
       crowdLatest.set(s, sample);
       appendLedger("crowding.jsonl", { ts: now, symbol: s, activeL: sample.activeL, ourL: sample.ourL, sharePct: sample.sharePct });
     } catch (e) {
