@@ -21,7 +21,7 @@ const TX = (n: string): string => `0x${n.repeat(64).slice(0, 64)}`;
 
 let pendingPayouts: typeof import("../src/earn/scout.js").pendingPayouts;
 let recordExternalPayout: typeof import("../src/earn/scout.js").recordExternalPayout;
-let TREASURY_WALLET: string;
+let HOUSE_WALLET: string;
 
 before(async () => {
   // DATA_DIR resolves at import time, so the env must be set before the module
@@ -30,7 +30,7 @@ before(async () => {
   const scout = await import("../src/earn/scout.js");
   pendingPayouts = scout.pendingPayouts;
   recordExternalPayout = scout.recordExternalPayout;
-  ({ TREASURY_WALLET } = await import("../src/merd/wallets.js"));
+  ({ HOUSE_WALLET } = await import("../src/merd/wallets.js"));
   const rows = [
     { ts: 1, kind: "scout", wallet: SCOUT_A, status: "accrued", amountUsd: 0.6 },
     { ts: 2, kind: "scout", wallet: SCOUT_A, status: "accrued", amountUsd: 0.6 },
@@ -44,7 +44,7 @@ test("pending payouts lists only balances that clear the minimum, and names its 
   assert.equal(out.payouts.length, 1, "the $0.10 balance must not be offered for payment");
   assert.equal(out.payouts[0].wallet, SCOUT_A);
   assert.equal(out.payouts[0].balanceUsd, 1.2);
-  assert.equal(out.treasury, TREASURY_WALLET, "the payer hard-checks this before signing");
+  assert.equal(out.treasury, HOUSE_WALLET, "the payer hard-checks this before signing");
   assert.match(out.usdg, /^0x/, "and this");
 });
 
@@ -59,7 +59,7 @@ test("malformed inputs are refused before any verification runs", async () => {
 
 test("a claim above the accrued balance is refused, protecting the scout", async () => {
   const out = await recordExternalPayout({ wallet: SCOUT_A, amountUsd: 5, txHash: TX("b") }, async () => ({
-    from: TREASURY_WALLET.toLowerCase(),
+    from: HOUSE_WALLET.toLowerCase(),
     to: SCOUT_A,
     amountUsd: 5,
   }));
@@ -79,7 +79,7 @@ test("a transfer from anywhere but the treasury is refused", async () => {
 
 test("an on-chain amount below the claim is refused", async () => {
   const out = await recordExternalPayout({ wallet: SCOUT_A, amountUsd: 1.2, txHash: TX("d") }, async () => ({
-    from: TREASURY_WALLET.toLowerCase(),
+    from: HOUSE_WALLET.toLowerCase(),
     to: SCOUT_A,
     amountUsd: 0.5,
   }));
@@ -88,7 +88,7 @@ test("an on-chain amount below the claim is refused", async () => {
 });
 
 test("a verified payout lands, zeroes the balance, and its hash cannot be replayed", async () => {
-  const good = async () => ({ from: TREASURY_WALLET.toLowerCase(), to: SCOUT_A, amountUsd: 1.2 });
+  const good = async () => ({ from: HOUSE_WALLET.toLowerCase(), to: SCOUT_A, amountUsd: 1.2 });
   const first = await recordExternalPayout({ wallet: SCOUT_A, amountUsd: 1.2, txHash: TX("e") }, good);
   assert.equal(first.ok, true);
 

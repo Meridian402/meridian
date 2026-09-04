@@ -32,6 +32,19 @@ import type { Address } from "viem";
  * nothing in this repo can sign for it.
  */
 export const TREASURY_WALLET: Address = "0x475C1fe4d1e7A703eaca6141978b04010e410Bf4";
+/**
+ * RETIRED 2026-09-04 (operator: "remove the treasury wallet info from the
+ * website and never use that wallet again"). Nothing in the engine reads,
+ * pays, or displays TREASURY_WALLET any more: the execution wallet holds
+ * everything it earns, is the x402 payTo, funds payouts, and is the only
+ * wallet the site shows. The constant stays for history and the config
+ * guard, which now refuses it as retired. The PONS locker still pays MERD
+ * creator fees to it at the contract level; sweeping those is the
+ * operator's hand action.
+ */
+export const RETIRED_TREASURY_WALLET_2026_09_04: Address = TREASURY_WALLET;
+/** The house wallet since 2026-09-04: the execution wallet holds, earns, pays, and is shown. */
+export const HOUSE_WALLET: Address = "0xDFF0Cf4f18dA55f931ae2A5a0770BaAD1e45D7fe";
 
 /**
  * The engine's signing wallet, rotated 2026-08-03. venues/signer.ts refuses to

@@ -683,8 +683,9 @@ app.get("/api/learn/recall", (req: Request, res: Response) => {
 app.get("/api/earnings-history", async (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
-    const points = await earningsTimeline();
-    res.json({ points, ethUsd: await fetchEthUsd().catch(() => 0) });
+    const ethUsd = await fetchEthUsd().catch(() => 0);
+    const points = await earningsTimeline(ethUsd);
+    res.json({ points, ethUsd, wallet: "house", note: "cumulative fees the desk has collected to the house wallet; one point per collect" });
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : "earnings history unavailable" });
   }
@@ -2278,7 +2279,7 @@ app.get("/api/dump-watch", (_req: Request, res: Response) => {
 // treasury vs compounded, and any carried compound. Open read for visibility.
 app.get("/api/daily-reconcile", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.json({ ...dailyReconcileState(), note: "At each ET day close, half the day's collected fees are skimmed to the treasury (locked) and half compounded into the lighter seat. Realized fees only; principal is never skimmed." });
+  res.json({ ...dailyReconcileState(), note: "At each ET day close the day's collected fees are split by MERIDIAN_PROFIT_SKIM_PCT (0 since 2026-09-04: everything compounds on the house wallet) and the compound half goes into the lighter seat. Realized fees only; principal is never skimmed." });
 });
 
 // The integration guide as plain markdown, so an agent can fetch and parse

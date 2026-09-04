@@ -1,109 +1,62 @@
-// The earning progression that is actually worth charting: cumulative revenue
-// BANKED to the treasury, reconstructed from chain history. Two sources are
-// income and nothing else is:
-//   1. WETH from the PonsLaunchLocker = MERD creator fee share, paid out of
-//      real MERD trading volume.
-//   2. Native ETH from the execution wallet = desk fee skims (the 50% ETH-side
-//      LP fee bank).
-// Everything else touching the treasury is capital moving between our own
-// wallets (funding routes, the 0.5 WETH park from execution) or tokens that
-// are not income (MERD itself). Charting those as earnings would be showcase
-// math, so the filter is an allowlist, not a blocklist. Extend it when a new
-// genuine revenue source starts paying the treasury.
-import { TREASURY_WALLET } from "./merd/wallets.js";
-import { PONS_ROBINHOOD } from "./launch/pons.js";
-
-const EXECUTION = "0xdff0cf4f18da55f931ae2a5a0770baad1e45d7fe";
-const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
-const BS = "https://robinhoodchain.blockscout.com/api/v2";
-// Blockscout blocks default fetch user agents and its filtered endpoints 500
-// intermittently, so: browser UA, no server-side filters (we filter here),
-// and a retry with backoff per page.
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
+// The public earnings timeline: every fee the desk has collected to the house
+// wallet, one point per collect, cumulative, with the transaction that paid it.
+//
+// Until 2026-09-04 this read the OpenHermit treasury's history off Blockscout
+// (MERD fee share from the PONS locker plus the desk's daily skims). The
+// operator retired that wallet from the site and the engine ("never use that
+// wallet again"), so the series is now what the execution wallet itself earns:
+// the attribution ledger's collect rows, both sleeves, exact by construction
+// since every collect is a landed receipt. No explorer, no cache dependency on
+// a third party, and nothing on the site points at the old address.
+import { existsSync, readFileSync } from "node:fs";
+import { dataPath } from "./dataDir.js";
 
 export interface EarningsPoint {
   ts: number;
-  /** Cumulative revenue banked, in ETH terms (WETH + native are both charted as ETH). */
+  /** Cumulative fees collected, USD. */
+  usd: number;
+  /** Kept for older clients: the same cumulative figure in ETH at the served ETH price. */
   eth: number;
-  /** Which source paid this event. */
-  src: "merd-fees" | "desk-skim";
-  /** The on-chain receipt: every point is one real transaction. */
-  tx: string;
+  /** Which sleeve collected it: "usdg" seats or the "meme" rotor. */
+  src: string;
+  /** The venue the fee came from. */
+  venue: string;
+  /** This collect's own amount, USD. */
+  amountUsd: number;
+  /** The on-chain receipt when the row carries one. */
+  tx?: string;
 }
 
-let cache: { at: number; points: EarningsPoint[] } | null = null;
-const CACHE_MS = 5 * 60 * 1000;
+let cache: { at: number; points: EarningsPoint[]; ethUsd: number } | null = null;
+const CACHE_MS = 60 * 1000;
 
-async function getJson(url: string): Promise<Record<string, unknown>> {
-  let lastErr: unknown;
-  for (let i = 0; i < 4; i++) {
-    try {
-      const r = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000) });
-      if (!r.ok) throw new Error(`blockscout ${r.status}`);
-      return (await r.json()) as Record<string, unknown>;
-    } catch (err) {
-      lastErr = err;
-      await new Promise((res) => setTimeout(res, 1500 * (i + 1)));
-    }
-  }
-  throw lastErr;
-}
-
-async function pages(url: string, maxPages = 10): Promise<Record<string, unknown>[]> {
-  const items: Record<string, unknown>[] = [];
-  let next: Record<string, unknown> | null = null;
-  for (let i = 0; i < maxPages; i++) {
-    const qs = next ? `?${new URLSearchParams(next as Record<string, string>).toString()}` : "";
-    const j = (await getJson(`${url}${qs}`)) as {
-      items?: Record<string, unknown>[];
-      next_page_params?: Record<string, unknown> | null;
-    };
-    items.push(...(j.items ?? []));
-    next = j.next_page_params ?? null;
-    if (!next) break;
-  }
-  return items;
-}
-
-export async function earningsTimeline(): Promise<EarningsPoint[]> {
-  if (cache && Date.now() - cache.at < CACHE_MS) return cache.points;
-  const T = TREASURY_WALLET.toLowerCase();
-  const locker = PONS_ROBINHOOD.locker.toLowerCase();
-
-  const [tokenXfers, txs] = await Promise.all([
-    pages(`${BS}/addresses/${TREASURY_WALLET}/token-transfers`),
-    pages(`${BS}/addresses/${TREASURY_WALLET}/transactions`),
-  ]);
-
-  const events: { ts: number; eth: number; src: EarningsPoint["src"]; tx: string }[] = [];
-  for (const t of tokenXfers) {
-    const tok = (t as { token?: { address_hash?: string; address?: string } }).token ?? {};
-    const addr = String(tok.address_hash ?? tok.address ?? "").toLowerCase();
-    const to = String((t as { to?: { hash?: string } }).to?.hash ?? "").toLowerCase();
-    const from = String((t as { from?: { hash?: string } }).from?.hash ?? "").toLowerCase();
-    if (to !== T || addr !== WETH || from !== locker) continue;
-    const v = Number((t as { total?: { value?: string } }).total?.value ?? 0) / 1e18;
-    const ts = Date.parse(String((t as { timestamp?: string }).timestamp ?? ""));
-    const tx = String((t as { transaction_hash?: string; tx_hash?: string }).transaction_hash ?? (t as { tx_hash?: string }).tx_hash ?? "");
-    if (v > 0 && Number.isFinite(ts)) events.push({ ts, eth: v, src: "merd-fees", tx });
-  }
-  for (const t of txs) {
-    const to = String((t as { to?: { hash?: string } }).to?.hash ?? "").toLowerCase();
-    const from = String((t as { from?: { hash?: string } }).from?.hash ?? "").toLowerCase();
-    if (to !== T || from !== EXECUTION) continue;
-    if ((t as { status?: string }).status !== "ok") continue;
-    const v = Number((t as { value?: string }).value ?? 0) / 1e18;
-    const ts = Date.parse(String((t as { timestamp?: string }).timestamp ?? ""));
-    const tx = String((t as { hash?: string }).hash ?? "");
-    if (v > 0 && Number.isFinite(ts)) events.push({ ts, eth: v, src: "desk-skim", tx });
-  }
-
-  events.sort((a, b) => a.ts - b.ts);
+/** PURE: fold attribution rows into the cumulative collect timeline. Exported for tests. */
+export function foldEarnings(rows: ReadonlyArray<Record<string, unknown>>, ethUsd: number): EarningsPoint[] {
+  const collects = rows
+    .filter((r) => r && r.mech === "collect" && Number(r.feeUsd) > 0 && Number.isFinite(Number(r.ts)))
+    .map((r) => ({ ts: Number(r.ts), usd: Number(r.feeUsd), src: String(r.sleeve ?? "usdg"), venue: String(r.venue ?? ""), tx: typeof r.tx === "string" && r.tx ? String(r.tx) : undefined }))
+    .sort((a, b) => a.ts - b.ts);
   let cum = 0;
-  const points: EarningsPoint[] = events.map((e) => {
-    cum += e.eth;
-    return { ts: e.ts, eth: Math.round(cum * 1e6) / 1e6, src: e.src, tx: e.tx };
+  return collects.map((c) => {
+    cum += c.usd;
+    const usd = Math.round(cum * 100) / 100;
+    return { ts: c.ts, usd, eth: ethUsd > 0 ? Math.round((usd / ethUsd) * 1e6) / 1e6 : 0, src: c.src, venue: c.venue, amountUsd: Math.round(c.usd * 100) / 100, tx: c.tx };
   });
-  cache = { at: Date.now(), points };
+}
+
+function readAttributionRows(): Record<string, unknown>[] {
+  const p = dataPath("attribution.jsonl");
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return null; } })
+    .filter((r): r is Record<string, unknown> => !!r);
+}
+
+export async function earningsTimeline(ethUsd: number): Promise<EarningsPoint[]> {
+  if (cache && Date.now() - cache.at < CACHE_MS && cache.ethUsd === ethUsd) return cache.points;
+  const points = foldEarnings(readAttributionRows(), ethUsd);
+  cache = { at: Date.now(), points, ethUsd };
   return points;
 }

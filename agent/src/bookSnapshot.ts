@@ -17,7 +17,7 @@ import { fetchEthUsd } from "./venues/uniswapV4.js";
 import { memeBandsLive, looseInventoryUsd, noteBookMark } from "./memeGuard.js";
 import { notePortfolioMark } from "./portfolioBreaker.js";
 import { lpPositionsWithValue, uncollectedFeesUsd } from "./venues/lpPositions.js";
-import { TREASURY_WALLET } from "./merd/wallets.js";
+import { } from "./merd/wallets.js";
 
 const EXECUTION: Address = "0xDFF0Cf4f18dA55f931ae2A5a0770BaAD1e45D7fe";
 const WETH: Address = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
@@ -39,18 +39,17 @@ export interface BookPoint {
   feesUsd: number;
 }
 
-/** Mark the whole book now: banked (wallet + treasury ETH/WETH) + working
+/** Mark the whole book now: banked (the house wallet's ETH/WETH/USDG; the
+ *  retired treasury is not counted since 2026-09-04) + working
  *  (bands + accrued fees). Returns null if the reads fail, so a bad sample is
  *  never recorded as a real dip. */
 export async function computeBookNow(): Promise<BookPoint | null> {
   const client = getPublicClient();
   try {
-    const [tEth, xEth, tWeth, xWeth, tUsdg, xUsdg, ethUsd, bands] = await Promise.all([
-      client.getBalance({ address: TREASURY_WALLET }),
+    const tEth = 0n, tWeth = 0n, tUsdg = 0n; // the retired treasury is not part of the book
+    const [xEth, xWeth, xUsdg, ethUsd, bands] = await Promise.all([
       client.getBalance({ address: EXECUTION }),
-      client.readContract({ address: WETH, abi: [balOf], functionName: "balanceOf", args: [TREASURY_WALLET] }),
       client.readContract({ address: WETH, abi: [balOf], functionName: "balanceOf", args: [EXECUTION] }),
-      client.readContract({ address: USDG, abi: [balOf], functionName: "balanceOf", args: [TREASURY_WALLET] }),
       client.readContract({ address: USDG, abi: [balOf], functionName: "balanceOf", args: [EXECUTION] }),
       fetchEthUsd(),
       memeBandsLive(),

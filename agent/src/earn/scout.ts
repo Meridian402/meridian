@@ -19,7 +19,7 @@ import { getPublicClient, getWalletClient, getAgentAddress } from "../venues/sig
 import { guardWalletOp, recordWalletOp } from "../risk.js";
 import { withHouseWalletLock } from "../houseWallet.js";
 import { USDG } from "../venues/stockPools.js";
-import { TREASURY_WALLET } from "../merd/wallets.js";
+import { HOUSE_WALLET } from "../merd/wallets.js";
 import { knobValue } from "../platformKnobs.js";
 
 const LOG = "bounties.jsonl";
@@ -335,7 +335,7 @@ export function pendingPayouts(): Record<string, unknown> {
   const payouts = wallets
     .map((w) => ({ wallet: w, balanceUsd: Math.round(walletBalanceUsd(rows, w) * 100) / 100 }))
     .filter((p) => p.balanceUsd >= knobValue("scoutMinPayoutUsd"));
-  return { ok: true, minPayoutUsd: knobValue("scoutMinPayoutUsd"), treasury: TREASURY_WALLET, usdg: USDG, payouts };
+  return { ok: true, minPayoutUsd: knobValue("scoutMinPayoutUsd"), treasury: HOUSE_WALLET, usdg: USDG, payouts };
 }
 
 /** What an on-chain check of a claimed payout tx must prove. */
@@ -394,7 +394,7 @@ export async function recordExternalPayout(
     }
     const proof = await verify(txHash, wallet);
     if (!proof) return { ok: false, error: "no successful USDG transfer to that wallet in that tx" };
-    if (proof.from !== TREASURY_WALLET.toLowerCase()) {
+    if (proof.from !== HOUSE_WALLET.toLowerCase()) {
       return { ok: false, error: "the transfer is not from the treasury" };
     }
     if (proof.amountUsd + 1e-6 < amountUsd) {

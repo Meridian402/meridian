@@ -12,7 +12,7 @@
 import { formatUnits } from "viem";
 import { getPublicClient } from "./venues/signer.js";
 import { USDG } from "./venues/stockPools.js";
-import { TREASURY_WALLET, ENGINE_SIGNER_WALLET } from "./merd/wallets.js";
+import { ENGINE_SIGNER_WALLET } from "./merd/wallets.js";
 import { pendingPayouts } from "./earn/scout.js";
 
 const balanceOfAbi = [
@@ -65,10 +65,10 @@ async function readWallet(address: `0x${string}`): Promise<WalletFunding> {
 export async function fundingHealth(): Promise<FundingHealth> {
   if (cache && Date.now() - cache.at < TTL_MS) return cache.value;
 
-  const [treasury, signer] = await Promise.all([
-    readWallet(TREASURY_WALLET as `0x${string}`),
-    readWallet(ENGINE_SIGNER_WALLET as `0x${string}`),
-  ]);
+  // Since 2026-09-04 the execution wallet is the house wallet: it earns, holds,
+  // pays, and is the only wallet reported. The retired treasury is not read.
+  const signer = await readWallet(ENGINE_SIGNER_WALLET as `0x${string}`);
+  const treasury: WalletFunding = { address: "retired", ethBalance: 0, usdgBalance: 0 };
 
   const pending = pendingPayouts() as { payouts?: Array<{ balanceUsd: number }> };
   const owedUsd = Math.round((pending.payouts ?? []).reduce((s, p) => s + p.balanceUsd, 0) * 100) / 100;
@@ -76,9 +76,9 @@ export async function fundingHealth(): Promise<FundingHealth> {
   const warnings: string[] = [];
   // The owed money is the thing that has a person on the other end of it, so
   // it leads.
-  if (owedUsd > 0 && treasury.usdgBalance < owedUsd) {
+  if (owedUsd > 0 && signer.usdgBalance < owedUsd) {
     warnings.push(
-      `$${owedUsd.toFixed(2)} of bounties are payable and the treasury holds $${treasury.usdgBalance.toFixed(2)} USDG. ` +
+      `$${owedUsd.toFixed(2)} of bounties are payable and the house wallet holds $${signer.usdgBalance.toFixed(2)} USDG. ` +
         "Scouts who earned them cannot be paid until it is funded.",
     );
   }
@@ -88,16 +88,7 @@ export async function fundingHealth(): Promise<FundingHealth> {
         "Unattended operations that need to sign will start failing.",
     );
   }
-  if (treasury.ethBalance < MIN_GAS_ETH) {
-    warnings.push(`The treasury holds ${treasury.ethBalance.toFixed(5)} ETH, too little to pay gas on its own transfers.`);
-  }
-  // The structural one. Worth saying explicitly, because the symptom (payouts
-  // silently not happening) points at the ledger rather than at the wallet.
-  if (signer.usdgBalance === 0 && treasury.usdgBalance === 0 && owedUsd > 0) {
-    warnings.push(
-      "Neither wallet holds USDG. Revenue collects to the treasury, so settlement must be funded there, not on the signer.",
-    );
-  }
+
 
   const value: FundingHealth = { ok: warnings.length === 0, treasury, signer, owedUsd, warnings };
   cache = { at: Date.now(), value };

@@ -1,4 +1,4 @@
-import { TREASURY_WALLET } from "./merd/wallets.js";
+import { TREASURY_WALLET, HOUSE_WALLET } from "./merd/wallets.js";
 
 export const config = {
   solanaRpcUrl: process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
@@ -158,15 +158,18 @@ const RETIRED_TREASURY_ADDRESSES = [
   "0x76a4ff023faa6ea3e378d9e6d74eb6b2676fb38c", // rotated out 2026-07-23
   "0x759dd0df4dcd3de442f544c35f3296f5eb5dff81", // superseded 2026-07-27, single-wallet rotation to a fresh operator key
   "0x7037b347b21d5e72452da1445fb1f01d652d40cc", // treasury 2026-07-27 to 2026-08-01, then engine signer until the 2026-08-03 rotation; fully retired
+  "0x475c1fe4d1e7a703eaca6141978b04010e410bf4", // the OpenHermit treasury 2026-08-01 to 2026-09-04; retired on the operator's call, the execution wallet is the house wallet
 ];
 
 export function assertTreasuryIsLive(address: string = config.treasuryAddress): void {
   if (!address) return; // unconfigured fails safe elsewhere
-  if (address.toLowerCase() === TREASURY_WALLET.toLowerCase()) return;
+  // Since 2026-09-04 the house wallet (the execution wallet) is the only live
+  // payTo. The OpenHermit treasury is on the retired list with the rest.
+  if (address.toLowerCase() === HOUSE_WALLET.toLowerCase()) return;
   const known = RETIRED_TREASURY_ADDRESSES.includes(address.toLowerCase());
   throw new Error(
     `MERIDIAN_TREASURY_ADDRESS is ${address}, ${known ? "a retired wallet" : "not the canonical treasury"}. ` +
-      `The live treasury is ${TREASURY_WALLET} (merd/wallets.ts TREASURY_WALLET). Every x402 payment ` +
+      `The live house wallet is ${HOUSE_WALLET} (merd/wallets.ts HOUSE_WALLET). Every x402 payment ` +
       "would otherwise be quoted and verified against an address nobody is watching.",
   );
 }
