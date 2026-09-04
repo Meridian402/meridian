@@ -32,7 +32,7 @@ import { portfolioStoodDown } from "./portfolioBreaker.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dataPath } from "./dataDir.js";
 import { venueEarnsAdmission, venueFeeUsd24h, venueChurnAdmits } from "./attribution.js";
-import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff, fadeVerdictFor, recordFadeExit, FADE_ARMED, dumpMintRefusal, fadeMintRefusal, venueFlowUsdPerHour, venueDepth } from "./dumpWatch.js";
+import { latestDumpReading, dumpExitVerdict, recordDumpExit, dumpLockoutUntil, switchedOff, fadeVerdictFor, recordFadeExit, FADE_ARMED, dumpMintRefusal, fadeMintRefusal, venueFlowUsdPerHour, venueDepth, venueMoveStats } from "./dumpWatch.js";
 
 // The tick is half the collect cadence so a 5-minute collect lands on the
 // interval instead of on the next 3-minute wake (2026-09-01, operator:
@@ -80,6 +80,23 @@ const AUTO_ENTRY_MIN_FLOW_USD_H = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_FLO
 // with no depth reading cannot clear it. $6/h is ~20%/day gross on $700,
 // which at this week's keep rate is still a real net. Cash is the alternative.
 const AUTO_ENTRY_MIN_FEE_USD_H = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_FEE_USD_H ?? 6);
+// THE VOLATILITY TERM (2026-09-04, operator: "we keep getting caught in tokens
+// falling, there is something wrong with our logic" / "we need to breakout").
+// The fee bar was a yield test with no volatility term: MICRODUCK at $6/h
+// while swinging 8% an hour passed it, and the seat bought every spike and
+// sold every dip. A venue must now earn, per hour, a set fraction of what it
+// moves per hour: yield-to-move = (fee/h as % of the seat) / (median absolute
+// hourly move %). MICRODUCK two days ago: ~8.6%/h earned vs ~10%/h moved =
+// 0.86. MICRODUCK now: 0.6%/h vs 6%/h = 0.10. A venue with no move reading
+// cannot clear the bar. 0 disables.
+const AUTO_ENTRY_MIN_YIELD_TO_MOVE = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_YIELD_TO_MOVE ?? 0.25);
+// THE NO-SPIKE RULE (same day). Above-band re-arms fired 12 quiet minutes
+// after +32% and +18% hours and the bid filled into the reversal each time.
+// No bid, entry or re-arm, while the price is up more than this over the
+// trailing hour. Different from the run-up gate the entry replay rejected,
+// which measured against the day's low. 0 disables.
+const SPIKE_PCT = Number(process.env.MERIDIAN_PILOT_SPIKE_PCT ?? 10);
+const SPIKE_WINDOW_MS = Number(process.env.MERIDIAN_PILOT_SPIKE_WINDOW_MIN ?? 60) * 60_000;
 const AUTO_ENTRY_MIN_GAS_ETH = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_GAS_ETH ?? 0.01);
 const AUTO_ENTRY_COOLDOWN_MS = Number(process.env.MERIDIAN_PILOT_AUTO_COOLDOWN_MIN ?? 120) * 60_000;
 const AUTO_ENTRY_PER_DAY = Number(process.env.MERIDIAN_PILOT_AUTO_PER_DAY ?? 6);
@@ -242,6 +259,23 @@ export interface AutoEntryCandidate {
   feeUsdPerHour?: number;
   /** the seat's share of the pool's active liquidity, percent (undefined when depth is unknown) */
   sharePct?: number;
+  /** median absolute hourly move over the last 6h, percent (NaN when unreadable) */
+  hourlyMovePct?: number;
+  /** signed move over the trailing 60 minutes, percent (NaN when unreadable) */
+  last60mPct?: number;
+}
+
+/** PURE: is the price up more than spikePct over the trailing window? Tick
+ *  samples are the pilot's own history; price rises with the tick when the
+ *  token is currency0 and falls with it otherwise. Unreadable = no spike. */
+export function spikeVerdict(samples: readonly TickSample[], now: number, priceUpIsTickUp: boolean, spikePct = SPIKE_PCT, windowMs = SPIKE_WINDOW_MS): { spiked: boolean; upPct: number; reason: string } {
+  if (!(spikePct > 0)) return { spiked: false, upPct: 0, reason: "spike rule off" };
+  const inWindow = samples.filter((s) => s.t >= now - windowMs);
+  if (inWindow.length < 2) return { spiked: false, upPct: 0, reason: "not enough tape to judge a spike" };
+  const dTicks = inWindow[inWindow.length - 1].tick - inWindow[0].tick;
+  const upPct = (priceUpIsTickUp ? dTicks : -dTicks) * 0.01;
+  if (upPct > spikePct) return { spiked: true, upPct, reason: `price up ${upPct.toFixed(1)}% in the last ${Math.round(windowMs / 60_000)}m; not buying the spike` };
+  return { spiked: false, upPct, reason: `no spike (${upPct >= 0 ? "+" : ""}${upPct.toFixed(1)}% over ${Math.round(windowMs / 60_000)}m)` };
 }
 
 /**
@@ -289,6 +323,10 @@ export function autoEntryVerdict(args: {
   minFlowUsdPerHour: number;
   /** the density estimate for our seat must clear this ($/h); 0 disables the bar */
   minFeeUsdPerHour?: number;
+  /** (fee/h as % of seat) / (median abs hourly move %) must clear this; 0 disables */
+  minYieldToMove?: number;
+  /** refuse a venue up more than this % over the trailing hour; 0 disables */
+  maxSpikePct?: number;
   cooldownMs: number;
   candidates: readonly AutoEntryCandidate[];
 }): { act: false; reason: string } | { act: true; symbol: string; reason: string } {
@@ -313,6 +351,14 @@ export function autoEntryVerdict(args: {
     if (bar > 0) {
       if (c.feeUsdPerHour == null || !Number.isFinite(c.feeUsdPerHour)) { why.push(`${c.symbol}: depth unknown, cannot clear the $${bar}/h bar`); continue; }
       if (c.feeUsdPerHour < bar) { why.push(`${c.symbol}: ~$${c.feeUsdPerHour.toFixed(1)}/h for our seat under the $${bar}/h bar`); continue; }
+    }
+    const spike = args.maxSpikePct ?? 0;
+    if (spike > 0 && c.last60mPct != null && Number.isFinite(c.last60mPct) && c.last60mPct > spike) { why.push(`${c.symbol}: up ${c.last60mPct.toFixed(1)}% in the last hour, not buying the spike`); continue; }
+    const ytm = args.minYieldToMove ?? 0;
+    if (ytm > 0) {
+      if (c.feeUsdPerHour == null || !Number.isFinite(c.feeUsdPerHour) || c.hourlyMovePct == null || !Number.isFinite(c.hourlyMovePct)) { why.push(`${c.symbol}: no move reading, cannot judge yield vs volatility`); continue; }
+      const ratio = ((c.feeUsdPerHour / args.seatUsd) * 100) / Math.max(c.hourlyMovePct, 0.5);
+      if (ratio < ytm) { why.push(`${c.symbol}: earns ${((c.feeUsdPerHour / args.seatUsd) * 100).toFixed(2)}%/h vs moves ${c.hourlyMovePct.toFixed(1)}%/h (${ratio.toFixed(2)} < ${ytm})`); continue; }
     }
     // Rank by what OUR seat would earn (flow x tier x share). A venue whose
     // depth is unknown ranks by flow alone, behind any venue with a real
@@ -465,11 +511,14 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
     const depth = venueDepth(symbol);
     const sharePct = depth ? bidShareOfPool(AUTO_ENTRY_USD, depth.activeL, depth.tick, tokenIsCurrency0(symbol)) : undefined;
     const feeUsdPerHour = sharePct != null && !Number.isNaN(flow) ? flow * (poolFeePct(symbol) / 100) * (sharePct / 100) : undefined;
+    const mv = venueMoveStats(symbol, now);
     return {
       symbol,
       flowUsdPerHour: flow,
       feeUsdPerHour,
       sharePct,
+      hourlyMovePct: mv.medianAbsHourlyPct,
+      last60mPct: mv.last60mPct,
       admitted: adm.ok,
       admissionNetUsd: adm.netUsd,
       hasSeat: positions.some((p) => p.symbol === symbol),
@@ -494,6 +543,8 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
     perDay: AUTO_ENTRY_PER_DAY,
     minFlowUsdPerHour: AUTO_ENTRY_MIN_FLOW_USD_H,
     minFeeUsdPerHour: AUTO_ENTRY_MIN_FEE_USD_H,
+    minYieldToMove: AUTO_ENTRY_MIN_YIELD_TO_MOVE,
+    maxSpikePct: SPIKE_PCT,
     cooldownMs: AUTO_ENTRY_COOLDOWN_MS,
     candidates,
   });
@@ -978,7 +1029,13 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
   // (all-USDG, nothing to realize, missed fees are the only cost).
   const minOut = belowBand ? RECENTER_BELOW_MIN_MS : RECENTER_ABOVE_MIN_MS;
   const window = belowBand ? STABILITY_WINDOW_MS : STABILITY_WINDOW_ABOVE_MS;
-  const verdict = recenterVerdict(outSince.get(key), now, hist, awayIsTickDown, minOut, STABLE_DRIFT_PCT, window);
+  let verdict = recenterVerdict(outSince.get(key), now, hist, awayIsTickDown, minOut, STABLE_DRIFT_PCT, window);
+  if (verdict.act && !belowBand) {
+    // Above the band the re-arm is a BUY at spot. 12 quiet minutes after a
+    // +30% hour is where the reversal starts; wait until the hour is calm.
+    const sv = spikeVerdict(hist, now, tokenIsC0);
+    if (sv.spiked) verdict = { act: false, reason: sv.reason };
+  }
   if (!verdict.act) {
     // The break exit: below the band, past the break window, and the tape
     // STILL has not earned a re-center. Exits ignore the portfolio
@@ -1101,7 +1158,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, seat >= $${AUTO_ENTRY_MIN_FEE_USD_H}/h, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, seat >= $${AUTO_ENTRY_MIN_FEE_USD_H}/h, yield/move >= ${AUTO_ENTRY_MIN_YIELD_TO_MOVE}, no bid after a +${SPIKE_PCT}% hour, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }

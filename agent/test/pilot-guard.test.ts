@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, bidShareOfPool, paybackFeePerHour, recenterPaysBack, idleBidVerdict, gasRefillVerdict, type AutoEntryCandidate } from "../src/pilotGuard.js";
-import { flowUsdPerHour } from "../src/dumpWatch.js";
+import { recenterVerdict, floorBreached, effectiveFloorUsd, outOfRangeManaged, collectDue, inferredDepositUsd, autoEntryVerdict, bidShareOfPool, paybackFeePerHour, recenterPaysBack, idleBidVerdict, gasRefillVerdict, spikeVerdict, type AutoEntryCandidate } from "../src/pilotGuard.js";
+import { flowUsdPerHour, moveStats } from "../src/dumpWatch.js";
 import { bidBelowBounds } from "../src/venues/lpPositions.js";
 import { skimAmountUsd } from "../src/treasurySkim.js";
 
@@ -386,4 +386,51 @@ test("auto-entry: the fee-rate bar keeps a deep pool from taking a slot our seat
   assert.equal(ok.act && ok.symbol, "MICRODUCK");
   const off = autoEntryVerdict({ ...baseArgs, minFeeUsdPerHour: 0, candidates: [pons] });
   assert.equal(off.act, true, "a zero bar disables the check");
+});
+
+test("volatility term: a venue must earn a fraction of what it moves", () => {
+  const withBars = { ...baseArgs, minFeeUsdPerHour: 6, minYieldToMove: 0.25, maxSpikePct: 10 };
+  // MICRODUCK now: $6/h on $700 = 0.86%/h earned vs 6%/h moved -> 0.14, refused
+  const duckNow = cand({ symbol: "MICRODUCK", flowUsdPerHour: 250_000, feeUsdPerHour: 6, sharePct: 0.45, hourlyMovePct: 6, last60mPct: -2 });
+  const v1 = autoEntryVerdict({ ...withBars, candidates: [duckNow] });
+  assert.equal(v1.act, false);
+  assert.match(v1.act ? "" : v1.reason, /earns 0.86%\/h vs moves 6.0%\/h/);
+  // MICRODUCK two days ago: $60/h on $700 = 8.6%/h vs 10%/h moved -> 0.86, opens
+  const duckThen = cand({ symbol: "MICRODUCK", flowUsdPerHour: 600_000, feeUsdPerHour: 60, sharePct: 2.3, hourlyMovePct: 10, last60mPct: 3 });
+  assert.equal(autoEntryVerdict({ ...withBars, candidates: [duckThen] }).act, true);
+  // a spike in the last hour refuses even a rich venue
+  const spiked = cand({ symbol: "MICRODUCK", flowUsdPerHour: 600_000, feeUsdPerHour: 60, sharePct: 2.3, hourlyMovePct: 10, last60mPct: 18 });
+  const v3 = autoEntryVerdict({ ...withBars, candidates: [spiked] });
+  assert.equal(v3.act, false);
+  assert.match(v3.act ? "" : v3.reason, /up 18.0% in the last hour/);
+  // no move reading cannot clear the bar
+  const blind = cand({ symbol: "AI", flowUsdPerHour: 200_000, feeUsdPerHour: 8, sharePct: 0.5 });
+  assert.match((() => { const v = autoEntryVerdict({ ...withBars, candidates: [blind] }); return v.act ? "" : v.reason; })(), /no move reading/);
+  // bars off: the old behaviour
+  assert.equal(autoEntryVerdict({ ...withBars, minYieldToMove: 0, maxSpikePct: 0, candidates: [duckNow] }).act, true);
+});
+
+test("spikeVerdict: no re-arm while the price is up more than the bar over the trailing hour", () => {
+  const now = 7_000_000_000;
+  // token is currency0: price rises with the tick; +1,800 ticks ~ +18%
+  const up = [{ t: now - 55 * 60_000, tick: 300_000 }, { t: now - 30 * 60_000, tick: 301_000 }, { t: now, tick: 301_800 }];
+  const s = spikeVerdict(up, now, true, 10, 60 * 60_000);
+  assert.equal(s.spiked, true);
+  assert.match(s.reason, /up 18.0%/);
+  assert.equal(spikeVerdict(up, now, false, 10, 60 * 60_000).spiked, false, "for a currency1 token the same ticks are a fall");
+  assert.equal(spikeVerdict(up, now, true, 25, 60 * 60_000).spiked, false, "under the bar");
+  assert.equal(spikeVerdict([{ t: now, tick: 5 }], now, true, 10, 60 * 60_000).spiked, false, "one sample: unreadable, no spike");
+  assert.equal(spikeVerdict(up, now, true, 0, 60 * 60_000).spiked, false, "rule off");
+});
+
+test("moveStats: median absolute hourly move and the trailing-hour move from price samples", () => {
+  const now = 8_000_000_000;
+  const samples: Array<{ ts: number; px: number; sellSharePct: number }> = [];
+  // six hours, each open->close move alternating +8%, -4%, +8%, -4%, +8%, -4%, four samples per hour
+  const moves = [8, -4, 8, -4, 8, -4];
+  for (let k = 6; k >= 1; k--) { const open = 1; const close = open * (1 + moves[6 - k] / 100); for (let j = 0; j < 4; j++) samples.push({ ts: now - k * 3_600_000 + j * 15 * 60_000, px: open + ((close - open) * j) / 3, sellSharePct: 50 }); }
+  const m = moveStats(samples, now, 6);
+  assert.ok(Math.abs(m.medianAbsHourlyPct - 6) < 0.01, `median of 8,4,8,4,8,4 is 6: ${m.medianAbsHourlyPct}`);
+  assert.ok(Math.abs(m.last60mPct - -4) < 0.01, `last hour fell 4%: ${m.last60mPct}`);
+  assert.ok(Number.isNaN(moveStats(samples.slice(-3), now, 6).medianAbsHourlyPct), "one usable bucket: no median");
 });

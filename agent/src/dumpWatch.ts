@@ -219,6 +219,30 @@ export function flowUsdPerHour(samples: readonly BleedSample[], nowMs: number, w
   return h1 * (3600 / windowSec);
 }
 
+/** PURE: how much a venue moves. medianAbsHourlyPct is the median absolute
+ *  open-to-close move over the last `hours` full hour buckets (a bucket needs
+ *  3+ samples; NaN under 2 usable buckets). last60mPct is the signed move over
+ *  the trailing 60 minutes (NaN under 2 samples). Prices are the sample px. */
+export function moveStats(samples: readonly BleedSample[], nowMs: number, hours = 6): { medianAbsHourlyPct: number; last60mPct: number } {
+  const moves: number[] = [];
+  for (let k = 1; k <= hours; k++) {
+    const b = samples.filter((s) => s.px > 0 && s.ts >= nowMs - k * 3_600_000 && s.ts < nowMs - (k - 1) * 3_600_000);
+    if (b.length < 3) continue;
+    moves.push(Math.abs(b[b.length - 1].px / b[0].px - 1) * 100);
+  }
+  const sorted = [...moves].sort((a, b) => a - b);
+  const medianAbsHourlyPct = sorted.length >= 2 ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2) : NaN;
+  const hour = samples.filter((s) => s.px > 0 && s.ts >= nowMs - 3_600_000);
+  const last60mPct = hour.length >= 2 ? (hour[hour.length - 1].px / hour[0].px - 1) * 100 : NaN;
+  return { medianAbsHourlyPct, last60mPct };
+}
+
+/** The venue's move statistics for the pilot, from the live series. */
+export function venueMoveStats(symbol: string, nowMs = Date.now()): { medianAbsHourlyPct: number; last60mPct: number } {
+  loadBleedSeries();
+  return moveStats(bleedSeries.get(symbol.toUpperCase()) ?? [], nowMs);
+}
+
 /** The venue's last-hour flow (USD/hour) for the pilot's auto-entry, from the live series. */
 export function venueFlowUsdPerHour(symbol: string, nowMs = Date.now()): number {
   loadBleedSeries();
