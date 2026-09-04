@@ -166,16 +166,43 @@ export function registerQualifiedPools(list: Array<{ symbol: string; token: Addr
   }
 }
 
-/** Resolve a symbol to its pool entry: hand-verified seed first, then the qualified set. */
+/** Launch-lane venues pushed by the launch watcher (see launchLane.ts): USDG
+ *  quote, hooks=0, registered at push time and dropped at expiry. Kept apart
+ *  from the qualifier's set, which registerQualifiedPools clears wholesale. */
+const launchPools = new Map<string, PoolEntry>();
+export function registerLaunchPool(p: { symbol: string; token: Address; fee: number; tickSpacing: number }): void {
+  if (POOLS[p.symbol]) return; // the seed outranks a push
+  launchPools.set(p.symbol, { token: p.token, quote: "USDG", fee: p.fee, tickSpacing: p.tickSpacing });
+}
+export function unregisterLaunchPool(symbol: string): void {
+  launchPools.delete(symbol);
+}
+export function launchPoolSymbols(): string[] {
+  return [...launchPools.keys()];
+}
+/** The symbol the desk knows a token by, across all three maps. */
+export function symbolForToken(addr: string): string | undefined {
+  const a = addr.toLowerCase();
+  for (const [s, p] of Object.entries(POOLS)) if (p.token.toLowerCase() === a) return s;
+  for (const [s, p] of dynamicPools) if (p.token.toLowerCase() === a) return s;
+  for (const [s, p] of launchPools) if (p.token.toLowerCase() === a) return s;
+  return undefined;
+}
+/** The hooks-free USDG pool id the desk would mint into for a token/fee/tickSpacing. */
+export function poolIdForUsdgEntry(token: Address, fee: number, tickSpacing: number): Hex {
+  return poolId(sortedPoolKey(token, USDG, fee, tickSpacing));
+}
+
+/** Resolve a symbol to its pool entry: hand-verified seed first, then the qualified set, then the launch lane. */
 function poolEntryFor(symbol: string): PoolEntry | undefined {
-  return POOLS[symbol] ?? dynamicPools.get(symbol);
+  return POOLS[symbol] ?? dynamicPools.get(symbol) ?? launchPools.get(symbol);
 }
 
 /** The static hand-verified seed. Fixed membership; samplers that pay per-symbol costs (basis/Yahoo) stay on this. */
 export const TRADABLE_SYMBOLS = Object.keys(POOLS);
 /** The live tradable set: seed plus currently-qualified pools. Grows and shrinks with qualification. */
 export function tradableSymbols(): string[] {
-  return [...TRADABLE_SYMBOLS, ...dynamicPools.keys()];
+  return [...TRADABLE_SYMBOLS, ...dynamicPools.keys(), ...launchPools.keys()];
 }
 export function isTradable(symbol: string): boolean {
   return !!poolEntryFor(symbol);

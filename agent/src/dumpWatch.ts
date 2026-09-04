@@ -28,6 +28,7 @@ import { parseAbiItem, type Hex } from "viem";
 import { getScanClient } from "./venues/signer.js";
 import { usdgPoolIdFor, tokenIsCurrency0 } from "./venues/stockPools.js";
 import { openPositionsOnChain, ENGINE_SYMBOLS } from "./venues/lpPositions.js";
+import { launchVenueSymbols } from "./launchLane.js";
 import { appendLedger } from "./ledger.js";
 import { registerLoop, beat } from "./liveness.js";
 import { dataPath } from "./dataDir.js";
@@ -600,6 +601,8 @@ async function tick(): Promise<void> {
       // and any future entry decision all want history that only accumulates
       // while someone is looking. AI added 2026-08-28 on the operator's call.
       ...(process.env.MERIDIAN_DUMP_WATCH_EXTRA ?? "AI").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+      // Launch-lane venues pushed by the watcher: the tape starts the moment they land.
+      ...launchVenueSymbols(),
     ])].filter((s) => usdgPoolIdFor(s));
     for (const s of symbols) {
       try {

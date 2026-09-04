@@ -23,6 +23,7 @@ import { parseAbiItem } from "viem";
 import { realSellStockForUsdg, realSwapUsdgToEth, tokenAddressFor, poolFeePct, tokenIsCurrency0, USDG } from "./venues/stockPools.js";
 import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
+import { LAUNCH_LANE, LAUNCH_SEAT_USD, LAUNCH_MAX_SEATS, LAUNCH_MIN_TIER_PCT, LAUNCH_MIN_HOUR, LAUNCH_MIN_FLOW_USD_H, LAUNCH_DEPTH_MIN_USD, LAUNCH_DEPTH_MAX_USD, activeLaunchVenues, launchVenueSymbols, expireLaunchVenues, pushedStatsFor } from "./launchLane.js";
 import { getAgentSigner } from "./venues/signer.js";
 import { registerLoop, beat } from "./liveness.js";
 import { withHouseWalletLock, operatorWaiting } from "./houseWallet.js";
@@ -102,6 +103,10 @@ const AUTO_ENTRY_COOLDOWN_MS = Number(process.env.MERIDIAN_PILOT_AUTO_COOLDOWN_M
 const AUTO_ENTRY_PER_DAY = Number(process.env.MERIDIAN_PILOT_AUTO_PER_DAY ?? 6);
 const AUTO_ENTRY_DENY = new Set((process.env.MERIDIAN_MEME_VENUE_DENYLIST ?? "POOLS").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean));
 const GUARD_EXIT_KINDS = new Set(["floor-exit", "break-exit", "dump-exit", "fade-exit", "recenter-abort", "idle-exit"]);
+/** The venues the pilot manages: the hands-off set plus any live launch-lane venue. */
+function pilotSymbols(): Set<string> {
+  return new Set([...HANDS_OFF_SYMBOLS, ...(LAUNCH_LANE ? launchVenueSymbols() : [])]);
+}
 // THE IDLE-BID EXIT (2026-09-03, operator: "merd should be managing the whole
 // engine"). A bid-only seat on a venue that only rises never fills: the pilot
 // re-arms it every settle and pays a little churn each time (PONS, four
@@ -263,6 +268,14 @@ export interface AutoEntryCandidate {
   hourlyMovePct?: number;
   /** signed move over the trailing 60 minutes, percent (NaN when unreadable) */
   last60mPct?: number;
+  /** which lane sized this candidate; registry when absent */
+  lane?: "registry" | "launch";
+  /** the seat this candidate would open with (lane-sized) */
+  seatUsd?: number;
+  /** launch lane inputs */
+  tierPct?: number;
+  hour?: number;
+  depthUsd?: number;
 }
 
 /** PURE: is the price up more than spikePct over the trailing window? Tick
@@ -329,18 +342,32 @@ export function autoEntryVerdict(args: {
   maxSpikePct?: number;
   cooldownMs: number;
   candidates: readonly AutoEntryCandidate[];
-}): { act: false; reason: string } | { act: true; symbol: string; reason: string } {
+  /** launch lane: open launch seats now and the lane's limits */
+  launch?: { openSeats: number; maxSeats: number; minTierPct: number; minHour: number; minFlowUsdPerHour: number; depthMinUsd: number; depthMaxUsd: number };
+}): { act: false; reason: string } | { act: true; symbol: string; reason: string; seatUsd: number } {
   if (!args.enabled) return { act: false, reason: "auto-entry off (MERIDIAN_PILOT_AUTO_ENTRY)" };
   if (args.stoodDown) return { act: false, reason: "portfolio stand-down: no new exposure" };
   if (args.openSeats >= args.maxSeats) return { act: false, reason: `${args.openSeats} seat(s) open, cap ${args.maxSeats}` };
   if (args.gasEth < args.minGasEth) return { act: false, reason: `gas ${args.gasEth.toFixed(4)} ETH under the ${args.minGasEth} ETH line` };
-  if (args.cashUsd < args.seatUsd + args.reserveUsd) return { act: false, reason: `cash $${args.cashUsd.toFixed(0)} under seat $${args.seatUsd} + reserve $${args.reserveUsd}` };
+  const smallestSeat = Math.min(args.seatUsd, ...args.candidates.map((c) => c.seatUsd ?? args.seatUsd));
+  if (args.cashUsd < smallestSeat + args.reserveUsd) return { act: false, reason: `cash $${args.cashUsd.toFixed(0)} under seat $${smallestSeat} + reserve $${args.reserveUsd}` };
   if (!args.opsAvailable) return { act: false, reason: "daily wallet-ops budget exhausted" };
   if (args.entriesToday >= args.perDay) return { act: false, reason: `${args.entriesToday} auto entries in 24h, cap ${args.perDay}` };
   const why: string[] = [];
   let best: AutoEntryCandidate | undefined;
   for (const c of args.candidates) {
     if (c.hasSeat) { why.push(`${c.symbol}: seat open`); continue; }
+    if (c.lane === "launch") {
+      const L = args.launch;
+      if (!L) { why.push(`${c.symbol}: launch lane off`); continue; }
+      if (L.openSeats >= L.maxSeats) { why.push(`${c.symbol}: ${L.openSeats} launch seat(s) open, lane cap ${L.maxSeats}`); continue; }
+      if ((c.tierPct ?? 0) < L.minTierPct) { why.push(`${c.symbol}: tier ${(c.tierPct ?? 0).toFixed(2)}% under ${L.minTierPct}%`); continue; }
+      if ((c.hour ?? 0) < L.minHour) { why.push(`${c.symbol}: hour ${c.hour ?? 0}, lane starts at hour ${L.minHour}`); continue; }
+      if (!Number.isNaN(c.flowUsdPerHour) && c.flowUsdPerHour < L.minFlowUsdPerHour) { why.push(`${c.symbol}: flow $${Math.round(c.flowUsdPerHour / 1000)}k/h under the lane's $${Math.round(L.minFlowUsdPerHour / 1000)}k/h`); continue; }
+      if (c.depthUsd == null || !Number.isFinite(c.depthUsd)) { why.push(`${c.symbol}: depth unknown`); continue; }
+      if (c.depthUsd < L.depthMinUsd || c.depthUsd > L.depthMaxUsd) { why.push(`${c.symbol}: depth $${Math.round(c.depthUsd / 1000)}k outside $${Math.round(L.depthMinUsd / 1000)}k-$${Math.round(L.depthMaxUsd / 1000)}k`); continue; }
+      if (args.cashUsd < (c.seatUsd ?? args.seatUsd) + args.reserveUsd) { why.push(`${c.symbol}: cash short for a $${c.seatUsd ?? args.seatUsd} seat`); continue; }
+    } else if (args.cashUsd < args.seatUsd + args.reserveUsd) { why.push(`${c.symbol}: cash $${args.cashUsd.toFixed(0)} under seat $${args.seatUsd} + reserve $${args.reserveUsd}`); continue; }
     if (c.denied) { why.push(`${c.symbol}: denylist`); continue; }
     if (c.lockedOut) { why.push(`${c.symbol}: locked out`); continue; }
     if (!c.admitted) { why.push(`${c.symbol}: 7d net $${c.admissionNetUsd.toFixed(0)} under admission`); continue; }
@@ -357,8 +384,9 @@ export function autoEntryVerdict(args: {
     const ytm = args.minYieldToMove ?? 0;
     if (ytm > 0) {
       if (c.feeUsdPerHour == null || !Number.isFinite(c.feeUsdPerHour) || c.hourlyMovePct == null || !Number.isFinite(c.hourlyMovePct)) { why.push(`${c.symbol}: no move reading, cannot judge yield vs volatility`); continue; }
-      const ratio = ((c.feeUsdPerHour / args.seatUsd) * 100) / Math.max(c.hourlyMovePct, 0.5);
-      if (ratio < ytm) { why.push(`${c.symbol}: earns ${((c.feeUsdPerHour / args.seatUsd) * 100).toFixed(2)}%/h vs moves ${c.hourlyMovePct.toFixed(1)}%/h (${ratio.toFixed(2)} < ${ytm})`); continue; }
+      const seatForRatio = c.seatUsd ?? args.seatUsd;
+      const ratio = ((c.feeUsdPerHour / seatForRatio) * 100) / Math.max(c.hourlyMovePct, 0.5);
+      if (ratio < ytm) { why.push(`${c.symbol}: earns ${((c.feeUsdPerHour / seatForRatio) * 100).toFixed(2)}%/h vs moves ${c.hourlyMovePct.toFixed(1)}%/h (${ratio.toFixed(2)} < ${ytm})`); continue; }
     }
     // Rank by what OUR seat would earn (flow x tier x share). A venue whose
     // depth is unknown ranks by flow alone, behind any venue with a real
@@ -367,7 +395,7 @@ export function autoEntryVerdict(args: {
   }
   if (!best) return { act: false, reason: why.length ? why.join("; ") : "no candidate venues" };
   const rate = best.feeUsdPerHour != null && Number.isFinite(best.feeUsdPerHour) ? `, ~$${best.feeUsdPerHour.toFixed(0)}/h for our seat at ${(best.sharePct ?? 0).toFixed(2)}% of the pool` : ", depth unknown";
-  return { act: true, symbol: best.symbol, reason: `${best.symbol} carries ~$${Math.round(best.flowUsdPerHour / 1000)}k/h${rate}, admitted at $${best.admissionNetUsd.toFixed(0)} 7d` };
+  return { act: true, symbol: best.symbol, seatUsd: best.seatUsd ?? args.seatUsd, reason: `${best.lane === "launch" ? "launch lane: " : ""}${best.symbol} carries ~$${Math.round(best.flowUsdPerHour / 1000)}k/h${rate}, admitted at $${best.admissionNetUsd.toFixed(0)} 7d` };
 }
 
 /** PURE: has a venue's bid sat unfilled long enough to give the slot back? */
@@ -504,7 +532,42 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
   }
   const rows = pilotRowsSince(now - 24 * 3_600_000);
   const entriesToday = rows.filter((r) => r.kind === "auto-entry").length;
-  const candidates: AutoEntryCandidate[] = [...HANDS_OFF_SYMBOLS].map((symbol) => {
+  const launchNow = LAUNCH_LANE ? activeLaunchVenues(now) : [];
+  const launchSet = new Set(launchNow.map((v) => v.symbol));
+  const openLaunchSeats = positions.filter((p) => launchSet.has(p.symbol)).length;
+  const launchCandidates: AutoEntryCandidate[] = launchNow.map((v) => {
+    const adm = venueEarnsAdmission("usdg", v.symbol, 0);
+    const exits = rows.filter((r) => r.symbol === v.symbol && GUARD_EXIT_KINDS.has(r.kind));
+    const pushed = pushedStatsFor(v, now);
+    const ownFlow = venueFlowUsdPerHour(v.symbol, now);
+    const flow = !Number.isNaN(ownFlow) ? ownFlow : pushed ? pushed.flowUsdPerHour : NaN;
+    const ownDepth = venueDepth(v.symbol);
+    const depth = ownDepth ?? (pushed ? { activeL: pushed.activeL, tick: pushed.tick } : undefined);
+    const sharePct = depth ? bidShareOfPool(LAUNCH_SEAT_USD, depth.activeL, depth.tick, tokenIsCurrency0(v.symbol)) : undefined;
+    const feeUsdPerHour = sharePct != null && !Number.isNaN(flow) ? flow * (v.fee / 1e6) * (sharePct / 100) : undefined;
+    const own = venueMoveStats(v.symbol, now);
+    const mv = !Number.isNaN(own.medianAbsHourlyPct) ? own : pushed ? { medianAbsHourlyPct: pushed.medianAbsHourlyPct, last60mPct: pushed.last60mPct } : own;
+    return {
+      symbol: v.symbol,
+      lane: "launch" as const,
+      seatUsd: LAUNCH_SEAT_USD,
+      tierPct: v.fee / 1e4,
+      hour: v.stats.hour + Math.floor((now - v.stats.ts) / 3_600_000),
+      depthUsd: sharePct != null && sharePct > 0 ? LAUNCH_SEAT_USD / (sharePct / 100) - LAUNCH_SEAT_USD : undefined,
+      flowUsdPerHour: flow,
+      feeUsdPerHour,
+      sharePct,
+      hourlyMovePct: mv.medianAbsHourlyPct,
+      last60mPct: mv.last60mPct,
+      admitted: adm.ok,
+      admissionNetUsd: adm.netUsd,
+      hasSeat: positions.some((p) => p.symbol === v.symbol),
+      lockedOut: dumpMintRefusal(v.symbol, now) != null || fadeMintRefusal(v.symbol, now) != null,
+      denied: AUTO_ENTRY_DENY.has(v.symbol),
+      lastExitMs: exits.length ? Math.max(...exits.map((r) => r.ts)) : undefined,
+    };
+  });
+  const candidates: AutoEntryCandidate[] = [...launchCandidates, ...[...HANDS_OFF_SYMBOLS].map((symbol) => {
     const adm = venueEarnsAdmission("usdg", symbol, 0);
     const exits = rows.filter((r) => r.symbol === symbol && GUARD_EXIT_KINDS.has(r.kind));
     const flow = venueFlowUsdPerHour(symbol, now);
@@ -526,7 +589,7 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
       denied: AUTO_ENTRY_DENY.has(symbol),
       lastExitMs: exits.length ? Math.max(...exits.map((r) => r.ts)) : undefined,
     };
-  });
+  })];
   const v = autoEntryVerdict({
     enabled: AUTO_ENTRY,
     now,
@@ -547,6 +610,7 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
     maxSpikePct: SPIKE_PCT,
     cooldownMs: AUTO_ENTRY_COOLDOWN_MS,
     candidates,
+    launch: LAUNCH_LANE ? { openSeats: openLaunchSeats, maxSeats: LAUNCH_MAX_SEATS, minTierPct: LAUNCH_MIN_TIER_PCT, minHour: LAUNCH_MIN_HOUR, minFlowUsdPerHour: LAUNCH_MIN_FLOW_USD_H, depthMinUsd: LAUNCH_DEPTH_MIN_USD, depthMaxUsd: LAUNCH_DEPTH_MAX_USD } : undefined,
   });
   if (!v.act) {
     if (v.reason !== lastAutoEntryReason) console.error(`[pilotGuard] auto-entry holding: ${v.reason}`);
@@ -554,10 +618,11 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
     return;
   }
   lastAutoEntryReason = "";
-  console.error(`[pilotGuard] AUTO-ENTRY ${v.symbol}: ${v.reason}; opening a $${AUTO_ENTRY_USD} BID at width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}), top edge at spot`);
+  const seatUsd = v.seatUsd;
+  console.error(`[pilotGuard] AUTO-ENTRY ${v.symbol}: ${v.reason}; opening a $${seatUsd} BID at width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}), top edge at spot`);
   try {
-    const pos = await openInPool(v.symbol, REBAND_WIDTH_PCT, AUTO_ENTRY_USD, { bidOnly: true });
-    appendLedger("pilot-guard.jsonl", { ts: Date.now(), kind: "auto-entry", tokenId: pos.tokenId, symbol: v.symbol, valueUsd: AUTO_ENTRY_USD, reason: v.reason });
+    const pos = await openInPool(v.symbol, REBAND_WIDTH_PCT, seatUsd, { bidOnly: true });
+    appendLedger("pilot-guard.jsonl", { ts: Date.now(), kind: "auto-entry", tokenId: pos.tokenId, symbol: v.symbol, valueUsd: seatUsd, reason: v.reason });
     console.error(`[pilotGuard] ✓ auto-entry opened #${pos.tokenId} in ${v.symbol}`);
   } catch (err) {
     console.error(`[pilotGuard] auto-entry into ${v.symbol} failed: ${err instanceof Error ? err.message.slice(0, 140) : err}`);
@@ -820,7 +885,12 @@ async function runTick(): Promise<void> {
   // stranded token is unhedged exposure whether or not any position is open.
   // 6,329 PONS rode the 08-18 dump because the failed sale was only a log line.
   await retryPendingSells();
-  const positions = (await lpPositionsWithValue()).filter((p) => HANDS_OFF_SYMBOLS.has(p.symbol));
+  const managed = pilotSymbols();
+  const positions = (await lpPositionsWithValue()).filter((p) => managed.has(p.symbol));
+  if (LAUNCH_LANE) {
+    const gone = expireLaunchVenues(new Set(positions.map((p) => p.symbol)));
+    if (gone.length) console.error(`[launchLane] expired ${gone.join(", ")} (no seat, past the TTL)`);
+  }
   // The dump bid places when a venue is FLAT and locked out, so it must run
   // before (and regardless of) the empty-board early return below.
   await maybePlaceDumpBids(positions);
@@ -1158,7 +1228,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, seat >= $${AUTO_ENTRY_MIN_FEE_USD_H}/h, yield/move >= ${AUTO_ENTRY_MIN_YIELD_TO_MOVE}, no bid after a +${SPIKE_PCT}% hour, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, seat >= $${AUTO_ENTRY_MIN_FEE_USD_H}/h, yield/move >= ${AUTO_ENTRY_MIN_YIELD_TO_MOVE}, no bid after a +${SPIKE_PCT}% hour, launch lane ${LAUNCH_LANE ? `ON ($${LAUNCH_SEAT_USD} seats, max ${LAUNCH_MAX_SEATS}, tier >= ${LAUNCH_MIN_TIER_PCT}%, hour >= ${LAUNCH_MIN_HOUR}, flow >= $${Math.round(LAUNCH_MIN_FLOW_USD_H / 1000)}k/h, depth $${Math.round(LAUNCH_DEPTH_MIN_USD / 1000)}k-$${Math.round(LAUNCH_DEPTH_MAX_USD / 1000)}k)` : "off"}, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }

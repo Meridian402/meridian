@@ -134,6 +134,37 @@ interface State {
 }
 
 const STATE_PATH = dataPath("launch-watch-state.json");
+// THE PUSH (2026-09-04, the launch lane). A gate-passing side pool at hour
+// LAUNCH_WATCH_PUSH_MIN_HOUR+ with a 3%+ tier and real prior-hour flow goes
+// to the desk's /api/launch-venues with its pool key and these measurements;
+// the desk decides whether to sit (launchLane.ts). Off unless a URL is set.
+const PUSH_URL = (process.env.LAUNCH_WATCH_PUSH_URL ?? "").replace(/\/$/, "");
+const PUSH_TOKEN = process.env.MERIDIAN_MCP_TOKEN ?? "";
+const PUSH_MIN_HOUR = Number(process.env.LAUNCH_WATCH_PUSH_MIN_HOUR ?? 2);
+const PUSH_MIN_TIER_PCT = Number(process.env.LAUNCH_WATCH_PUSH_MIN_TIER_PCT ?? 3);
+const PUSH_MIN_VOL_USD = Number(process.env.LAUNCH_WATCH_PUSH_MIN_VOL_USD ?? 300_000);
+async function pushLaunchVenue(p: TrackedPool, launch: { symbol?: string; source?: string } | undefined, gateOk: boolean, hour: number, v: { volUsd: number; movePct: number; senders: number; poolL: number | string; px: number }): Promise<void> {
+  if (!PUSH_URL || !PUSH_TOKEN) return;
+  if (p.kind !== "side" || !p.usdgQuoted || !gateOk) return;
+  if (hour < PUSH_MIN_HOUR || p.fee / 1e4 < PUSH_MIN_TIER_PCT || v.volUsd < PUSH_MIN_VOL_USD) return;
+  const last = p.swaps[p.swaps.length - 1];
+  if (!last) return;
+  const hourlyMovePcts: number[] = [];
+  for (let k = 1; k <= hour; k++) {
+    const b = p.swaps.filter((s) => s.t >= p.swaps[0].t + (k - 1) * 3600 && s.t < p.swaps[0].t + k * 3600);
+    if (b.length >= 2) hourlyMovePcts.push((b[b.length - 1].px / b[0].px - 1) * 100);
+  }
+  let symbol = launch?.symbol ?? "";
+  if (!symbol) { try { symbol = String(await client.readContract({ address: p.token as `0x${string}`, abi: [parseAbiItem("function symbol() view returns (string)")], functionName: "symbol" })); } catch { /* the desk will name it */ } }
+  const body = { symbol, token: p.token, fee: p.fee, tickSpacing: p.tickSpacing, poolId: p.id, stats: { ts: Date.now(), hour, flowUsdH: v.volUsd, movePct: v.movePct, hourlyMovePcts, senders: v.senders, poolL: BigInt(Math.round(Number(v.poolL))).toString(), sqrtP: last.sqrtP, gate: gateOk, source: launch?.source ?? null } };
+  try {
+    const r = await fetch(`${PUSH_URL}/api/launch-venues`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${PUSH_TOKEN}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
+    const j = (await r.json().catch(() => ({}))) as { ok?: boolean; symbol?: string; error?: string };
+    log(`PUSH ${symbol || p.token.slice(0, 10)} h${hour} tier ${p.fee / 1e4}% -> desk: ${r.status} ${j.ok ? `registered as ${j.symbol}` : j.error ?? ""}`);
+  } catch (e) {
+    log(`PUSH ${symbol || p.token.slice(0, 10)} failed: ${String((e as Error).message).slice(0, 100)}`);
+  }
+}
 const LEDGER = "launch-watch.jsonl";
 
 function loadState(): State {
@@ -333,6 +364,7 @@ async function evaluate(state: State): Promise<void> {
         if (!v.ok) continue;
         const c: Candidate = { hour: h, ts: at, volUsd: v.volUsd, movePct: v.movePct, senders: v.senders, poolL: v.poolL, px: v.px };
         (p.candidates ??= []).push(c);
+        void pushLaunchVenue(p, launch, gateOk, h, v);
         appendLedger(LEDGER, { ts: Date.now(), kind: "candidate", id: p.id, token: p.token, symbol: launch?.symbol ?? "", tier: p.fee / 1e4, gateOk, launchSource: launch?.source ?? null, hour: h, atTs: at, volUsd: v.volUsd, movePct: v.movePct, senders: v.senders, swaps: v.swaps, poolL: String(v.poolL), px: v.px });
         log(`CANDIDATE ${launch?.symbol || p.token.slice(0, 10)} tier ${p.fee / 1e4}% at h${h} (${new Date(at * 1000).toISOString().slice(11, 16)}Z): ${v.reason}; gate ${gateOk ? "PASS" : launch ? "FAIL" : "none"}, pool ${p.id.slice(0, 10)}`);
       }

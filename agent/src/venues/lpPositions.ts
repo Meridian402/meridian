@@ -16,6 +16,7 @@ import {
   type Hex,
 } from "viem";
 import { getPublicClient, getWalletClient, getAgentSigner, getAgentAddress } from "./signer.js";
+import { symbolForToken } from "./stockPools.js";
 import { guardWalletOp, recordWalletOp } from "../risk.js";
 import { INDEX_CONTRACTS } from "./indexContracts.js";
 import { cachedQualified } from "../signals/poolQualify.js";
@@ -859,7 +860,7 @@ export async function discoverOwnedPositions(wallet: Address): Promise<ChainPosi
       const stock = [poolKey.currency0, poolKey.currency1].find((c) => c.toLowerCase() !== USDG.toLowerCase()) ?? poolKey.currency1;
       return {
         tokenId: tokenId.toString(),
-        symbol: SYMBOL_BY_TOKEN[stock.toLowerCase()] ?? stock,
+        symbol: SYMBOL_BY_TOKEN[stock.toLowerCase()] ?? symbolForToken(stock) ?? stock,
         tickLower: signed24(info >> 8n),
         tickUpper: signed24(info >> 32n),
         liquidity: liq as bigint,
@@ -1108,7 +1109,7 @@ export async function positionOnChain(tokenId: string): Promise<{ currency0: Add
     currency0: poolKey.currency0,
     currency1: poolKey.currency1,
     liquidity: liq as bigint,
-    symbol: SYMBOL_BY_TOKEN[stock.toLowerCase()] ?? stock,
+    symbol: SYMBOL_BY_TOKEN[stock.toLowerCase()] ?? symbolForToken(stock) ?? stock,
   };
 }
 

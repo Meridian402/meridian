@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import { LAUNCH_LANE, validateLaunchPush, upsertLaunchVenue, activeLaunchVenues, launchVenueSymbols, poolIdForUsdgEntry } from "./launchLane.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -2444,6 +2445,37 @@ app.post("/api/open-deploy", async (req: Request, res: Response) => {
 // Operator-only: open a market-making position in a SPECIFIC tradable pool
 // (e.g. a newly-discovered one like SPCX). Deploys the wallet's available USDG;
 // run on a flat wallet (close the current position first). Bearer-required.
+// THE LAUNCH LANE INTAKE (2026-09-04). The launch watcher on the operator's
+// machine pushes a gate-passing side pool here with its pool key and its own
+// measurements; the desk verifies the id is the hooks-free USDG pool it would
+// mint into, registers the venue, and the pilot takes it from there under the
+// lane's limits (launchLane.ts). Bearer-gated like every other money surface.
+app.post("/api/launch-venues", (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  if (!LAUNCH_LANE) {
+    res.status(409).json({ ok: false, error: "launch lane is off (MERIDIAN_LAUNCH_LANE)" });
+    return;
+  }
+  const v = validateLaunchPush(req.body, poolIdForUsdgEntry);
+  if (!v.ok) {
+    res.status(400).json({ ok: false, error: v.error });
+    return;
+  }
+  const symbol = upsertLaunchVenue(v.venue);
+  console.error(`[launchLane] venue ${symbol} (${v.venue.token.slice(0, 10)}, tier ${(v.venue.fee / 1e4).toFixed(2)}%) pushed at h${v.venue.stats.hour}: ~$${Math.round(v.venue.stats.flowUsdH).toLocaleString()}/h, ${v.venue.stats.senders} senders`);
+  res.json({ ok: true, symbol, active: launchVenueSymbols() });
+});
+app.get("/api/launch-venues", (req: Request, res: Response) => {
+  if (!authorized(req) || !config.mcpToken) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  res.json({ ok: true, lane: LAUNCH_LANE, venues: activeLaunchVenues() });
+});
+
 app.post("/api/lp-open", async (req: Request, res: Response) => {
   if (!authorized(req) || !config.mcpToken) {
     res.status(401).json({ error: "unauthorized" });
