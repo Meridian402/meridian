@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import { RECORD_CLOSED, RECORD_CLOSED_AT, recordStatus } from "./recordClosed.js";
 import { LAUNCH_LANE, validateLaunchPush, upsertLaunchVenue, activeLaunchVenues, launchVenueSymbols, poolIdForUsdgEntry } from "./launchLane.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
@@ -678,6 +679,12 @@ app.get("/api/learn/recall", (req: Request, res: Response) => {
     hour: new Date().getUTCHours(),
   };
   res.json({ query: q, memories: recall(q, 4) });
+});
+
+// THE CLOSED RECORD (2026-09-07): closed or not, and the final figures when closed.
+app.get("/api/record-status", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json(recordStatus());
 });
 
 app.get("/api/earnings-history", async (_req: Request, res: Response) => {
@@ -2933,7 +2940,9 @@ startAgentLoop(market, new ResearchStrategy(), decisionLog, config.agentThinkInt
 //
 // Explicit opt-in, so the default of a newly deployed instance is to serve the
 // API and touch nothing.
-if (process.env.MERIDIAN_LP_ENGINE === "on") {
+if (RECORD_CLOSED) {
+  console.log(`[boot] RECORD CLOSED at ${RECORD_CLOSED_AT}: the desk is wound down; no trading loop starts, the API serves the final figures (MERIDIAN_RECORD_CLOSED_AT)`);
+} else if (process.env.MERIDIAN_LP_ENGINE === "on") {
   console.log("[boot] LP engine ON: autonomous liquidity management is live");
   startLpGuard();
   startLpAllocator();
@@ -2974,8 +2983,10 @@ startGraduationWatch();
   const pons = ponsDeployment();
   console.log(`[boot] launchpad: PONS on chain ${pons.chainId} (${pons.factory})`);
 }
-startEquitySnapshotter();
-startBookSnapshotter();
+if (!RECORD_CLOSED) {
+  startEquitySnapshotter();
+  startBookSnapshotter();
+}
 startSwarmLoop(); // agent-to-agent exchanges on a cadence; logs whether it is on or off
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();
