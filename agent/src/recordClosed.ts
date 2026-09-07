@@ -11,6 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { CLOSED_RECORD } from "./recordClosedFigures.js";
 
 export interface ClosedRecord {
   closedAt: string;
@@ -33,16 +34,18 @@ export const RECORD_CLOSED_AT: string | null = parseClosedAt(process.env.MERIDIA
 export const RECORD_CLOSED = RECORD_CLOSED_AT != null;
 
 let cached: ClosedRecord | null | undefined;
-/** The final figures shipped with the code (agent/record-closed.json). */
+/** The final figures. The JSON at the agent root wins when present (humans and
+ *  tests read it); the embedded copy in recordClosedFigures.ts is what the
+ *  Railway image carries, since the image ships dist/ and node_modules only. */
 export function closedRecord(): ClosedRecord | null {
   if (cached !== undefined) return cached;
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const candidates = [join(here, "..", "record-closed.json"), join(here, "..", "..", "record-closed.json"), join(process.cwd(), "record-closed.json")];
     const p = candidates.find((c) => existsSync(c));
-    cached = p ? (JSON.parse(readFileSync(p, "utf8")) as ClosedRecord) : null;
+    cached = p ? (JSON.parse(readFileSync(p, "utf8")) as ClosedRecord) : CLOSED_RECORD;
   } catch {
-    cached = null;
+    cached = CLOSED_RECORD;
   }
   return cached;
 }
