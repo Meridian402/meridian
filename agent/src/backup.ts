@@ -121,6 +121,18 @@ const FILES = [
   // USDG-quoted pool it has discovered. Losing it forces a slow from-genesis
   // re-scan; read-only, but the rebuild is expensive, so it is durable.
   "usdg-pool-index.json",
+  // The paper desk's hour ledgers and their cursors (2026-11-16). They are the
+  // only record of what the watched pools did hour by hour, and the paper
+  // replay is computed from nothing else. A cursor restored without its ledger
+  // (or the reverse) would leave a hole, so both travel together.
+  "pool-watch.jsonl",
+  "pool-watch-state.json",
+  "bnb-track.jsonl",
+  "bnb-track-state.json",
+  "base-track.jsonl",
+  "base-track-state.json",
+  "eth-track.jsonl",
+  "eth-track-state.json",
 ];
 
 const lastHash = new Map<string, string>();

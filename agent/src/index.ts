@@ -69,6 +69,8 @@ import { updateUsdgPoolIndex, analyzeUsdgPools } from "./signals/flowScan.js";
 import { startBasisLogger } from "./research/basisLogger.js";
 import { startLighterLogger } from "./research/lighterLogger.js";
 import { startYieldLogger, yieldSummary } from "./research/yieldLogger.js";
+import { startPaperDesk, paperDeskSnapshot } from "./signals/paperDesk.js";
+import { redactRpcText } from "./venues/rpcBreaker.js";
 import { opportunitiesSnapshot } from "./signals/opportunities.js";
 import { swarmFeed, swarmTotals, onSwarmRow } from "./swarm/feed.js";
 import { rosterHealth, publicIdFor, publicIdForWallet } from "./swarm/roster.js";
@@ -688,6 +690,19 @@ app.get("/api/learn/recall", (req: Request, res: Response) => {
 app.get("/api/record-status", (_req: Request, res: Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.json(recordStatus());
+});
+
+// THE PAPER DESK (2026-11-16): the hour ledgers on four chains, the cross-chain
+// ranking and the paper replay of the desk's own rules. Read-only, public, and
+// labelled as paper in the payload itself. No wallet, no positions.
+app.get("/api/paper-desk", (_req: Request, res: Response) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "public, max-age=60");
+  try {
+    res.json(paperDeskSnapshot());
+  } catch (err) {
+    res.status(500).json({ paper: true, error: redactRpcText(err, 160) });
+  }
 });
 
 app.get("/api/earnings-history", async (_req: Request, res: Response) => {
@@ -2994,6 +3009,9 @@ startSwarmLoop(); // agent-to-agent exchanges on a cadence; logs whether it is o
 if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();
 if (process.env.MERIDIAN_RUN_YIELD_LOGGER === "1") startYieldLogger();
+// The paper desk's hourly record of the watched pools on four chains. Read-only, and
+// independent of the record being closed: it measures other people's pools, not ours.
+if (process.env.MERIDIAN_RUN_PAPER_DESK === "1") startPaperDesk();
 void logFundingHealthAtBoot(); // says what the wallets can actually pay for, before anything needs them to
 // Say which chain endpoints answer, first thing, and open the breaker on any
 // that reject us before the first real read pays for finding out.

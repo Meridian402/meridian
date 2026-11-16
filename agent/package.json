@@ -15,6 +15,11 @@
     "backtest": "tsx src/backtest/simulate.ts",
     "launch-watch": "tsx --env-file=.env src/launch/watch.ts",
     "launch-watch:report": "tsx src/launch/watch.ts --report",
+    "pool-watch": "./_pool-watch.sh",
+    "pool-watch:report": "tsx src/signals/poolWatch.ts --report",
+    "chain-track": "./_chain-track.sh",
+    "chain-track:rank": "tsx src/signals/chainTrack.ts --rank",
+    "paper-replay": "tsx src/signals/paperReplay.ts",
     "backtest:legacy-momentum": "tsx src/backtest/simulate.legacy-momentum.ts"
   },
   "dependencies": {

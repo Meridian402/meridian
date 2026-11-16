@@ -61,3 +61,7 @@ agent/daily-print-*.png
 agent/daily-print-card.html
 agent/daily-print-state.json
 agent/launch-watch-state.json
+agent/pool-watch-state.json
+agent/bnb-track-state.json
+agent/base-track-state.json
+agent/eth-track-state.json

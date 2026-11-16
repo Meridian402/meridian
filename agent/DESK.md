@@ -380,6 +380,42 @@ restart, the same doctrine as the house-lock ceiling and deliberately above it
 so the lock watchdog fires first when the lock is the cause. Born from the
 31.6-hour dark window of 2026-08-21/22: a live process, a dead desk.
 
+## The paper desk (2026-11-16)
+
+Not the desk. The record above closed on 2026-09-07 and nothing in this section
+reopens it, moves money or holds a key. It is the research the operator asked
+for before any restart: a cross-chain LP market maker that sits in whichever
+pools pay best, under the desk's own rules.
+
+What exists, all read-only:
+
+- `src/signals/poolWatch.ts`: the desk's chain. A short list of pools, one row
+  per pool per completed hour (fees, 30-minute markout, open/high/low/close,
+  depth, a $1,000 seat's share), in `pool-watch.jsonl`.
+- `src/signals/chainTrack.ts`: the same record on BNB Chain, Base and Ethereum
+  (`<chain>-track.jsonl`), from public endpoints, decoding Uniswap v3,
+  PancakeSwap v3 and Aerodrome Slipstream. `<chain> --scan` ranks a few hundred
+  pools from a public index and is how a pool gets onto a watch list; `--rank`
+  is one table across all four chains. What an outside LP keeps of the fee is
+  read from each pool, never assumed.
+- `src/signals/paperReplay.ts`: the desk's entry and exit rules replayed over
+  those hours as paper seats. The decisions are made by the desk's real
+  functions (`autoEntryVerdict`, `effectiveFloorUsd`, `idleBidVerdict`,
+  `portfolioLimitUsd`), with no lookahead, and inventory is carried and marked,
+  which the watchers' "LP net" does not do.
+- `src/signals/paperDesk.ts`: with `MERIDIAN_RUN_PAPER_DESK=1` the server runs
+  the four hourly collections itself and serves everything at
+  `GET /api/paper-desk`. The site's "Paper desk" tab draws that payload. The
+  payload carries `paper: true` and its own list of limits.
+
+Commands, from `agent/`: `npm run paper-replay`, `npm run chain-track:rank`,
+`npm run pool-watch:report`, `npm run chain-track -- <bnb|base|eth> --scan`.
+
+Limits that must travel with any number quoted from it: hourly granularity (the
+desk ticked every 150 seconds; the dump early-warning exit is not modelled),
+moves between chains treated as free and instant, gas measured only on the
+desk's chain, and a real seat changing the pool it joins.
+
 ## RPC endpoints (2026-11-16)
 
 Reads use a fallback list: `ROBINHOOD_RPC_URL` (the dedicated provider), then
@@ -420,15 +456,22 @@ ledger row, a log line or an API body.
 
 - 2026-11-16, the silent provider outage (found, not felt: the record was
   closed). The dedicated provider had been answering every call with HTTP 403
-  "ROBINHOOD_MAINNET is not enabled for this app" for at least two weeks.
+  "ROBINHOOD_MAINNET is not enabled for this app" since 2026-09-17 10:38 UTC,
+  sixty days (dated afterwards from the Postgres mirror of the basis log: the
+  last priced row is 09-16 23:58, and every row from 09-17 10:38 is an error).
+  The cause was on the provider's side of the fence: the Alchemy app that owns
+  the desk's key had NO networks enabled. Enabling Robinhood mainnet on that
+  app fixed it the same day with no change to the key, the URL or Railway.
   Three things stacked: (1) the RPC library retries a 403 four times with
   backoff on the batched read client, so every read paid about 3.75 s before
   the fallback was tried, and `/api/lp-scan` timed out; (2) the library drops
   the HTTP status when the 403 body is a JSON-RPC error, so the only visible
   symptom was "JSON is not a valid request object" in one logger; (3) the basis
   logger and the launchpad reader built their own single-endpoint clients, so
-  they had no fallback at all, and the basis logger wrote 20,000 error rows,
-  each carrying the provider's keyed URL (rotate that key). Fixed with the
+  they had no fallback at all, and the basis logger wrote 86,913 error rows
+  into the Postgres mirror (20,230 of them still in the capped file on the
+  volume), nearly all carrying the provider's keyed URL. The operator chose to
+  keep the key, so those rows are the exposure to clean up. Fixed with the
   breaker above, a boot probe that names each endpoint's state, both stragglers
   moved onto the shared client, and redaction of RPC error text. Lesson: a
   fallback that works hides the failure it is covering for; the primary's
