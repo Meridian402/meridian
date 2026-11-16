@@ -1,7 +1,8 @@
-import { createPublicClient, createWalletClient, http, fallback, type Address } from "viem";
+import { createPublicClient, createWalletClient, http, fallback, type Address, type Transport } from "viem";
 import { privateKeyToAccount, nonceManager } from "viem/accounts";
 import { config } from "../config.js";
 import { ENGINE_SIGNER_WALLET } from "../merd/wallets.js";
+import { LegBreaker, guardLeg, hostOf, redactRpcText, type LegHealth } from "./rpcBreaker.js";
 
 /** Robinhood Chain — an Arbitrum L2 (chain id 4663), not in viem's built-in list. */
 export const robinhoodChain = {
@@ -126,6 +127,129 @@ export function getAgentAddress(): `0x${string}` | null {
 //   - http batch: multiple JSON-RPC requests in a ~100ms window ship as one
 //     HTTP POST
 // This is transparent to callers and is the main lever against rate-limits.
+const PUBLIC_RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
+function readRpcUrls(): string[] {
+  return config.robinhoodReadRpcUrls.length ? config.robinhoodReadRpcUrls : [PUBLIC_RPC_URL];
+}
+
+// One breaker per endpoint, shared by the read client and the scan client so
+// they agree on whether an endpoint is usable. See rpcBreaker.ts for why: an
+// endpoint that REJECTS access (403) is retried four times by the library on
+// every batched read before the fallback is tried, which is how a revoked
+// provider slowed the whole desk for weeks without a single line saying so.
+const breakers = new Map<string, LegBreaker>();
+function breakerFor(url: string, index: number): LegBreaker {
+  let b = breakers.get(url);
+  if (!b) {
+    b = new LegBreaker({
+      host: hostOf(url),
+      role: index === 0 ? "primary" : "fallback",
+      probe: async () => {
+        const r = await probeUrl(url);
+        lastProbe.set(url, r);
+        return { ok: r.ok, status: r.status };
+      },
+    });
+    breakers.set(url, b);
+  }
+  return b;
+}
+
+/** What a guarded leg must pass to http(): the response hook is the only
+ *  place the HTTP status survives (see rpcBreaker.ts). */
+type LegWatch = { onFetchResponse?: (response: Response) => void };
+
+/** The read legs, in order. Every leg except the LAST is guarded by its
+ *  breaker; the last one (the public endpoint) is never skipped, so there is
+ *  always somewhere to read from. The WRITE path is deliberately not guarded:
+ *  the sequencer endpoint is Cloudflare-fronted and can answer 403 to a
+ *  challenge, and skipping it for minutes would be worse than retrying it. */
+function readLegs(make: (url: string, watch: LegWatch) => Transport): Transport[] {
+  const urls = readRpcUrls();
+  return urls.map((url, i) => {
+    if (i === urls.length - 1) return make(url, {});
+    const breaker = breakerFor(url, i);
+    return guardLeg(make(url, { onFetchResponse: (response) => breaker.observe(response.status) }), breaker);
+  });
+}
+
+interface ProbeResult {
+  ok: boolean;
+  status: number | null;
+  ms: number;
+  at: number;
+  detail: string;
+}
+const lastProbe = new Map<string, ProbeResult>();
+
+/** One retry-free eth_chainId against one endpoint. Never throws. The detail
+ *  is redacted: it can end up in a log line or the /health body. */
+async function probeUrl(url: string): Promise<ProbeResult> {
+  const started = Date.now();
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    const text = await res.text();
+    let chain: number | null = null;
+    let message = "";
+    try {
+      const body = JSON.parse(text) as { result?: string; error?: { message?: string } };
+      if (typeof body.result === "string") chain = Number.parseInt(body.result, 16);
+      message = body.error?.message ?? "";
+    } catch {
+      message = text;
+    }
+    const ok = res.ok && chain === robinhoodChain.id;
+    return {
+      ok,
+      status: res.status,
+      ms: Date.now() - started,
+      at: Date.now(),
+      detail: ok ? `chain ${chain}` : redactRpcText(message || (chain != null ? `wrong chain ${chain}` : `HTTP ${res.status}`), 140),
+    };
+  } catch (err) {
+    return { ok: false, status: null, ms: Date.now() - started, at: Date.now(), detail: redactRpcText(err, 140) };
+  }
+}
+
+/** Read-endpoint health for /health and the boot log: hostnames and states
+ *  only, never a URL. */
+export function rpcHealth(): Array<LegHealth & { probe: ProbeResult | null }> {
+  const urls = readRpcUrls();
+  return urls.map((url, i) => {
+    const guarded = i < urls.length - 1;
+    const base: LegHealth = guarded
+      ? breakerFor(url, i).health()
+      : { host: hostOf(url), role: urls.length > 1 ? "last resort" : "primary", state: "ok", failures: 0, lastStatus: null, skippedSince: null, nextProbeAt: null };
+    return { ...base, probe: lastProbe.get(url) ?? null };
+  });
+}
+
+/** Ask every read endpoint for the chain id once, with no retries, and say what
+ *  came back. Run at boot so a dead endpoint is the first thing in the log
+ *  instead of something found by accident, and so its breaker is already open
+ *  before the first real read pays the retry tax. Never throws. */
+export async function probeRpcLegs(log: (line: string) => void = (line) => console.log(line)): Promise<void> {
+  const urls = readRpcUrls();
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const guarded = i < urls.length - 1;
+    const role = guarded ? breakerFor(url, i).role : urls.length > 1 ? "last resort" : "primary";
+    const result = await probeUrl(url);
+    lastProbe.set(url, result);
+    if (guarded) breakerFor(url, i).noteProbe({ ok: result.ok, status: result.status });
+    log(
+      result.ok
+        ? `[boot] rpc ${role} ${hostOf(url)}: ok (${result.detail}, ${result.ms}ms)`
+        : `[boot] rpc ${role} ${hostOf(url)}: FAILED${result.status != null ? ` HTTP ${result.status}` : ""}: ${result.detail}`,
+    );
+  }
+}
+
 let publicClient: ReturnType<typeof createPublicClient> | null = null;
 export function getPublicClient() {
   if (!publicClient) {
@@ -133,9 +257,7 @@ export function getPublicClient() {
     // provider) first, public endpoint last. viem's fallback() fails over to the
     // next transport on error/timeout, so a provider throttle doesn't surface as
     // a read failure. Each leg keeps its own batching + 429 retry.
-    const legs = (config.robinhoodReadRpcUrls.length ? config.robinhoodReadRpcUrls : ["https://rpc.mainnet.chain.robinhood.com"]).map(
-      (url) => http(url, { batch: { wait: 100, batchSize: 10 }, retryCount: 4, retryDelay: 250 }),
-    );
+    const legs = readLegs((url, watch) => http(url, { batch: { wait: 100, batchSize: 10 }, retryCount: 4, retryDelay: 250, ...watch }));
     publicClient = createPublicClient({
       chain: robinhoodChain,
       transport: legs.length > 1 ? fallback(legs) : legs[0],
@@ -154,9 +276,7 @@ export function getPublicClient() {
 let scanClient: ReturnType<typeof createPublicClient> | null = null;
 export function getScanClient() {
   if (!scanClient) {
-    const legs = (config.robinhoodReadRpcUrls.length ? config.robinhoodReadRpcUrls : ["https://rpc.mainnet.chain.robinhood.com"]).map(
-      (url) => http(url, { retryCount: 4, retryDelay: 250 }),
-    );
+    const legs = readLegs((url, watch) => http(url, { retryCount: 4, retryDelay: 250, ...watch }));
     scanClient = createPublicClient({
       chain: robinhoodChain,
       transport: legs.length > 1 ? fallback(legs) : legs[0],

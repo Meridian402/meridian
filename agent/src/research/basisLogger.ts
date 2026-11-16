@@ -9,21 +9,17 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { appendLedger } from "../ledger.js";
 import { fileURLToPath } from "node:url";
-import {
-  createPublicClient,
-  http,
-  keccak256,
-  encodeAbiParameters,
-  parseAbiParameters,
-  parseAbiItem,
-  type Address,
-} from "viem";
+import { keccak256, encodeAbiParameters, parseAbiParameters, parseAbiItem, type Address } from "viem";
 import { INDEX_CONTRACTS } from "../venues/indexContracts.js";
 import { dataPath } from "../dataDir.js";
+import { getPublicClient } from "../venues/signer.js";
+import { redactRpcText } from "../venues/rpcBreaker.js";
 
-const RPC = process.env.ROBINHOOD_RPC_URL;
-if (!RPC) throw new Error("ROBINHOOD_RPC_URL required");
-const client = createPublicClient({ transport: http(RPC) });
+// Reads go through the desk's shared client, which fails over from the
+// dedicated provider to the public endpoint. This logger used to build its own
+// client on ROBINHOOD_RPC_URL alone, so when that provider revoked the network
+// (found 2026-11-16) every sample failed, and each failure wrote the provider's
+// full URL, key included, into basis-log.jsonl.
 
 const STATE_VIEW: Address = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
 const NATIVE: Address = "0x0000000000000000000000000000000000000000";
@@ -59,7 +55,7 @@ async function poolPx(token: Address, fee: number, tickSpacing: number): Promise
   const id = keccak256(
     encodeAbiParameters(parseAbiParameters("address, address, uint24, int24, address"), [c0, c1, fee, tickSpacing, NATIVE]),
   );
-  const [sqrtP] = await client.readContract({
+  const [sqrtP] = await getPublicClient().readContract({
     address: STATE_VIEW,
     abi: [parseAbiItem("function getSlot0(bytes32) view returns (uint160, int24, uint24, uint24)")],
     functionName: "getSlot0",
@@ -95,7 +91,9 @@ async function sample(): Promise<void> {
       };
       appendLedger("basis-log.jsonl", row);
     } catch (err) {
-      appendLedger("basis-log.jsonl", { ts, symbol, error: String(err) });
+      // Redacted and bounded: an RPC error prints its request URL, and a row here
+      // is mirrored to Postgres and kept for weeks.
+      appendLedger("basis-log.jsonl", { ts, symbol, error: redactRpcText(err, 200) });
     }
   }
   trimBasisLog();

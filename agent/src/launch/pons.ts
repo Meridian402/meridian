@@ -30,6 +30,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
+import { getPublicClient } from "../venues/signer.js";
 
 /** The PONS deployment. Mainnet only: there is no testnet factory to fall back to. */
 export interface PonsDeployment {
@@ -342,6 +343,14 @@ export interface BuiltPonsLaunch {
 
 const clients = new Map<string, ReturnType<typeof createPublicClient>>();
 function clientFor(dep: PonsDeployment) {
+  // On the desk's own chain endpoint, read through the desk's shared client so
+  // these reads fail over like every other read. A single-endpoint client here
+  // meant the launchpad went dark whenever the dedicated provider did, and its
+  // errors carried that provider's keyed URL. Any other rpcUrl (a test, another
+  // deployment) still gets a client of its own.
+  if (dep.rpcUrl === PONS_ROBINHOOD.rpcUrl || dep.rpcUrl === process.env.ROBINHOOD_RPC_URL) {
+    return getPublicClient() as unknown as ReturnType<typeof createPublicClient>;
+  }
   let c = clients.get(dep.rpcUrl);
   if (!c) {
     c = createPublicClient({ transport: http(dep.rpcUrl) });

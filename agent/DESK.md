@@ -380,7 +380,59 @@ restart, the same doctrine as the house-lock ceiling and deliberately above it
 so the lock watchdog fires first when the lock is the cause. Born from the
 31.6-hour dark window of 2026-08-21/22: a live process, a dead desk.
 
+## RPC endpoints (2026-11-16)
+
+Reads use a fallback list: `ROBINHOOD_RPC_URL` (the dedicated provider), then
+`ROBINHOOD_RPC_FALLBACK_URL`, then the public endpoint, which is always last.
+Writes go to the sequencer endpoint and are not part of this.
+
+Every read leg except the last carries a breaker (`src/venues/rpcBreaker.ts`).
+When a leg answers 401, 402 or 403 (key refused, network not enabled for the
+key, plan lapsed) it is skipped: reads go straight to the next endpoint, and
+one retry-free `eth_chainId` re-tests it every 5 minutes in the background.
+Reads return to it on their own when the probe passes. A throttle (429) or a
+server error is not a rejection and keeps the library's own retry and failover.
+The last leg is never skipped, so there is always somewhere to read from.
+
+How to read it:
+
+- Boot prints one line per endpoint, `[boot] rpc primary <host>: ok (chain
+  4663, 120ms)` or `FAILED HTTP 403: <reason>`. A dead endpoint is the first
+  thing in the log.
+- `[rpc] primary endpoint <host> REJECTED ACCESS (HTTP 403)` when it opens,
+  `[rpc] ... is answering again after Nm` when it recovers.
+- `/health` carries an `rpc` array: host, role, `ok` or `skipped`, and the
+  last probe. Hostnames only. It does not change the status code, because a
+  restart does not bring a provider back.
+
+A skipped primary means the desk is living on the public endpoint, which
+throttles under the engine's polling load (the 2026-08-19 failed seat entry).
+Treat `skipped` as "fix the provider before trusting the money loops", not as
+fine.
+
+Any module that needs a chain read uses `getPublicClient()` (or
+`getScanClient()` for log sweeps). Do not build a client on
+`ROBINHOOD_RPC_URL` alone: it has no failover and its errors print the keyed
+URL. Text from an RPC error goes through `redactRpcText()` before it reaches a
+ledger row, a log line or an API body.
+
 ## Incident log (selected)
+
+- 2026-11-16, the silent provider outage (found, not felt: the record was
+  closed). The dedicated provider had been answering every call with HTTP 403
+  "ROBINHOOD_MAINNET is not enabled for this app" for at least two weeks.
+  Three things stacked: (1) the RPC library retries a 403 four times with
+  backoff on the batched read client, so every read paid about 3.75 s before
+  the fallback was tried, and `/api/lp-scan` timed out; (2) the library drops
+  the HTTP status when the 403 body is a JSON-RPC error, so the only visible
+  symptom was "JSON is not a valid request object" in one logger; (3) the basis
+  logger and the launchpad reader built their own single-endpoint clients, so
+  they had no fallback at all, and the basis logger wrote 20,000 error rows,
+  each carrying the provider's keyed URL (rotate that key). Fixed with the
+  breaker above, a boot probe that names each endpoint's state, both stragglers
+  moved onto the shared client, and redaction of RPC error text. Lesson: a
+  fallback that works hides the failure it is covering for; the primary's
+  health has to be printed, not inferred.
 
 - 2026-08-05 late, the CASHCAT round trip (~$320 off the book peak). A
   +100%+ blow-off top collapsed 88% in hours. Position-level rails all

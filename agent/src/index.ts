@@ -76,7 +76,7 @@ import { standingFor } from "./swarm/learning.js";
 import { runExchange, sidelinedIds } from "./swarm/exchange.js";
 import { startSwarmLoop, swarmEnabled, dailyBudget } from "./swarm/loop.js";
 import { validateFleet, recordFleet, exportBundle } from "./deploy/fleets.js";
-import { getAgentSigner, getAgentAddress, getPublicClient, assertSignerIsHouseWallet } from "./venues/signer.js";
+import { getAgentSigner, getAgentAddress, getPublicClient, assertSignerIsHouseWallet, rpcHealth, probeRpcLegs } from "./venues/signer.js";
 import { earnOpportunities, prepareCarry } from "./earn/carry.js";
 import { prepareIndexYield } from "./earn/yieldPosition.js";
 import { stakingState, prepareStake } from "./earn/staking.js";
@@ -405,7 +405,10 @@ async function checkPayment(req: Request, res: Response): Promise<boolean> {
 // deploy, so the restart itself comes from the in-process watchdog.
 app.get("/health", (_req: Request, res: Response) => {
   const live = livenessSnapshot();
-  res.status(live.ok ? 200 : 503).json({ ok: live.ok, service: "meridian-mcp", version: "0.1.0", uptimeSec: Math.round(process.uptime()), stale: live.stale, loops: live.loops });
+  // rpc: hostnames and states only. It does not change the status code: a
+  // skipped dedicated endpoint means reads are on the fallback, not that the
+  // service is down, and Railway restarting us would not bring a provider back.
+  res.status(live.ok ? 200 : 503).json({ ok: live.ok, service: "meridian-mcp", version: "0.1.0", uptimeSec: Math.round(process.uptime()), stale: live.stale, loops: live.loops, rpc: rpcHealth() });
 });
 
 // The RWA universe the research swarm has gathered. Read-only, open (the census
@@ -2992,6 +2995,9 @@ if (process.env.MERIDIAN_RUN_BASIS_LOGGER === "1") startBasisLogger();
 if (process.env.MERIDIAN_RUN_LIGHTER_LOGGER === "1") startLighterLogger();
 if (process.env.MERIDIAN_RUN_YIELD_LOGGER === "1") startYieldLogger();
 void logFundingHealthAtBoot(); // says what the wallets can actually pay for, before anything needs them to
+// Say which chain endpoints answer, first thing, and open the breaker on any
+// that reject us before the first real read pays for finding out.
+void probeRpcLegs();
 startBackups(); // Postgres mirror of the durable JSONL/JSON state + boot-time restore
 startLivenessWatchdog(); // a money loop that stops completing ticks ends the process; Railway restarts it
 void initLedger(); // row-level Postgres ledger: table + one-time history backfill, then live dual-writes
