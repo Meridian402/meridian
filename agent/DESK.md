@@ -407,9 +407,31 @@ What exists, all read-only:
   the four hourly collections itself and serves everything at
   `GET /api/paper-desk`. The site's "Paper desk" tab draws that payload. The
   payload carries `paper: true` and its own list of limits.
+- `src/signals/tokenSignals.ts` (2026-11-17): once an hour, for every watched
+  pool, what the public index says about who is trading and holding the token:
+  buys, sells, distinct buyers, sellers and traders over the last 60 minutes;
+  holder count, the top ten wallets' share and the developer's share (re-read
+  every six hours); and the pool's place on its network's trending list, a
+  free stand-in for attention. Rows go to `token-signals.jsonl`, keyed the same
+  way the replay keys pools. It decides nothing.
+
+Why the signals are recorded and not yet used: on the first day volume alone
+was a poor guide (Base pools cleared the $150k/h flow bar in 105 of 144
+pool-hours and never paid a $1,000 seat $3 in an hour; no pool on the desk's
+chain cleared the flow bar and four of them paid $6 or more in eleven hours),
+while a pool's own last three hours of seat fees ranked its next three well
+(rank correlation 0.91 on thirteen decision hours, far too few to lean on). A
+signal goes into an entry rule only if it beats that on hours it has not seen.
+
+How a rule changes while the record is running: the rule sets in
+`paperReplay.variants()` are the control and are not edited. A changed rule is
+added as a new rule set with the date it was added, and is judged only on
+hours after that date. Tuning a rule on the same hours it is scored on proves
+nothing.
 
 Commands, from `agent/`: `npm run paper-replay`, `npm run chain-track:rank`,
-`npm run pool-watch:report`, `npm run chain-track -- <bnb|base|eth> --scan`.
+`npm run pool-watch:report`, `npm run chain-track -- <bnb|base|eth> --scan`,
+`npm run token-signals:report`.
 
 Limits that must travel with any number quoted from it: hourly granularity (the
 desk ticked every 150 seconds; the dump early-warning exit is not modelled),

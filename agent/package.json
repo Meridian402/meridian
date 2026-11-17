@@ -20,6 +20,8 @@
     "chain-track": "./_chain-track.sh",
     "chain-track:rank": "tsx src/signals/chainTrack.ts --rank",
     "paper-replay": "tsx src/signals/paperReplay.ts",
+    "token-signals": "tsx src/signals/tokenSignals.ts",
+    "token-signals:report": "tsx src/signals/tokenSignals.ts --report",
     "backtest:legacy-momentum": "tsx src/backtest/simulate.legacy-momentum.ts"
   },
   "dependencies": {

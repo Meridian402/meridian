@@ -133,6 +133,10 @@ const FILES = [
   "base-track-state.json",
   "eth-track.jsonl",
   "eth-track-state.json",
+  // Holders, hourly buyers and sellers, and trending rank for the same pools
+  // (2026-11-17). None of it can be read back later: the index serves the
+  // present only, so a lost file is lost hours.
+  "token-signals.jsonl",
 ];
 
 const lastHash = new Map<string, string>();

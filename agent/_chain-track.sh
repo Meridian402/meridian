@@ -16,3 +16,8 @@ fi
 for chain in bnb base eth; do
   ./node_modules/.bin/tsx src/signals/chainTrack.ts "$chain" || echo "[chainTrack $chain] run failed, continuing"
 done
+# Token signals (src/signals/tokenSignals.ts), same hour, all four chains: who
+# is trading and holding each watched token, and whether the pool is trending.
+# From the public pool index only; it reads no chain and decides nothing.
+# Report: npm run token-signals:report
+./node_modules/.bin/tsx src/signals/tokenSignals.ts || echo "[tokenSignals] run failed, continuing"

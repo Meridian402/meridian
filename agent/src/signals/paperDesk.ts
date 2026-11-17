@@ -18,6 +18,7 @@
 import { runOnce as runPoolWatch } from "./poolWatch.js";
 import { runOnce as runChainTrack, rank, CHAINS, type ChainKey, type RankRow } from "./chainTrack.js";
 import { loadPools, variants, replay, passive, GAS_PER_OP_USD, DESK_FINAL, type PassiveRow } from "./paperReplay.js";
+import { runOnce as runTokenSignals } from "./tokenSignals.js";
 
 const COLLECT_MS = 60 * 60 * 1000;
 const FIRST_RUN_MS = 90 * 1000;
@@ -136,6 +137,14 @@ export async function collectOnce(log: (line: string) => void = (l) => console.l
   for (const chain of Object.keys(CHAINS) as ChainKey[]) await run(chain, () => runChainTrack(chain, quiet));
   lastCollectedAt = Date.now();
   cache = null;
+  // After the hour ledgers, never before: the index is slow and rate-limited,
+  // and the replay must not wait on a reading it does not use yet.
+  try {
+    const r = await runTokenSignals(quiet);
+    log(`[paperDesk] token signals: appended ${r.appended} pool readings`);
+  } catch (err) {
+    log(`[paperDesk] token signals: run failed (${String(err instanceof Error ? err.message : err).replace(/https?:\/\/\S+/g, "<url>").slice(0, 140)})`);
+  }
 }
 
 /** Start the hourly collection. Read-only; holds no lock and touches no wallet. */
