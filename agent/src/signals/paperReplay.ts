@@ -157,6 +157,17 @@ export interface Rules {
   breakerStandDownHours: number;
   /** hours of record a pool needs before it may be entered */
   minHistoryHours: number;
+
+  // ---- stay-put settings (2026-11-18). All optional, and absent they change nothing: the rule
+  // sets that were already running are the control and must replay exactly as they did. ----
+  /** Judge a pool's seat fee on the average of this many hours, not on its last hour alone. */
+  feeLookbackHours?: number;
+  /** Move an unfilled bid up to the price at most this often. The desk did it every tick. */
+  trailEveryHours?: number;
+  /** Leave a seat once a full day of its own fees comes to less than this. Off when absent. */
+  stayFeeUsdPerDay?: number;
+  /** Unix seconds. The set takes no seat before this, so a set added late is scored only on hours after it was added. */
+  startAt?: number;
 }
 
 /** The desk exactly as it was configured when the record closed (Railway, 2026-09-07). */
@@ -178,7 +189,58 @@ export function variants(capitalUsd = DESK_FINAL.capitalUsd): Rules[] {
     { ...base, name: "bars for small pools", note: "flow bar off, seat bar $2/h", minFlowUsdPerHour: 0, minFeeUsdPerHour: 2 },
     { ...base, name: "two $500 seats", note: "flow bar off, seat bar $1/h on a $500 seat (the same 0.2%/h)", minFlowUsdPerHour: 0, seatUsd: 500, minFeeUsdPerHour: 1, breakerFloorUsd: 150 },
     { ...base, name: "no entry gates", note: "always in the best-paying pool: flow, seat, yield-to-move and spike bars all off; the exits unchanged", minFlowUsdPerHour: 0, minFeeUsdPerHour: 0, minYieldToMove: 0, maxSpikePct: 0 },
+    fewPools(base),
   ];
+}
+
+/**
+ * FEW POOLS, STAY PUT (added 2026-11-18, on the operator's word: "select fewer
+ * pools so we aren't bouncing around in between all the time losing money on
+ * churn").
+ *
+ * What the first 70 hours showed. A seat in every watched pool collected $677
+ * in fees and gave back $291 to prices, and the two halves came from different
+ * pools: the five best payers earned 69% of the fees and were up on price,
+ * while the other twenty-three earned $211 and lost $358. Choosing pools on
+ * their first day of seat fees and scoring them only on the hours after kept
+ * 86% of the later fees and avoided 93% of the later price loss. And the five
+ * sets above differ less in their rules than in how often they change seats:
+ * the two that look best took nine seats each to do it.
+ *
+ * So this set changes the two things that make a desk bounce:
+ *   - HOW A POOL IS CHOSEN: on a full day of what a seat there would have
+ *     earned (at least 1% of the seat a day), not on its last hour. A hot hour
+ *     is how a seat gets opened in a pool that pays for one hour.
+ *   - HOW A SEAT IS LEFT: at its floor, or after a full day of paying under the
+ *     bar. Not because the price ran above the bid for two hours. A bid left
+ *     behind is moved up at most every six hours and earns nothing in between,
+ *     which is the price of staying put and is charged here, not hidden.
+ * and spreads the book over up to four $300 seats, because which token a seat
+ * sat in decided every result in the first three days.
+ *
+ * The desk's yield-to-move bar is off in this set on purpose: it compares one
+ * hour of fees with one hour of price movement, and the whole point here is to
+ * stop deciding on an hour.
+ *
+ * It takes no seat before `startAt`. The sets above have replayed every hour
+ * since the record began; this one was written after looking at those hours,
+ * so scoring it on them would be marking its own homework.
+ */
+export const FEW_POOLS_START = Date.UTC(2026, 10, 18, 19, 0, 0) / 1000;
+function fewPools(base: Rules): Rules {
+  return {
+    ...base,
+    name: "few pools, stay put (from 11-18)",
+    note:
+      "added 2026-11-18 and takes no seat before 19:00 UTC that day, so its figures cover fewer hours than the rows above. Up to four $300 seats; a pool is chosen on a full day of its seat fees (at least 1% of the seat a day), not on its last hour; " +
+      "an unfilled bid is moved up at most every six hours; a seat is left only at its floor or after a full day of paying under the bar; a pool that was left is not re-entered for a day; the hourly yield-to-move bar is off",
+    minFlowUsdPerHour: 0, minYieldToMove: 0,
+    seatUsd: 300, maxSeats: 4, breakerFloorUsd: 150,
+    minFeeUsdPerHour: 0.125, feeLookbackHours: 24, minHistoryHours: 24,
+    idleBidMaxMin: 24 * 60, trailEveryHours: 6, stayFeeUsdPerDay: 3,
+    cooldownMin: 24 * 60, perDay: 2,
+    startAt: FEW_POOLS_START,
+  };
 }
 
 /** Dollars per on-chain action. Measured on the desk's chain (about 145k gas a
@@ -213,6 +275,10 @@ interface OpenSeat {
   hours: number;
   hoursInRange: number;
   unfilledSince: number | undefined;
+  /** when the bid was last moved up to the price (stay-put sets) */
+  lastTrailAt?: number;
+  /** the seat's own fees, hour by hour, for the last day (stay-put sets) */
+  feeHist?: number[];
 }
 
 export interface ReplayResult {
@@ -322,6 +388,17 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
       cash += fee;
       if (f > 0) s.hoursInRange++;
       if (fee >= 1) { s.costsUsd += gas(s.pool.chain); cash -= gas(s.pool.chain); } // one collect
+      // Stay-put sets: the one exit that is about the pool and not about the price. A seat is
+      // left once a full day of its own fees has come to less than the bar.
+      if (rules.stayFeeUsdPerDay != null) {
+        (s.feeHist ??= []).push(fee);
+        if (s.feeHist.length > 24) s.feeHist.shift();
+        if (s.feeHist.length === 24 && s.feeHist.reduce((a, b) => a + b, 0) < rules.stayFeeUsdPerDay) {
+          const at = bandAt(s.band, r.pxClose);
+          close(key, tEnd, at.valueUsd, at.tokenUsd, "stopped paying");
+          continue;
+        }
+      }
       if (r.pxClose > s.band.pb) {
         // above the band the seat is all dollars: an unfilled bid. The desk trails it up for gas
         // and gives the slot back once it has sat unfilled long enough.
@@ -330,10 +407,15 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
           close(key, tEnd, bandAt(s.band, r.pxClose).valueUsd, 0, "idle bid");
           continue;
         }
-        const value = bandAt(s.band, r.pxClose).valueUsd;
-        s.band = bidBand(value, r.pxClose, rules.widthPct);
-        s.costsUsd += 2 * gas(s.pool.chain);
-        cash -= 2 * gas(s.pool.chain);
+        // The desk moved an unfilled bid up every tick. A stay-put set does it at most every
+        // trailEveryHours and earns nothing from the bid in between.
+        if (tEnd - (s.lastTrailAt ?? s.openedAt) >= (rules.trailEveryHours ?? 1) * HOUR) {
+          const value = bandAt(s.band, r.pxClose).valueUsd;
+          s.band = bidBand(value, r.pxClose, rules.widthPct);
+          s.costsUsd += 2 * gas(s.pool.chain);
+          cash -= 2 * gas(s.pool.chain);
+          s.lastTrailAt = tEnd;
+        }
       } else if (r.pxLow < s.band.pb) {
         s.unfilledSince = undefined; // it traded into the band
       }
@@ -362,14 +444,16 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
     }
 
     // 3. entries, decided on what is known at the end of this hour
-    for (let guard = 0; guard < rules.maxSeats; guard++) {
+    const notYet = rules.startAt != null && tEnd < rules.startAt; // a set added late takes no seat before it was added
+    const look = Math.max(1, rules.feeLookbackHours ?? 1);
+    for (let guard = 0; guard < rules.maxSeats && !notYet; guard++) {
       const candidates: AutoEntryCandidate[] = [];
       const rowOf = new Map<string, LedgerHour>();
       for (const p of pools) {
         const r = byHour.get(p.key)!.get(h);
         if (!r) continue;
         const idx = p.rows.findIndex((x) => x.hourStart === h);
-        if (idx + 1 < rules.minHistoryHours) continue;
+        if (idx + 1 < Math.max(rules.minHistoryHours, look)) continue;
         const recent = p.rows.slice(Math.max(0, idx - 5), idx + 1);
         const bid = bidBand(rules.seatUsd, r.pxClose, rules.widthPct);
         const sharePct = (100 * bid.L) / (poolLiquidity(r) + bid.L);
@@ -384,7 +468,11 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
           lockedOut: false,
           denied: false,
           lastExitMs: lastExit.has(p.key) ? lastExit.get(p.key)! * 1000 : undefined,
-          feeUsdPerHour: (r.feesUsd * sharePct) / 100,
+          // One hour as the desk judged it, or the average of the last `look` hours for a stay-put set,
+          // each hour at the share a seat would have had in that hour.
+          feeUsdPerHour: look === 1
+            ? (r.feesUsd * sharePct) / 100
+            : p.rows.slice(idx + 1 - look, idx + 1).reduce((a, x) => { const b = bidBand(rules.seatUsd, x.pxClose, rules.widthPct); return a + x.feesUsd * (b.L / (poolLiquidity(x) + b.L)); }, 0) / look,
           sharePct,
           hourlyMovePct: recent.length >= 3 ? median(recent.map((x) => Math.abs(x.pxClose / x.pxOpen - 1) * 100)) : NaN,
           last60mPct: (r.pxClose / r.pxOpen - 1) * 100,

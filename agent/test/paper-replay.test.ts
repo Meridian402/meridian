@@ -183,3 +183,72 @@ test("the do-nothing baseline counts the inventory the watchers' LP net leaves o
   assert.ok(slide.feesUsd > 0, "it still collected fees the whole way down");
   assert.equal(rows[0].pool, "FLAT", "ranked by what was actually kept");
 });
+
+// ---- few pools, stay put (2026-11-18) --------------------------------------------------------
+//
+// The operator's ask: fewer pools, and stop bouncing between them. The replay learned four
+// optional settings for it. Each is pinned on its own below, and so is the thing that matters
+// more than any of them: the rule sets that were already running must not move.
+
+test("THE CONTROL: the five sets that were already running carry no stay-put setting, and the new set is sixth", () => {
+  const v = variants();
+  assert.deepEqual(v.slice(0, 5).map((r) => r.name), ["desk rules as closed", "no flow bar", "bars for small pools", "two $500 seats", "no entry gates"]);
+  for (const r of v.slice(0, 5)) for (const k of ["feeLookbackHours", "trailEveryHours", "stayFeeUsdPerDay", "startAt"] as const) assert.equal(r[k], undefined, `${r.name} gained ${k}`);
+  assert.equal(v.length, 6);
+  const few = v[5];
+  assert.match(few.name, /few pools, stay put/);
+  assert.ok(few.startAt! > 0, "it is scored only on hours after it was added");
+  assert.match(few.note, /takes no seat before/, "and the page says so");
+  assert.ok(few.maxSeats * few.seatUsd + few.reserveUsd <= few.capitalUsd, "its seats fit the book with the reserve intact");
+});
+
+test("a set added late takes no seat before it was added, and counts no refusal before it either", () => {
+  const rules: Rules = { ...DESK_FINAL, startAt: T0 + 20 * H };
+  const res = replay([pool(wiggle(40))], rules);
+  assert.equal(res.seats.length, 1);
+  assert.equal(res.seats[0].openedAt, T0 + 20 * H, "the first hour it may act on is the one that ends when it starts");
+  const early = replay([pool(wiggle(19))], rules);
+  assert.equal(early.seats.length, 0);
+  assert.equal(early.candidateHours, 0, "hours before it existed are not hours it turned anything away");
+});
+
+test("a pool is chosen on a full day of what a seat would have earned, not on one hot hour", () => {
+  // 26 hours that pay nothing, then one hour that pays a lot, then nothing again
+  const rows = Array.from({ length: 32 }, (_, i) => row(i, { open: 1, close: 1, high: 1.01, low: 0.99 }, { feesUsd: i === 26 ? 1000 : 0 }));
+  const hot = replay([pool(rows)], { ...DESK_FINAL, minFlowUsdPerHour: 0 });
+  assert.equal(hot.seats.length, 1, "judged on its last hour, the desk takes the seat");
+  assert.equal(hot.seats[0].openedAt, T0 + 27 * H);
+  const day = replay([pool(rows)], { ...DESK_FINAL, minFlowUsdPerHour: 0, feeLookbackHours: 24, minHistoryHours: 24 });
+  assert.equal(day.seats.length, 0, "one hour of fees spread over a day does not clear the same bar");
+  // and a pool that pays every hour clears it as soon as there is a day on record
+  const steady = replay([pool(wiggle(30))], { ...DESK_FINAL, minFlowUsdPerHour: 0, feeLookbackHours: 24, minHistoryHours: 24 });
+  assert.equal(steady.seats[0].openedAt, T0 + 24 * H);
+});
+
+test("a bid the price leaves behind is moved up at most every N hours, and the moves it skips are not charged", () => {
+  // three quiet hours to get in, one more at the price, then the price climbs 5% an hour for twelve hours
+  const rows = wiggle(4);
+  let p = 1;
+  for (let i = 4; i < 16; i++) { rows.push(row(i, { open: p, close: p * 1.05 }, { feesUsd: 0 })); p *= 1.05; }
+  const stay = { ...DESK_FINAL, idleBidMaxMin: 100 * 60 };
+  const everyHour = replay([pool(rows)], stay).seats[0];
+  const everySix = replay([pool(rows)], { ...stay, trailEveryHours: 6 }).seats[0];
+  assert.equal(everyHour.exit, "still open");
+  assert.equal(everySix.exit, "still open");
+  // bnb is $0.10 an action and a move is two actions: twelve moves against two
+  assert.ok(near(everyHour.costsUsd - everySix.costsUsd, 10 * 0.2, 1e-9), `skipped moves cost ${everyHour.costsUsd - everySix.costsUsd}`);
+  assert.ok(near(everySix.principalUsd, 0, 1e-9) && near(everyHour.principalUsd, 0, 1e-9), "an unfilled bid is all dollars either way");
+});
+
+test("a seat is left after a full day of paying under the bar, and only then", () => {
+  // three paying hours to get in, then the pool goes quiet at the same price
+  const rows = Array.from({ length: 40 }, (_, i) => row(i, { open: 1, close: 1, high: 1.01, low: 0.99 }, { feesUsd: i < 3 ? 200 : 0 }));
+  const kept = replay([pool(rows)], DESK_FINAL).seats[0];
+  assert.equal(kept.exit, "still open", "the desk as it closed would sit in a dead pool for ever");
+  const res = replay([pool(rows)], { ...DESK_FINAL, stayFeeUsdPerDay: 3 });
+  const s = res.seats[0];
+  assert.equal(s.exit, "stopped paying");
+  assert.equal(s.hours, 24, "a full day of its own fees, not an hour less");
+  assert.equal(s.closedAt, T0 + 27 * H);
+  assert.ok(near(s.principalUsd, 0, 1e-9), "it left at the price it came in at, all dollars");
+});
