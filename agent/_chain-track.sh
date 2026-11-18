@@ -13,7 +13,7 @@ unset AGENT_SIGNER_PRIVATE_KEY   # belt and braces: this process never signs
 if [ "$#" -gt 0 ]; then
   exec ./node_modules/.bin/tsx src/signals/chainTrack.ts "$@"
 fi
-for chain in bnb base eth; do
+for chain in bnb base eth robinhood; do
   ./node_modules/.bin/tsx src/signals/chainTrack.ts "$chain" || echo "[chainTrack $chain] run failed, continuing"
 done
 # Token signals (src/signals/tokenSignals.ts), same hour, all four chains: who

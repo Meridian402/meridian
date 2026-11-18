@@ -50,7 +50,7 @@ const SEAT_WIDTH = Number(process.env.CHAIN_TRACK_SEAT_WIDTH ?? 1.25);
 const FIRST_LOOKBACK_H = Number(process.env.CHAIN_TRACK_FIRST_LOOKBACK_H ?? 6);
 const MAX_BACKFILL_H = Number(process.env.CHAIN_TRACK_MAX_BACKFILL_H ?? 24); // long enough to cover the Mac sleeping overnight
 
-export type ChainKey = "bnb" | "base" | "eth";
+export type ChainKey = "bnb" | "base" | "eth" | "robinhood";
 export type Dex = "uniswap-v3" | "pancake-v3" | "slipstream";
 
 export interface ChainCfg {
@@ -102,6 +102,20 @@ export const CHAINS: Record<ChainKey, ChainCfg> = {
     venues: { uniswap_v3: { lpShare: 0.83, dex: "uniswap-v3" }, uniswap_v2: { lpShare: 1 }, "aero-slipstream-ethereum": { lpShare: 0.9, dex: "slipstream", note: "unstaked" } },
     v2FeePct: { uniswap_v2: 0.3 },
   },
+  // The desk's own chain, for the venues poolWatch cannot read (2026-11-18). poolWatch decodes
+  // Uniswap v4 only, and by now most of this chain's stock-token volume trades on Uniswap v3 and
+  // Slipstream pools: NVDA alone did $19M in a day on one of them. The operator's criterion for
+  // going live is "high volume and a steady range", and these are the pools that have both, so
+  // they are recorded here beside the v4 pools, under the same chain name, with the same measure.
+  // The desk can only EXECUTE on v4 today; a row here is evidence, not a venue it can enter.
+  robinhood: {
+    key: "robinhood", name: "Robinhood Chain", indexNetwork: "robinhood", rpcEnv: "ROBINHOOD_SCAN_RPC_URL", rpcDefault: "https://rpc.mainnet.chain.robinhood.com", maxRange: 10_000n,
+    wrappedNative: "0x0Bd7D308f8E1639FAb988df18A8011f41EACAd73", nativeSymbol: "ETH",
+    stables: ["0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"], // USDG
+    refPool: { address: "0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca", dex: "uniswap-v3" }, // USDG/WETH 0.01%
+    venues: { "uniswap-v3-robinhood": { lpShare: 0.83, dex: "uniswap-v3" }, "aero-slipstream-robinhood": { lpShare: 0.9, dex: "slipstream", note: "unstaked" } },
+    v2FeePct: {},
+  },
 };
 
 export interface TrackedPool {
@@ -146,6 +160,20 @@ export const WATCHED: Record<ChainKey, TrackedPool[]> = {
     { address: "0xba9abfdfb7c28e232d853d85c619e4248971aa31", label: "WETH/USDT", dex: "slipstream", note: "Aerodrome on Ethereum; a major pair with a high fee yield" },
     { address: "0xd661623947ef2ead12d577b47021c167d163b0c5", label: "WETH/USDC", dex: "slipstream", note: "Aerodrome on Ethereum" },
     { address: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640", label: "USDC/WETH 0.05%", dex: "uniswap-v3", note: "benchmark: the deep, competitive pair" },
+  ],
+  // Robinhood Chain, 2026-11-18: the stock-token pools with the most volume against their liquidity
+  // and a price that barely moves, on the venues the v4 watch cannot read. Each is the busiest pool
+  // of its kind the index showed that day; "slip" marks a Slipstream pool, whose fee is dynamic.
+  robinhood: [
+    { address: "0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3", label: "NVDA/USDG 0.05% v3", dex: "uniswap-v3", note: "$19M a day on $1.8M of liquidity the day it was added" },
+    { address: "0xa1513da56f71b83d98124d645828a14a191b8010", label: "NVDA/USDG slip", dex: "slipstream", note: "$5M a day on $450k" },
+    { address: "0xc61284332117c3fb23a2a56cceffd07f7af60029", label: "SPCX/USDG 0.05% v3", dex: "uniswap-v3", note: "$9.5M a day on $1.8M" },
+    { address: "0x79ac9e4f5382b2157ad06ce57392ad3677a09c83", label: "SPCX/USDG slip", dex: "slipstream", note: "$2.6M a day on $120k" },
+    { address: "0x4a9b7ccba4a3cd9ee604afa95d3dfa77d0d593e5", label: "SPY/USDG slip", dex: "slipstream", note: "$2.2M a day on $556k" },
+    { address: "0xd9ab4b7fae6dc2f7020134ec744a8f53ef3e5e24", label: "TTWO/USDG 0.3% v3", dex: "uniswap-v3", note: "$2.7M a day on $377k, the highest fee of the set" },
+    { address: "0xd057b1bc54917855bbee58ead58647f47cab35e5", label: "MU/USDG 0.3% v3", dex: "uniswap-v3", note: "$1.3M a day on $926k" },
+    { address: "0x7615926023bb149f36095645c2a81dc367d39750", label: "WETH/USDG slip", dex: "slipstream", note: "$63M a day on $1.5M; ETH, not a stock" },
+    { address: "0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca", label: "USDG/WETH 0.01% v3", dex: "uniswap-v3", note: "benchmark: the deep ETH pair, and the price reference for this chain" },
   ],
 };
 

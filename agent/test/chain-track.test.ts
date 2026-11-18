@@ -133,7 +133,8 @@ test("every chain's configuration and watch list is well formed", () => {
     const cfg = CHAINS[key];
     assert.equal(cfg.key, key);
     assert.match(cfg.wrappedNative, /^0x[0-9a-fA-F]{40}$/);
-    assert.ok(cfg.stables.length >= 2 && cfg.stables.every((s) => /^0x[0-9a-fA-F]{40}$/.test(s)));
+    // at least one dollar stable: the desk's own chain has exactly one (USDG)
+    assert.ok(cfg.stables.length >= 1 && cfg.stables.every((s) => /^0x[0-9a-fA-F]{40}$/.test(s)));
     assert.ok(cfg.maxRange > 0n && cfg.rpcDefault.startsWith("https://"));
     const list = WATCHED[key];
     const addrs = list.map((p) => p.address.toLowerCase());

@@ -72,6 +72,11 @@ export const WATCHED: WatchedPool[] = [
   { id: "0x0b362d89fcae933d150e735d28c70e13469a4e14d3b3a36ac05eb5a1a77f2474", symbol: "HOOKR", token: "0x18e674231a58c239dc7daedcffe15ec3a24cff5c", quote: "USDG", lpFee: 10000, enterable: true, note: "Hookr.fun USDG pool" },
   { id: "0x9be7ab27227e115085b0949a819a73f6963ddc6da0c6204d37757c24297706e8", symbol: "PRIORS", token: "0xedbf91223639800bcd5756815caf908df3b890be", quote: "USDG", lpFee: 10000, enterable: true, note: "Priors Agents, 2% creator tax on the token" },
   { id: "0xac9e954695a0297f761822e248a3f8c2fd3834e79f2351fd987b565e78457dba", symbol: "HBTC", token: "0x8db244f6bf052571f4e0c6065b700e714092d4b6", quote: "USDG", lpFee: 10000, enterable: true, note: "Hooked Bitcoin, unvetted token" },
+  // Added 2026-11-18. The operator's criterion for going live is "high volume and a steady range",
+  // and of the pools that have both on this chain these two are the ones the desk can actually
+  // enter: plain Uniswap v4, no hook. SPY is the S&P 500 ETF token.
+  { id: "0xe5923c8a8be481ec89a2ca784a2bbfa4235de6d88f92260fd66b660c4babf907", symbol: "SPY", token: "0x117cc2133c37b721f49de2a7a74833232b3b4c0c", quote: "USDG", lpFee: 500, enterable: true, note: "S&P 500 ETF token; $4.6M a day on $778k the day it was added; tick spacing 5, no hook" },
+  { id: "0xe1ae6a4c6ccc9f037389a8d50a4f577bde1a9fe01d85d88ecbbd39955ce53288", symbol: "SPY", token: "0x117cc2133c37b721f49de2a7a74833232b3b4c0c", quote: "USDG", lpFee: 100, enterable: true, note: "S&P 500 ETF token; $2.4M a day on $241k; tick spacing 1, no hook" },
 ];
 
 export const labelOf = (p: Pick<WatchedPool, "symbol" | "quote" | "lpFee" | "enterable">): string =>
