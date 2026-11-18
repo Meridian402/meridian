@@ -850,27 +850,120 @@ export async function discoverOwnedPositions(wallet: Address): Promise<ChainPosi
   scanCursor.set(key, { lastBlock: head, owned });
   if (owned.size === 0) return [];
 
+  // Only what can have changed is read. See the note on positionFacts below.
+  const now = Date.now();
+  const ids = [...owned.values()];
+  const due = new Set(liquidityReadsDue(ids.map((t) => t.toString()), emptiedAt, now));
   return Promise.all(
-    [...owned.values()].map(async (tokenId): Promise<ChainPosition> => {
-      const [liq, poolAndInfo] = await Promise.all([
-        client.readContract({ address: POSITION_MANAGER, abi: liqByIdAbi, functionName: "getPositionLiquidity", args: [tokenId] }),
-        client.readContract({ address: POSITION_MANAGER, abi: poolAndInfoAbi, functionName: "getPoolAndPositionInfo", args: [tokenId] }),
+    ids.map(async (tokenId): Promise<ChainPosition> => {
+      const id = tokenId.toString();
+      const [liq, facts] = await Promise.all([
+        due.has(id)
+          ? // At the SAME height as the ownership scan. A node a block behind would answer 0 for
+            // a band minted in that block; pinned, it errors instead, and a throw here means
+            // "keep the last good view", which is the safe failure.
+            (client.readContract({ address: POSITION_MANAGER, abi: liqByIdAbi, functionName: "getPositionLiquidity", args: [tokenId], blockNumber: head }) as Promise<bigint>)
+          : Promise.resolve(0n),
+        factsFor(client, tokenId),
       ]);
-      const [poolKey, info] = poolAndInfo;
-      const stock = [poolKey.currency0, poolKey.currency1].find((c) => c.toLowerCase() !== USDG.toLowerCase()) ?? poolKey.currency1;
-      return {
-        tokenId: tokenId.toString(),
-        symbol: SYMBOL_BY_TOKEN[stock.toLowerCase()] ?? symbolForToken(stock) ?? stock,
-        tickLower: signed24(info >> 8n),
-        tickUpper: signed24(info >> 32n),
-        liquidity: liq as bigint,
-        currency0: poolKey.currency0,
-        currency1: poolKey.currency1,
-        fee: Number(poolKey.fee),
-        tickSpacing: Number(poolKey.tickSpacing),
-      };
+      if (due.has(id)) recordLiquidity(id, liq, now, zeroStreak, emptiedAt);
+      // The NAME is worked out on every call, never kept: it depends on which pools
+      // the qualifier knows right now, and the guards pick their positions by name.
+      const stock = [facts.currency0, facts.currency1].find((c) => c.toLowerCase() !== USDG.toLowerCase()) ?? facts.currency1;
+      return { tokenId: id, symbol: SYMBOL_BY_TOKEN[stock.toLowerCase()] ?? symbolForToken(stock) ?? stock, ...facts, liquidity: liq };
     }),
   );
+}
+
+// ---- reading only what can have changed (2026-11-17) -----------------------------------------
+//
+// Discovery used to make two reads for EVERY position NFT the wallet holds, on
+// every call. The desk never burns a band it empties, so the house wallet holds
+// 1,574 of them, nearly all empty: 3,148 reads a call. The narrate-only agent
+// loop calls this every 30 seconds and the site's Home page calls it again for
+// every open browser tab. Measured on the provider's own meter the day the desk's
+// endpoint started answering again: 376,000 compute units an hour from the loop
+// alone, about 750,000 with one tab open, on a desk that was closed and held
+// nothing. A public page that any visitor can use to run up the bill is a fault,
+// not a cost.
+//
+// Two facts make almost all of those reads unnecessary:
+//
+//   1. A v4 position NFT's pool and range are fixed when it is minted. Only its
+//      liquidity ever changes. So the pool and range are read once per token and
+//      kept for the life of the process.
+//
+//   2. An emptied position stays empty unless its owner adds to it, and nothing
+//      in this codebase adds liquidity to an existing position: every band is a
+//      fresh mint (test/position-read-budget.test.ts fails if that stops being
+//      true). So a token seen with zero liquidity is not re-read on every call.
+//
+// Fact 2 is a statement about this code, not about the chain, so it is hedged
+// three ways. A token is only treated as empty after it has read zero on two
+// calls in a row, so one wrong answer from one node cannot hide a live band (a
+// hidden band is not managed, which is the 2026-08-09 failure all over again).
+// Every emptied token is read again once EMPTY_RECHECK_MS has passed, which
+// bounds how long a position refilled by hand, or by a wallet that is not the
+// desk's, could go unseen. And a position that HOLDS liquidity is read on every
+// call, exactly as before: nothing about a live band is cached.
+//
+// What this does not change: which tokens the wallet owns still comes from the
+// Transfer logs and is still checked against balanceOf at the same height on
+// every call. This only decides which of the owned tokens need a liquidity read.
+export const EMPTY_RECHECK_MS = 30 * 60_000;
+export const EMPTY_CONFIRMATIONS = 2;
+
+/** What the chain fixes at mint. Not the symbol: that is ours, and it can change. */
+type PositionFacts = Omit<ChainPosition, "tokenId" | "liquidity" | "symbol">;
+const positionFacts = new Map<string, PositionFacts>();
+const emptiedAt = new Map<string, number>();
+const zeroStreak = new Map<string, number>();
+
+/** PURE: the owned tokens whose liquidity must be read now: any not known to be
+ *  empty, and any whose "empty" is older than the recheck window. */
+export function liquidityReadsDue(tokenIds: readonly string[], emptied: ReadonlyMap<string, number>, now: number, recheckMs = EMPTY_RECHECK_MS): string[] {
+  return tokenIds.filter((id) => {
+    const seenEmpty = emptied.get(id);
+    return seenEmpty == null || now - seenEmpty >= recheckMs;
+  });
+}
+
+/** PURE (on the two maps it is handed): fold one liquidity reading into what is
+ *  known. Zero counts toward "empty" only once it has been seen `confirmations`
+ *  times in a row; any liquidity at all wipes the slate for that token. */
+export function recordLiquidity(id: string, liquidity: bigint, now: number, streak: Map<string, number>, emptied: Map<string, number>, confirmations = EMPTY_CONFIRMATIONS): void {
+  if (liquidity === 0n) {
+    const n = (streak.get(id) ?? 0) + 1;
+    streak.set(id, n);
+    if (n >= confirmations) emptied.set(id, now);
+    return;
+  }
+  streak.delete(id);
+  emptied.delete(id);
+}
+
+/** Forget what is known about emptied positions, so the next discovery reads
+ *  every token. For any future path that adds liquidity to an existing position. */
+export function forgetEmptiedPositions(): void {
+  emptiedAt.clear();
+  zeroStreak.clear();
+}
+
+async function factsFor(client: ReturnType<typeof getPublicClient>, tokenId: bigint): Promise<PositionFacts> {
+  const id = tokenId.toString();
+  const known = positionFacts.get(id);
+  if (known) return known;
+  const [poolKey, info] = await client.readContract({ address: POSITION_MANAGER, abi: poolAndInfoAbi, functionName: "getPoolAndPositionInfo", args: [tokenId] });
+  const facts: PositionFacts = {
+    tickLower: signed24(info >> 8n),
+    tickUpper: signed24(info >> 32n),
+    currency0: poolKey.currency0,
+    currency1: poolKey.currency1,
+    fee: Number(poolKey.fee),
+    tickSpacing: Number(poolKey.tickSpacing),
+  };
+  positionFacts.set(id, facts); // only after a successful read: a failed one is retried next call
+  return facts;
 }
 
 /**
