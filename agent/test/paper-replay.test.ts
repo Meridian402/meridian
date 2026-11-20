@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DESK_FINAL, bidBand, balancedBand, bandAt, inRangeFraction, poolLiquidity, refLiquidity, replay, passive, gateOf, variants, type ReplayPool, type Rules } from "../src/signals/paperReplay.js";
+import { DESK_FINAL, bidBand, balancedBand, bandAt, inRangeFraction, poolLiquidity, refLiquidity, refSeatNet, replay, passive, gateOf, seatNetScore, variants, type ReplayPool, type Rules } from "../src/signals/paperReplay.js";
 import type { LedgerHour } from "../src/signals/poolWatch.js";
 
 /**
@@ -193,8 +193,10 @@ test("the do-nothing baseline counts the inventory the watchers' LP net leaves o
 test("THE CONTROL: the five sets that were already running carry no stay-put setting, and the new set is sixth", () => {
   const v = variants();
   assert.deepEqual(v.slice(0, 5).map((r) => r.name), ["desk rules as closed", "no flow bar", "bars for small pools", "two $500 seats", "no entry gates"]);
-  for (const r of v.slice(0, 5)) for (const k of ["feeLookbackHours", "trailEveryHours", "stayFeeUsdPerDay", "startAt"] as const) assert.equal(r[k], undefined, `${r.name} gained ${k}`);
-  assert.equal(v.length, 6);
+  for (const r of v.slice(0, 5)) for (const k of ["feeLookbackHours", "trailEveryHours", "stayFeeUsdPerDay", "startAt", "balancedWidth", "steadyRangePct", "rankOnSeatNet", "leaveOnSeatLossPct"] as const) assert.equal(r[k], undefined, `${r.name} gained ${k}`);
+  for (const r of v.slice(5, 7)) for (const k of ["rankOnSeatNet", "leaveOnSeatLossPct"] as const) assert.equal(r[k], undefined, `${r.name} gained ${k}`);
+  assert.equal(v.length, 8);
+  assert.equal(v[5].balancedWidth, undefined, "the stay-put set keeps the desk's bid");
   const few = v[5];
   assert.match(few.name, /few pools, stay put/);
   assert.ok(few.startAt! > 0, "it is scored only on hours after it was added");
@@ -251,4 +253,143 @@ test("a seat is left after a full day of paying under the bar, and only then", (
   assert.equal(s.hours, 24, "a full day of its own fees, not an hour less");
   assert.equal(s.closedAt, T0 + 27 * H);
   assert.ok(near(s.principalUsd, 0, 1e-9), "it left at the price it came in at, all dollars");
+});
+
+// ---- steady range (2026-11-18) ---------------------------------------------------------------
+//
+// The operator's criterion: fewer, larger seats, in pools with high volume and a steady range.
+// A previewed run of this set over the hours it was written from lost money in two stock-token
+// pools that had been steady for a day and then fell, so nothing below claims it earns. The
+// tests pin only that it does what its description says.
+
+test("the steady-range set is two seats of under half the book, whatever the book, and says when it starts", () => {
+  const small = variants(1600)[6], large = variants(3000)[6];
+  assert.match(small.name, /steady range/);
+  assert.equal(small.maxSeats, 2);
+  assert.equal(large.maxSeats, 2, "a bigger book means bigger seats, not more of them");
+  assert.equal(small.seatUsd, 650);
+  assert.equal(large.seatUsd, 1350);
+  for (const r of [small, large]) {
+    assert.ok(2 * r.seatUsd + r.reserveUsd <= r.capitalUsd);
+    assert.ok(near(r.minFeeUsdPerHour * 24, r.seatUsd * 0.01, 1e-9), "the bar is 1% of the seat a day");
+    assert.ok(r.startAt! > 0);
+    assert.match(r.note, /takes no seat before/);
+    assert.ok(r.balancedWidth! > 1 && r.balancedWidth! < 1.1, "a tight band, not the desk's wide bid");
+  }
+});
+
+test("a pool whose price wandered outside the bar over the day is not steady, and the tally says so", () => {
+  const rules: Rules = { ...DESK_FINAL, minFlowUsdPerHour: 0, feeLookbackHours: 24, minHistoryHours: 24, steadyRangePct: 6 };
+  const calm = replay([pool(wiggle(30))], rules);
+  assert.equal(calm.seats.length, 1, "a 2% range clears a 6% bar");
+  assert.equal(calm.seats[0].openedAt, T0 + 24 * H);
+  const wild = Array.from({ length: 30 }, (_, i) => row(i, { open: 1, close: 1, high: 1.1, low: 0.99 }));
+  const res = replay([pool(wild)], rules);
+  assert.equal(res.seats.length, 0);
+  assert.equal(res.refusals["not steady"], 7, "every hour it was old enough to be judged");
+  const onePrint = wiggle(30);
+  onePrint[10] = row(10, { open: 1, close: 1, high: 1.01, low: 0.0001 });
+  assert.equal(replay([pool(onePrint)], rules).seats.length, 0, "one wild print in the day fails the pool, which is the cautious way to be wrong");
+});
+
+test("a balanced seat in a tight band earns while the price stays inside it, and holds half of each side", () => {
+  const rules: Rules = { ...DESK_FINAL, minFlowUsdPerHour: 0, balancedWidth: 1.03 };
+  const s = replay([pool(wiggle(30))], rules).seats[0];
+  assert.equal(s.exit, "still open");
+  assert.equal(s.hoursInRange, s.hours, "a 1% wiggle never leaves a 3% band");
+  assert.ok(near(s.principalUsd, 0, 1e-6), "the price ended where it started");
+  const bid = replay([pool(wiggle(30))], { ...DESK_FINAL, minFlowUsdPerHour: 0 }).seats[0];
+  assert.ok(s.feesUsd > bid.feesUsd, "the same dollars in a tighter band are a larger share of the trading");
+});
+
+test("putting a balanced seat back around the price is charged for the swap it takes", () => {
+  // in at 1, then the price steps to 1.10 and sits there: above a 3% band
+  const rows = wiggle(4);
+  for (let i = 4; i < 16; i++) rows.push(row(i, { open: 1.1, close: 1.1, high: 1.105, low: 1.095 }));
+  const base: Rules = { ...DESK_FINAL, minFlowUsdPerHour: 0, balancedWidth: 1.03 };
+  const parked = replay([pool(rows)], { ...base, trailEveryHours: 1000 }).seats[0];
+  const moved = replay([pool(rows)], base).seats[0];
+  assert.ok(moved.hoursInRange > parked.hoursInRange, "back around the price, it earns again");
+  // half of about $1,015 swapped at the pool's 1% fee plus 0.3% slippage, and two actions of gas
+  assert.ok(moved.costsUsd - parked.costsUsd > 6.5, `the move cost ${moved.costsUsd - parked.costsUsd}`);
+});
+
+// ---- ranked on what a seat kept (2026-11-20) -------------------------------------------------
+//
+// The study behind it found one signal that held in both halves of the record: where a seat had
+// lost money over the last day, the next day lost too. Fees alone did not hold, because a dump
+// is busy. These pin that the set ranks on what a seat KEPT, never sees the future to do it,
+// and leaves a pool once a fresh seat there would be losing.
+
+/** n hours falling `stepPct` an hour, starting at `from` and at row index `i0` */
+const slide = (i0: number, n: number, from: number, stepPct: number, o: Partial<LedgerHour> = {}) =>
+  Array.from({ length: n }, (_, k) => row(i0 + k, { open: from * (1 - stepPct / 100) ** k, close: from * (1 - stepPct / 100) ** (k + 1) }, o));
+
+test("what a seat kept: fees less costs in a calm pool, a loss in a dump, nothing known across a gap", () => {
+  const calm = wiggle(30);
+  const k = refSeatNet(calm, 0, 24, 650, 50, 455, 0.1, 1);
+  assert.ok(k > 0, `a calm pool that pays keeps money: ${k}`);
+  // a 1% wiggle around the top of the bid: half of each hour's range is inside it
+  const b = bidBand(650, 1, 50), share = b.L / (poolLiquidity(calm[1]) + b.L), f = inRangeFraction(0.99, 1.01, b.pa, b.pb);
+  const fees = 24 * 200 * share * f;
+  assert.ok(near(k, fees - 0.1 - 0.1 - 24 * 0.1, 1e-6), `fees ${fees} less the open, the close and one collect an hour, got ${k}`);
+  const dump = [...wiggle(1), ...slide(1, 24, 1, 3)];
+  assert.ok(refSeatNet(dump, 0, 24, 650, 50, 455, 0.1, 1) < -100, "a 3%-an-hour slide costs far more than it pays");
+  const gap = calm.filter((_, i) => i !== 10);
+  assert.ok(Number.isNaN(refSeatNet(gap, 0, 24, 650, 50, 455, 0.1, 1)), "a missing hour is not guessed across");
+  assert.ok(Number.isNaN(refSeatNet(calm, 10, 24, 650, 50, 455, 0.1, 1)), "nor is an hour the record has not reached");
+});
+
+test("NO LOOKAHEAD: what a seat kept up to an hour does not change with anything after it", () => {
+  const a = wiggle(60), b = [...wiggle(49), ...slide(49, 11, 1, 5)];
+  for (let idx = 24; idx <= 48; idx++) {
+    const sa = seatNetScore(idx, (i0) => refSeatNet(a, i0, 24, 650, 50, 455, 0.1, 1));
+    const sb = seatNetScore(idx, (i0) => refSeatNet(b, i0, 24, 650, 50, 455, 0.1, 1));
+    if (idx >= 47) assert.ok(near(sa.avg, sb.avg, 1e-9) && near(sa.lastDay, sb.lastDay, 1e-9), `hour ${idx}: identical rows up to it, identical score`);
+    else assert.ok(Number.isNaN(sa.avg), `hour ${idx}: under two days of record, no score`);
+  }
+  const s = seatNetScore(47, (i0) => i0);
+  assert.equal(s.lastDay, 23, "the latest full day is the seat opened 24 hours back");
+  assert.equal(s.avg, (0 + 23) / 2, "and the average runs over the 24 seats that ended in the last 24 hours");
+});
+
+test("the set takes the pool where a seat kept money over the busier one where it lost", () => {
+  const set = { ...variants()[7], startAt: undefined };
+  const rich = slide(0, 60, 1, 3, { feesUsd: 600 }), calm = wiggle(60);
+  const pools = [pool(rich, "bnb:0xaaa", "BUSY-DUMP"), pool(calm, "base:0xbbb", "CALM")];
+  const res = replay(pools, set);
+  assert.ok(res.seats.length >= 1);
+  assert.ok(res.seats.every((s) => s.pool === "CALM"), `seated in ${res.seats.map((s) => s.pool).join(", ")}`);
+  assert.ok((res.refusals["seat lost money over two days"] ?? 0) > 0, JSON.stringify(res.refusals));
+  const byFees = replay(pools, { ...set, rankOnSeatNet: undefined, leaveOnSeatLossPct: undefined, feeLookbackHours: 24 });
+  assert.equal(byFees.seats[0].pool, "BUSY-DUMP", "ranked on fees, the same rules walk into the dump");
+});
+
+test("a seat is left once a fresh seat in its pool would be losing, before the floor would take it", () => {
+  // two quiet days to qualify, then a 1.5%-an-hour slide on thin fees
+  const rows = [...wiggle(50).map((r) => ({ ...r, feesUsd: 50 })), ...slide(50, 40, 1, 1.5, { feesUsd: 50 })];
+  const set = { ...variants()[7], startAt: undefined };
+  const left = replay([pool(rows)], set).seats[0];
+  assert.equal(left.exit, "pool turned");
+  const kept = replay([pool(rows)], { ...set, leaveOnSeatLossPct: undefined }).seats[0];
+  assert.equal(kept.exit, "floor", "without the exit the same seat rides the slide to its floor");
+  assert.ok(left.closedAt! < kept.closedAt!, "the exit comes first");
+  assert.ok(left.netUsd > kept.netUsd, `and loses less: ${left.netUsd.toFixed(2)} against ${kept.netUsd.toFixed(2)}`);
+});
+
+test("the seat-net set is two seats of under half the book, never moves a bid up, and says when it starts", () => {
+  const small = variants(1600)[7], large = variants(3000)[7];
+  assert.match(small.name, /what a seat kept/);
+  for (const r of [small, large]) {
+    assert.equal(r.maxSeats, 2);
+    assert.ok(2 * r.seatUsd + r.reserveUsd <= r.capitalUsd);
+    assert.equal(r.rankOnSeatNet, true);
+    assert.equal(r.leaveOnSeatLossPct, 1);
+    assert.ok(r.trailEveryHours! >= 24 * 365, "an unfilled bid is given back, not chased");
+    assert.equal(r.minHistoryHours, 48, "two days of record before a pool can be scored");
+    assert.ok(r.startAt! > 0);
+    assert.match(r.note, /takes no seat before/);
+  }
+  assert.equal(small.seatUsd, 650);
+  assert.equal(large.seatUsd, 1350);
 });

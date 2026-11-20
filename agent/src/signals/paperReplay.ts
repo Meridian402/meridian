@@ -168,6 +168,19 @@ export interface Rules {
   stayFeeUsdPerDay?: number;
   /** Unix seconds. The set takes no seat before this, so a set added late is scored only on hours after it was added. */
   startAt?: number;
+  /** A balanced seat in a tight band around the price instead of the desk's wide bid: the band runs
+   *  from price / this to price * this (1.03 is three percent either side). Absent: the bid. */
+  balancedWidth?: number;
+  /** Take a seat only where the price's whole range over the look-back stayed within this percent. */
+  steadyRangePct?: number;
+
+  // ---- seat-net settings (2026-11-20). Optional, and absent they change nothing. ----
+  /** Rank and admit pools on what this set's own seat would have KEPT there (fees, plus what the
+   *  price did to it, minus costs), not on fees alone: see refSeatNet and seatNetScore. */
+  rankOnSeatNet?: boolean;
+  /** Leave a seat once a fresh seat in its pool would have lost more than this percent of itself
+   *  over the last day. Off when absent. */
+  leaveOnSeatLossPct?: number;
 }
 
 /** The desk exactly as it was configured when the record closed (Railway, 2026-09-07). */
@@ -190,6 +203,8 @@ export function variants(capitalUsd = DESK_FINAL.capitalUsd): Rules[] {
     { ...base, name: "two $500 seats", note: "flow bar off, seat bar $1/h on a $500 seat (the same 0.2%/h)", minFlowUsdPerHour: 0, seatUsd: 500, minFeeUsdPerHour: 1, breakerFloorUsd: 150 },
     { ...base, name: "no entry gates", note: "always in the best-paying pool: flow, seat, yield-to-move and spike bars all off; the exits unchanged", minFlowUsdPerHour: 0, minFeeUsdPerHour: 0, minYieldToMove: 0, maxSpikePct: 0 },
     fewPools(base),
+    steadyRange(base),
+    seatNet(base),
   ];
 }
 
@@ -226,6 +241,45 @@ export function variants(capitalUsd = DESK_FINAL.capitalUsd): Rules[] {
  * since the record began; this one was written after looking at those hours,
  * so scoring it on them would be marking its own homework.
  */
+/**
+ * STEADY RANGE (added 2026-11-18, on the operator's word after seeing the replay at a larger
+ * book: "we dont want to hold more seats with a bigger book we want to enter high volume and
+ * a steady range").
+ *
+ * Two seats, each a little under half the book, not more seats as the book grows. A pool is
+ * taken only if, over a full day, it traded at least $50,000 an hour, its price never left a
+ * 6% range, and a seat there would have earned at least 1% of itself. The seat is balanced in
+ * a band three percent either side of the price, which is the shape a steady pool rewards and
+ * the desk's wide bid does not. If the price leaves the band the seat is put back around it
+ * at most every six hours, and the swap that takes is charged.
+ *
+ * What the first hours on the desk's own chain already said, and why this needs testing and
+ * not assuming: volume and a steady price were not enough. The lowest-fee stock pools lost
+ * their LPs money on $4.8M a day, because the traders there know where the real stock is.
+ * The fee bar in this set is what is supposed to tell those pools from the ones that pay.
+ *
+ * Like the set above it, it takes no seat before it was added.
+ */
+export const STEADY_RANGE_START = Date.UTC(2026, 10, 18, 21, 0, 0) / 1000;
+function steadyRange(base: Rules): Rules {
+  const seatUsd = Math.max(100, Math.floor((base.capitalUsd - base.reserveUsd) / 2 / 50) * 50);
+  return {
+    ...base,
+    name: "steady range (from 11-18)",
+    note:
+      "added 2026-11-18 and takes no seat before 21:00 UTC that day, so its figures cover fewer hours than the rows above. Two seats of a little under half the book each, however large the book; " +
+      "a pool is taken only if over a full day it traded at least $50,000 an hour, its price stayed inside a 6% range and a seat would have earned at least 1% of itself; the seat is balanced in a band three percent either side of the price, " +
+      "not the desk's wide bid; out of its band it is put back at most every six hours and the swap is charged; it is left at its floor or after a full day of paying under the bar; the hourly yield-to-move bar is off",
+    seatUsd, maxSeats: 2, breakerFloorUsd: 150,
+    balancedWidth: 1.03, steadyRangePct: 6,
+    minFlowUsdPerHour: 50_000, minYieldToMove: 0,
+    minFeeUsdPerHour: (seatUsd * 0.01) / 24, feeLookbackHours: 24, minHistoryHours: 24,
+    idleBidMaxMin: 24 * 60, trailEveryHours: 6, stayFeeUsdPerDay: seatUsd * 0.01,
+    cooldownMin: 24 * 60, perDay: 2,
+    startAt: STEADY_RANGE_START,
+  };
+}
+
 export const FEW_POOLS_START = Date.UTC(2026, 10, 18, 19, 0, 0) / 1000;
 function fewPools(base: Rules): Rules {
   return {
@@ -241,6 +295,99 @@ function fewPools(base: Rules): Rules {
     cooldownMin: 24 * 60, perDay: 2,
     startAt: FEW_POOLS_START,
   };
+}
+
+/**
+ * RANKED ON WHAT A SEAT KEPT (added 2026-11-20, on the operator's word: "how can we optimize to
+ * have the correct entries + exits and increase profit").
+ *
+ * What the record showed when this was written (11-16 to 11-19, every pool-hour with a day on
+ * either side, a $500 bid seat followed for a day, the record split in two halves):
+ *   - Fees alone do not tell a paying pool from a dumping one, because a dump is busy. In the
+ *     second half the pool with the most seat fees over the last day lost about $30 on the next
+ *     day, on average, per $500 seat.
+ *   - What a seat had KEPT there over the last day did carry over, in both halves. Where the
+ *     same seat had lost money over the last day (the worst third), the next day lost about $26
+ *     to $30 per $500 seat and won 7% to 8% of the time. No other signal on the record, the
+ *     buyer and seller counts and holder spread included, held its order in both halves.
+ *   - Tighter floors (85%, 90%) and moving an unfilled bid up every hour cost money in both
+ *     halves: they sell bottoms and buy back higher.
+ * Even with all of that, the second half lost money on average: the market fell, and a filled
+ * bid holds the token. This set is the rules that evidence supports, not a promise that they pay:
+ * replayed over the hours it was drawn from it lost $9 across all four chains, and $42 to $56 on
+ * the desk's own chain alone, which is all the live engine can trade by itself.
+ *
+ * So:
+ *   - A POOL IS RANKED on the average of what this set's own seat would have kept there, opened
+ *     at each of the last 24 hours and held a day (refSeatNet), and admitted only if that average
+ *     is above zero AND the most recent full day kept money too.
+ *   - A SEAT IS LEFT at its floor, or when a fresh seat in its pool would have lost more than 1%
+ *     of itself over the last day ("pool turned"): the same evidence, read as an exit.
+ *   - AN UNFILLED BID IS NOT MOVED UP. It is given back after a full day unfilled and the pool
+ *     can be taken again two hours later if it still ranks.
+ *   - Two seats of a little under half the book, as the operator asked: fewer, larger seats.
+ *   - The flow, fee, yield-to-move and spike bars are off: what the seat kept replaces them.
+ *
+ * Known bias: Ethereum gas is assumed at $5 an action (measured nearer $0.14), so Ethereum pools
+ * rank lower here than they should. The assumption is shared with every other set and is left
+ * alone so the sets stay comparable.
+ *
+ * It takes no seat before it was added.
+ */
+export const SEAT_NET_START = Date.UTC(2026, 10, 20, 13, 0, 0) / 1000;
+function seatNet(base: Rules): Rules {
+  const seatUsd = Math.max(100, Math.floor((base.capitalUsd - base.reserveUsd) / 2 / 50) * 50);
+  return {
+    ...base,
+    name: "ranked on what a seat kept (from 11-20)",
+    note:
+      "added 2026-11-20 and takes no seat before 13:00 UTC that day, so its figures cover fewer hours than the rows above. Two seats of a little under half the book each; " +
+      "a pool is ranked on what this set's own seat would have kept there (fees, plus what the price did to it, minus costs), opened at each of the last 24 hours and held a day, and is taken only if that average and the latest full day both kept money; " +
+      "a seat is left at its floor or when a fresh seat in its pool would have lost more than 1% of itself over the last day; an unfilled bid is not moved up but given back after a full day; the flow, fee, yield-to-move and spike bars are off",
+    seatUsd, maxSeats: 2, breakerFloorUsd: 150,
+    minFlowUsdPerHour: 0, minFeeUsdPerHour: 0, minYieldToMove: 0, maxSpikePct: 0,
+    minHistoryHours: 48, rankOnSeatNet: true, leaveOnSeatLossPct: 1,
+    trailEveryHours: 24 * 365, idleBidMaxMin: 24 * 60, cooldownMin: 120, perDay: 4,
+    startAt: SEAT_NET_START,
+  };
+}
+
+/**
+ * PURE: what a bid seat of `seatUsd` would have KEPT, opened at the close of rows[i0] and held
+ * for `hours` hours without being moved: its fees, plus what the price did to it, minus gas, the
+ * collects and the swap back to dollars at the end. It leaves at `floorUsd` like a real seat.
+ * NaN when the record has a gap or does not reach that far. Reads rows[i0 .. i0 + hours] only.
+ */
+export function refSeatNet(rows: readonly LedgerHour[], i0: number, hours: number, seatUsd: number, widthPct: number, floorUsd: number, gasUsd: number, feePct: number): number {
+  if (i0 < 0 || i0 + hours >= rows.length) return NaN;
+  if (rows[i0 + hours].hourStart - rows[i0].hourStart !== hours * HOUR) return NaN;
+  const band = bidBand(seatUsd, rows[i0].pxClose, widthPct);
+  const exitCost = (tokenUsd: number) => gasUsd * (tokenUsd > 0.01 ? 2 : 1) + tokenUsd * (feePct / 100 + SWAP_SLIPPAGE);
+  let fees = 0, costs = gasUsd;
+  for (let j = i0 + 1; j <= i0 + hours; j++) {
+    const r = rows[j];
+    const share = band.L / (poolLiquidity(r) + band.L);
+    if (bandAt(band, r.pxLow).valueUsd < floorUsd) {
+      const gapped = bandAt(band, r.pxOpen).valueUsd < floorUsd;
+      const exitValue = gapped ? bandAt(band, r.pxOpen).valueUsd : floorUsd;
+      const exitPrice = gapped ? r.pxOpen : priceAtValue(band, floorUsd, r.pxLow, r.pxOpen);
+      fees += 0.5 * r.feesUsd * share * inRangeFraction(r.pxLow, r.pxHigh, band.pa, band.pb);
+      return fees + exitValue - seatUsd - costs - exitCost(bandAt(band, exitPrice).tokenUsd);
+    }
+    const fee = r.feesUsd * share * inRangeFraction(r.pxLow, r.pxHigh, band.pa, band.pb);
+    fees += fee;
+    if (fee >= 1) costs += gasUsd;
+  }
+  const at = bandAt(band, rows[i0 + hours].pxClose);
+  return fees + at.valueUsd - seatUsd - costs - exitCost(at.tokenUsd);
+}
+
+/** PURE: the average of refSeatNet over the day-long seats that ended at each of the last 24
+ *  hours up to rows[idx], and the latest of them on its own. Reads nothing after rows[idx]. */
+export function seatNetScore(idx: number, seat: (i0: number) => number): { avg: number; lastDay: number } {
+  const nets: number[] = [];
+  for (let k = 0; k < 24; k++) nets.push(seat(idx - 24 - k));
+  return { avg: nets.some((x) => !Number.isFinite(x)) ? NaN : nets.reduce((a, b) => a + b, 0) / nets.length, lastDay: nets[0] };
 }
 
 /** Dollars per on-chain action. Measured on the desk's chain (about 145k gas a
@@ -331,6 +478,18 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
   }
   const hours = [...allHours].sort((a, b) => a - b);
   const gas = (chain: string) => GAS_PER_OP_USD[chain] ?? 0.2;
+  // Seat-net sets: what this set's own seat would have kept in a pool, opened at the close of
+  // row i0 and held a day. Fixed for a given pool and hour within one run, so it is kept.
+  const keptMemo = new Map<string, number>();
+  const kept = (p: ReplayPool, i0: number): number => {
+    const k = `${p.key}:${i0}`;
+    let v = keptMemo.get(k);
+    if (v === undefined) {
+      v = refSeatNet(p.rows, i0, 24, rules.seatUsd, rules.widthPct, effectiveFloorUsd(rules.seatUsd, rules.envFloorUsd, rules.floorPct), gas(p.chain), p.feePct);
+      keptMemo.set(k, v);
+    }
+    return v;
+  };
 
   let cash = rules.capitalUsd;
   const open = new Map<string, OpenSeat>();
@@ -399,6 +558,30 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
           continue;
         }
       }
+      // Seat-net sets: leave once a fresh seat in this pool would have lost more than the bar over
+      // the last day. It reads rows up to this hour only.
+      if (rules.leaveOnSeatLossPct != null) {
+        const lastDay = kept(s.pool, s.pool.rows.findIndex((x) => x.hourStart === h) - 24);
+        if (Number.isFinite(lastDay) && lastDay < -(s.depositUsd * rules.leaveOnSeatLossPct) / 100) {
+          const at = bandAt(s.band, r.pxClose);
+          close(key, tEnd, at.valueUsd, at.tokenUsd, "pool turned");
+          continue;
+        }
+      }
+      if (rules.balancedWidth) {
+        // A balanced seat the price has left, on either side, earns nothing. It is put back around
+        // the price at most every trailEveryHours, and putting it back is not free: half of what it
+        // holds has to be swapped to make it balanced again, at the pool's fee plus slippage.
+        if ((r.pxClose > s.band.pb || r.pxClose < s.band.pa) && tEnd - (s.lastTrailAt ?? s.openedAt) >= (rules.trailEveryHours ?? 1) * HOUR) {
+          const value = bandAt(s.band, r.pxClose).valueUsd;
+          const cost = 2 * gas(s.pool.chain) + 0.5 * value * (s.pool.feePct / 100 + SWAP_SLIPPAGE);
+          s.band = balancedBand(value, r.pxClose, rules.balancedWidth);
+          s.costsUsd += cost;
+          cash -= cost;
+          s.lastTrailAt = tEnd;
+        }
+        continue;
+      }
       if (r.pxClose > s.band.pb) {
         // above the band the seat is all dollars: an unfilled bid. The desk trails it up for gas
         // and gives the slot back once it has sat unfilled long enough.
@@ -445,6 +628,7 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
 
     // 3. entries, decided on what is known at the end of this hour
     const notYet = rules.startAt != null && tEnd < rules.startAt; // a set added late takes no seat before it was added
+    const seatBand = (usd: number, px: number): Band => (rules.balancedWidth ? balancedBand(usd, px, rules.balancedWidth) : bidBand(usd, px, rules.widthPct));
     const look = Math.max(1, rules.feeLookbackHours ?? 1);
     for (let guard = 0; guard < rules.maxSeats && !notYet; guard++) {
       const candidates: AutoEntryCandidate[] = [];
@@ -455,13 +639,36 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
         const idx = p.rows.findIndex((x) => x.hourStart === h);
         if (idx + 1 < Math.max(rules.minHistoryHours, look)) continue;
         const recent = p.rows.slice(Math.max(0, idx - 5), idx + 1);
-        const bid = bidBand(rules.seatUsd, r.pxClose, rules.widthPct);
+        const window = p.rows.slice(idx + 1 - look, idx + 1);
+        // Steady-range sets: the price's whole range over the look-back must fit inside the bar.
+        // A pool with one wild print in the window fails it, which is the cautious way to be wrong.
+        if (rules.steadyRangePct != null) {
+          const hi = Math.max(...window.map((x) => x.pxHigh)), lo = Math.min(...window.map((x) => x.pxLow));
+          if (!(lo > 0) || (hi / lo - 1) * 100 > rules.steadyRangePct) {
+            if (guard === 0) { candidateHours++; refusals["not steady"] = (refusals["not steady"] ?? 0) + 1; }
+            continue;
+          }
+        }
+        // Seat-net sets: a pool is taken only where this set's own seat has been keeping money,
+        // over the last two days on average and over the latest full day.
+        let keptPerHour: number | undefined;
+        if (rules.rankOnSeatNet) {
+          const score = seatNetScore(idx, (i0) => kept(p, i0));
+          const gate = !Number.isFinite(score.avg) ? "gap in record" : score.avg <= 0 ? "seat lost money over two days" : score.lastDay <= 0 ? "seat lost money over the last day" : null;
+          if (gate) {
+            if (guard === 0) { candidateHours++; refusals[gate] = (refusals[gate] ?? 0) + 1; }
+            continue;
+          }
+          keptPerHour = score.avg / 24;
+        }
+        const bid = seatBand(rules.seatUsd, r.pxClose);
         const sharePct = (100 * bid.L) / (poolLiquidity(r) + bid.L);
         const netRecent = (realized.get(p.key) ?? []).filter((x) => tEnd - x.t <= 7 * 86400).reduce((a, x) => a + x.net, 0);
         rowOf.set(p.key, r);
         candidates.push({
           symbol: p.key,
-          flowUsdPerHour: r.swaps > 0 ? r.volumeUsd : NaN,
+          // one hour as the desk read it, or the average over the look-back for a set that judges on a day
+          flowUsdPerHour: r.swaps > 0 ? (look === 1 ? r.volumeUsd : window.reduce((a, x) => a + x.volumeUsd, 0) / look) : NaN,
           admitted: netRecent >= rules.admissionFloorUsd,
           admissionNetUsd: netRecent,
           hasSeat: open.has(p.key),
@@ -469,10 +676,11 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
           denied: false,
           lastExitMs: lastExit.has(p.key) ? lastExit.get(p.key)! * 1000 : undefined,
           // One hour as the desk judged it, or the average of the last `look` hours for a stay-put set,
-          // each hour at the share a seat would have had in that hour.
-          feeUsdPerHour: look === 1
+          // each hour at the share a seat would have had in that hour. A seat-net set ranks on what its
+          // seat KEPT per hour instead; its fee bar is off, so this number only orders the pools.
+          feeUsdPerHour: keptPerHour != null ? keptPerHour : look === 1
             ? (r.feesUsd * sharePct) / 100
-            : p.rows.slice(idx + 1 - look, idx + 1).reduce((a, x) => { const b = bidBand(rules.seatUsd, x.pxClose, rules.widthPct); return a + x.feesUsd * (b.L / (poolLiquidity(x) + b.L)); }, 0) / look,
+            : window.reduce((a, x) => { const b = seatBand(rules.seatUsd, x.pxClose); return a + x.feesUsd * (b.L / (poolLiquidity(x) + b.L)); }, 0) / look,
           sharePct,
           hourlyMovePct: recent.length >= 3 ? median(recent.map((x) => Math.abs(x.pxClose / x.pxOpen - 1) * 100)) : NaN,
           last60mPct: (r.pxClose / r.pxOpen - 1) * 100,
@@ -502,7 +710,7 @@ export function replay(pools: readonly ReplayPool[], rules: Rules): ReplayResult
       const pool = pools.find((p) => p.key === verdict.symbol)!;
       const r = rowOf.get(pool.key)!;
       cash -= verdict.seatUsd + gas(pool.chain);
-      open.set(pool.key, { pool, band: bidBand(verdict.seatUsd, r.pxClose, rules.widthPct), depositUsd: verdict.seatUsd, openedAt: tEnd, feesUsd: 0, costsUsd: gas(pool.chain), hours: 0, hoursInRange: 0, unfilledSince: undefined });
+      open.set(pool.key, { pool, band: seatBand(verdict.seatUsd, r.pxClose), depositUsd: verdict.seatUsd, openedAt: tEnd, feesUsd: 0, costsUsd: gas(pool.chain), hours: 0, hoursInRange: 0, unfilledSince: undefined });
       entries.push(tEnd);
     }
   }
