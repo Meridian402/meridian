@@ -20,7 +20,9 @@
 import { lpPositionsWithValue, uncollectedFeesUsd, collectFees, withdrawPosition, poolTick, mintDumpBid, type LpPositionValue } from "./venues/lpPositions.js";
 import { getPublicClient } from "./venues/signer.js";
 import { parseAbiItem } from "viem";
-import { realSellStockForUsdg, realSwapUsdgToEth, tokenAddressFor, poolFeePct, tokenIsCurrency0, USDG } from "./venues/stockPools.js";
+import { realSellStockForUsdg, realSwapUsdgToEth, tokenAddressFor, poolFeePct, tokenIsCurrency0, usdgPoolIdFor, USDG } from "./venues/stockPools.js";
+import { RANK_ON_KEPT, LEAVE_ON_LOSS_PCT, keptReading, keptEntryCheck, poolTurned, ledgerRowsFor } from "./seatKept.js";
+import { GAS_PER_OP_USD } from "./signals/seatMath.js";
 import { walletOpsAvailable } from "./risk.js";
 import { openInPool, HANDS_OFF_SYMBOLS } from "./lpGuard.js";
 import { LAUNCH_LANE, LAUNCH_SEAT_USD, LAUNCH_MAX_SEATS, LAUNCH_MIN_TIER_PCT, LAUNCH_MIN_HOUR, LAUNCH_MIN_FLOW_USD_H, LAUNCH_DEPTH_MIN_USD, LAUNCH_DEPTH_MAX_USD, activeLaunchVenues, launchVenueSymbols, expireLaunchVenues, pushedStatsFor } from "./launchLane.js";
@@ -102,7 +104,7 @@ const AUTO_ENTRY_MIN_GAS_ETH = Number(process.env.MERIDIAN_PILOT_AUTO_MIN_GAS_ET
 const AUTO_ENTRY_COOLDOWN_MS = Number(process.env.MERIDIAN_PILOT_AUTO_COOLDOWN_MIN ?? 120) * 60_000;
 const AUTO_ENTRY_PER_DAY = Number(process.env.MERIDIAN_PILOT_AUTO_PER_DAY ?? 6);
 const AUTO_ENTRY_DENY = new Set((process.env.MERIDIAN_MEME_VENUE_DENYLIST ?? "POOLS").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean));
-const GUARD_EXIT_KINDS = new Set(["floor-exit", "break-exit", "dump-exit", "fade-exit", "recenter-abort", "idle-exit"]);
+const GUARD_EXIT_KINDS = new Set(["floor-exit", "break-exit", "dump-exit", "fade-exit", "recenter-abort", "idle-exit", "turn-exit"]);
 /** The venues the pilot manages: the hands-off set plus any live launch-lane venue. */
 function pilotSymbols(): Set<string> {
   return new Set([...HANDS_OFF_SYMBOLS, ...(LAUNCH_LANE ? launchVenueSymbols() : [])]);
@@ -150,6 +152,13 @@ const REBAND_LABEL = `-${(100 * (1 - 1 / (1 + REBAND_WIDTH_PCT / 200))).toFixed(
 // a 17% drop. Off is available for a venue that keeps V-recovering through
 // its old band; it leaves the floor and the dump exit as the only exits.
 const RECENTER_BELOW = (process.env.MERIDIAN_PILOT_RECENTER_BELOW ?? "on") !== "off";
+// THE BID IS NOT CHASED (2026-11-20, the split-half study behind the "ranked on what a seat kept"
+// paper set). Above the band a seat is an unfilled bid, and re-centering it moves the bid up to
+// the new price: on the paper record that was the costliest habit in both halves, because each
+// move buys back in higher (the same two pools made +$48 with their bids left where they were
+// and -$85 moved up every six hours). Off leaves an unfilled bid where it was placed until the
+// idle-bid exit (MERIDIAN_PILOT_IDLE_BID_MAX_MIN) gives the money back. On is the old behaviour.
+const RECENTER_ABOVE = (process.env.MERIDIAN_PILOT_RECENTER_ABOVE ?? "on") !== "off";
 /** Price still moving away faster than this (pct over the stability window) blocks a re-center. */
 const STABLE_DRIFT_PCT = 1.0;
 const STABILITY_WINDOW_MS = 30 * 60 * 1000;
@@ -197,10 +206,10 @@ export function recenterVerdict(
 }
 
 /** PURE: may an out-of-range seat be managed (re-centered, break-exited) on
- *  this side of its band? Above: always. Below: unless the operator switched
- *  below-band management off; the floor and the dump exit apply regardless. */
-export function outOfRangeManaged(belowBand: boolean, recenterBelow = RECENTER_BELOW): boolean {
-  return !belowBand || recenterBelow;
+ *  this side of its band? Each side unless the operator switched that side
+ *  off; the floor, the dump exit and the idle-bid exit apply regardless. */
+export function outOfRangeManaged(belowBand: boolean, recenterBelow = RECENTER_BELOW, recenterAbove = RECENTER_ABOVE): boolean {
+  return belowBand ? recenterBelow : recenterAbove;
 }
 
 /** PURE: is an in-range seat due for a collect? Due when the cadence has
@@ -276,6 +285,8 @@ export interface AutoEntryCandidate {
   tierPct?: number;
   hour?: number;
   depthUsd?: number;
+  /** set when what our seat kept in this venue refuses it (seatKept.ts); reported as is */
+  keptRefusal?: string;
 }
 
 /** PURE: is the price up more than spikePct over the trailing window? Tick
@@ -371,6 +382,7 @@ export function autoEntryVerdict(args: {
     if (c.denied) { why.push(`${c.symbol}: denylist`); continue; }
     if (c.lockedOut) { why.push(`${c.symbol}: locked out`); continue; }
     if (!c.admitted) { why.push(`${c.symbol}: 7d net $${c.admissionNetUsd.toFixed(0)} under admission`); continue; }
+    if (c.keptRefusal) { why.push(`${c.symbol}: ${c.keptRefusal}`); continue; }
     if (c.lastExitMs != null && args.now - c.lastExitMs < args.cooldownMs) { why.push(`${c.symbol}: exited ${Math.round((args.now - c.lastExitMs) / 60000)}m ago, cooldown ${Math.round(args.cooldownMs / 60000)}m`); continue; }
     if (Number.isNaN(c.flowUsdPerHour)) { why.push(`${c.symbol}: tape too thin to read flow`); continue; }
     if (c.flowUsdPerHour < args.minFlowUsdPerHour) { why.push(`${c.symbol}: flow $${Math.round(c.flowUsdPerHour / 1000)}k/h under $${Math.round(args.minFlowUsdPerHour / 1000)}k/h`); continue; }
@@ -483,6 +495,13 @@ async function idleBidExits(positions: readonly LpPositionValue[], venueOpenUsd:
   }
 }
 
+/** What the desk's own entry seat would have kept in a venue, from the hourly record (seatKept.ts). */
+function keptFor(symbol: string, now: number): ReturnType<typeof keptReading> {
+  const id = usdgPoolIdFor(symbol);
+  if (!id) return { ok: false, reason: "not a USDG pool" };
+  return keptReading(ledgerRowsFor(id), now, { usd: AUTO_ENTRY_USD, widthPct: REBAND_WIDTH_PCT, floorUsd: effectiveFloorUsd(AUTO_ENTRY_USD), gasUsd: GAS_PER_OP_USD.robinhood, feePct: poolFeePct(symbol) });
+}
+
 /** Measured fee rate first; a depth-less venue ranks by flow below every measured one. */
 function rankKey(c: AutoEntryCandidate): [number, number] {
   return c.feeUsdPerHour != null && Number.isFinite(c.feeUsdPerHour) ? [1, c.feeUsdPerHour] : [0, c.flowUsdPerHour];
@@ -565,6 +584,9 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
       lockedOut: dumpMintRefusal(v.symbol, now) != null || fadeMintRefusal(v.symbol, now) != null,
       denied: AUTO_ENTRY_DENY.has(v.symbol),
       lastExitMs: exits.length ? Math.max(...exits.map((r) => r.ts)) : undefined,
+      // A launch venue has no two days of record, so it cannot be judged on what a seat kept; with
+      // that ranking on it would also be ranked in different units from every other venue.
+      keptRefusal: RANK_ON_KEPT ? "launch venue: no two-day record to judge what a seat kept" : undefined,
     };
   });
   const candidates: AutoEntryCandidate[] = [...launchCandidates, ...[...HANDS_OFF_SYMBOLS].map((symbol) => {
@@ -575,10 +597,14 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
     const sharePct = depth ? bidShareOfPool(AUTO_ENTRY_USD, depth.activeL, depth.tick, tokenIsCurrency0(symbol)) : undefined;
     const feeUsdPerHour = sharePct != null && !Number.isNaN(flow) ? flow * (poolFeePct(symbol) / 100) * (sharePct / 100) : undefined;
     const mv = venueMoveStats(symbol, now);
+    // Seat-kept rules (off unless switched on): with ranking on, a venue is ranked on what our seat
+    // KEPT there per hour instead of what it would earn, and refused unless it kept money.
+    const kept = RANK_ON_KEPT || LEAVE_ON_LOSS_PCT > 0 ? keptEntryCheck(keptFor(symbol, now), RANK_ON_KEPT, LEAVE_ON_LOSS_PCT, AUTO_ENTRY_USD) : {};
     return {
       symbol,
       flowUsdPerHour: flow,
-      feeUsdPerHour,
+      feeUsdPerHour: kept.rankUsdPerHour ?? feeUsdPerHour,
+      keptRefusal: kept.refusal,
       sharePct,
       hourlyMovePct: mv.medianAbsHourlyPct,
       last60mPct: mv.last60mPct,
@@ -605,8 +631,11 @@ async function maybeAutoEntry(positions: readonly LpPositionValue[]): Promise<vo
     entriesToday,
     perDay: AUTO_ENTRY_PER_DAY,
     minFlowUsdPerHour: AUTO_ENTRY_MIN_FLOW_USD_H,
-    minFeeUsdPerHour: AUTO_ENTRY_MIN_FEE_USD_H,
-    minYieldToMove: AUTO_ENTRY_MIN_YIELD_TO_MOVE,
+    // With seat-kept ranking on, feeUsdPerHour carries what a seat KEPT, not what it would earn, so
+    // the two bars that read it as earnings (the $/h seat bar and yield-to-move) are off: what the
+    // seat kept already answers both. The flow and spike bars read other numbers and stand as set.
+    minFeeUsdPerHour: RANK_ON_KEPT ? 0 : AUTO_ENTRY_MIN_FEE_USD_H,
+    minYieldToMove: RANK_ON_KEPT ? 0 : AUTO_ENTRY_MIN_YIELD_TO_MOVE,
     maxSpikePct: SPIKE_PCT,
     cooldownMs: AUTO_ENTRY_COOLDOWN_MS,
     candidates,
@@ -942,6 +971,35 @@ async function runTick(): Promise<void> {
       venueOpenUsd.delete(symbol);
     }
   }
+  // THE POOL-TURNED EXIT (2026-11-20, off unless MERIDIAN_PILOT_LEAVE_ON_LOSS_PCT is set). Once a
+  // fresh seat in a venue would have lost more than that share of itself over the last day, every
+  // seat the venue holds closes to cash and the token is sold. On the paper record, where a seat
+  // had lost money over the last day the next day lost too, in both halves. A venue the hourly
+  // record cannot judge is left to the floor and the dump exit. The resting dump bid keeps its
+  // own clock. Exits ignore the stand-down, like every other exit here.
+  if (LEAVE_ON_LOSS_PCT > 0) {
+    const nowMs = Date.now();
+    for (const symbol of [...venueOpenUsd.keys()]) {
+      if (activeDumpBid(symbol)) continue;
+      const k = keptFor(symbol, nowMs);
+      if (!k.ok || !poolTurned(k.reading, AUTO_ENTRY_USD, LEAVE_ON_LOSS_PCT)) continue;
+      const seats = positions.filter((p) => p.symbol === symbol);
+      console.error(`[pilotGuard] POOL TURNED: ${symbol}: a $${AUTO_ENTRY_USD} seat opened a day ago kept $${k.reading.lastDay.toFixed(2)}, under -${LEAVE_ON_LOSS_PCT}%; closing ${seats.length} seat(s) to cash`);
+      for (const p of seats) {
+        try {
+          await withdrawPosition({ tokenId: p.tokenId, symbol: p.symbol, liquidity: p.liquidity, mech: "turn-exit" });
+          appendLedger("pilot-guard.jsonl", { ts: nowMs, kind: "turn-exit", tokenId: p.tokenId, symbol: p.symbol, valueUsd: p.valueUsd, keptLastDayUsd: k.reading.lastDay });
+          clearLineage(String(p.tokenId));
+          outSince.delete(String(p.tokenId));
+        } catch (err) {
+          console.error(`[pilotGuard] pool-turned exit of #${p.tokenId} failed: ${err instanceof Error ? err.message.slice(0, 120) : err}`);
+        }
+      }
+      const sold = await sellSymbolsOrEnqueue([symbol], "turn-exit");
+      if (sold[0]?.usdgReceived) console.error(`[pilotGuard] pool-turned exit sold $${sold[0].usdgReceived.toFixed(2)} of loose ${symbol} to cash`);
+      venueOpenUsd.delete(symbol);
+    }
+  }
   // A bid that never fills gives its slot back before anything else is judged.
   await idleBidExits(positions, venueOpenUsd);
   for (const p of positions) {
@@ -1090,11 +1148,13 @@ async function managePosition(p: LpPositionValue, venueOpenUsd: number): Promise
     console.error(
       outOfRangeManaged(belowBand)
         ? `[pilotGuard] #${p.tokenId} (${p.symbol}) left its band ${belowBand ? "below" : "above"}; watching for stabilization before any re-center`
-        : `[pilotGuard] #${p.tokenId} (${p.symbol}) fell below its band; holding for the floor or the dump exit (below-band re-centers off)`,
+        : belowBand
+          ? `[pilotGuard] #${p.tokenId} (${p.symbol}) fell below its band; holding for the floor or the dump exit (below-band re-centers off)`
+          : `[pilotGuard] #${p.tokenId} (${p.symbol}) rose above its band; the bid stays where it was placed until the idle-bid exit gives it back (above-band re-centers off)`,
     );
     return;
   }
-  if (!outOfRangeManaged(belowBand)) return; // quiet hold below the band; the floor above already had its say
+  if (!outOfRangeManaged(belowBand)) return; // a quiet hold on a side the operator switched off; the floor above already had its say
   // Below: the slow clock (drift realization risk). Above: the fast clock
   // (all-USDG, nothing to realize, missed fees are the only cost).
   const minOut = belowBand ? RECENTER_BELOW_MIN_MS : RECENTER_ABOVE_MIN_MS;
@@ -1228,7 +1288,7 @@ export function startPilotGuard(): NodeJS.Timeout | undefined {
   timer.unref?.();
   void tickFn();
   console.error(
-    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, seat >= $${AUTO_ENTRY_MIN_FEE_USD_H}/h, yield/move >= ${AUTO_ENTRY_MIN_YIELD_TO_MOVE}, no bid after a +${SPIKE_PCT}% hour, launch lane ${LAUNCH_LANE ? `ON ($${LAUNCH_SEAT_USD} seats, max ${LAUNCH_MAX_SEATS}, tier >= ${LAUNCH_MIN_TIER_PCT}%, hour >= ${LAUNCH_MIN_HOUR}, flow >= $${Math.round(LAUNCH_MIN_FLOW_USD_H / 1000)}k/h, depth $${Math.round(LAUNCH_DEPTH_MIN_USD / 1000)}k-$${Math.round(LAUNCH_DEPTH_MAX_USD / 1000)}k)` : "off"}, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE_MIN_MS / 60000}m above + stable tape, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
+    `[pilotGuard] armed: 24/7 clock over {${[...HANDS_OFF_SYMBOLS].join(", ")}}: collect every ${COLLECT_EVERY_MS / 60000}m (gas guard ${COLLECT_MIN_USD}), floor max($${FLOOR_USD}, ${FLOOR_PCT}% of deposit), auto-entry ${AUTO_ENTRY ? `ON ($${AUTO_ENTRY_USD} bids, max ${AUTO_ENTRY_MAX_SEATS} seats, flow >= $${Math.round(AUTO_ENTRY_MIN_FLOW_USD_H / 1000)}k/h, seat >= $${AUTO_ENTRY_MIN_FEE_USD_H}/h, yield/move >= ${AUTO_ENTRY_MIN_YIELD_TO_MOVE}, no bid after a +${SPIKE_PCT}% hour, launch lane ${LAUNCH_LANE ? `ON ($${LAUNCH_SEAT_USD} seats, max ${LAUNCH_MAX_SEATS}, tier >= ${LAUNCH_MIN_TIER_PCT}%, hour >= ${LAUNCH_MIN_HOUR}, flow >= $${Math.round(LAUNCH_MIN_FLOW_USD_H / 1000)}k/h, depth $${Math.round(LAUNCH_DEPTH_MIN_USD / 1000)}k-$${Math.round(LAUNCH_DEPTH_MAX_USD / 1000)}k)` : "off"}, reserve $${AUTO_ENTRY_RESERVE_USD}, cooldown ${AUTO_ENTRY_COOLDOWN_MS / 60000}m, ${AUTO_ENTRY_PER_DAY}/day)` : "off"}, idle-bid exit ${IDLE_BID_MAX_MS / 60000}m, gas refill ${GAS_REFILL ? `on (<${GAS_MIN_ETH} ETH -> $${GAS_REFILL_USD}, keep $${GAS_REFILL_MIN_CASH_AFTER_USD})` : "off"}, re-center ${RECENTER_BELOW ? `${RECENTER_BELOW_MIN_MS / 60000}m below` : "below OFF (floor or dump exit only)"} / ${RECENTER_ABOVE ? `${RECENTER_ABOVE_MIN_MS / 60000}m above` : "above OFF (bids are not chased)"} + stable tape, seat-kept ranking ${RANK_ON_KEPT ? "ON (two days kept > 0 and last day > 0; seat bar and yield/move off)" : "off"}, pool-turned exit ${LEAVE_ON_LOSS_PCT > 0 ? `ON (a fresh seat down ${LEAVE_ON_LOSS_PCT}% over a day)` : "off"}, re-band width ${REBAND_WIDTH_PCT} (${REBAND_LABEL}, above re-arms BID-side), floor $${FLOOR_USD}`,
   );
   return timer;
 }

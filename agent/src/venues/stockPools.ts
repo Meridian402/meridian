@@ -118,6 +118,22 @@ const POOLS: Record<string, PoolEntry> = {
   // $33k-$42k/day to LPs, price 0.011-0.018 throughout, 131 senders, top two
   // arb bots 62% of swaps, ~$73k in range so a $500 seat is ~0.7% share.
   MICRODUCK: { token: "0xd5f1afea47b1a9eab414d2ee740cf1d6d039e725" as Address, quote: "USDG", fee: 7800, tickSpacing: 78 },
+  // The paper desk's four pools on this chain (listed 2026-11-20, operator: "build the wiring",
+  // for the "ranked on what a seat kept" rules). Recorded hourly since 11-16 in pool-watch.jsonl,
+  // which is what those rules read. Each key below was recovered from the watched pool id and
+  // reproduces it exactly with no hook. Checked on add, read-only: every token reports 18
+  // decimals, and an ETH -> USDG -> token -> USDG round trip lands in eth_call simulation (the
+  // qualifier's holdability test). NOT checked: a real mint, collect or withdraw in any of them.
+  // Listing makes them tradable (lp-open accepts them, and a position in one is seen and valued).
+  // PUT THEM IN MERIDIAN_GUARD_HANDS_OFF BEFORE ANY SEAT OPENS: the pilot guard (24/7 clock) manages
+  // only what that list names, and the stock guard (lpGuard.ts) takes every other listed pool, on
+  // US market hours, and once a mint has landed in one its allocator may deploy there on its own.
+  // PRIORS carries a 2% creator tax on the token (on the watcher's note); the round trip still
+  // landed, but every sale of it costs that on top of the pool fee. HBTC is an unvetted token.
+  ORBIO: { token: "0xaa07a0e9209e16ac99708c3ec70159c6ef3128a3" as Address, quote: "USDG", fee: 8000, tickSpacing: 80 },
+  HOOKR: { token: "0x18e674231a58c239dc7daedcffe15ec3a24cff5c" as Address, quote: "USDG", fee: 10000, tickSpacing: 100 },
+  PRIORS: { token: "0xedbf91223639800bcd5756815caf908df3b890be" as Address, quote: "USDG", fee: 10000, tickSpacing: 100 },
+  HBTC: { token: "0x8db244f6bf052571f4e0c6065b700e714092d4b6" as Address, quote: "USDG", fee: 10000, tickSpacing: 100 },
   // SPCX still EXCLUDED. Removed 2026-07-16 after a real mint reverted (0x70a08…):
   // SPCX (SpaceX) is a TRANSFER-RESTRICTED token, so our wallet couldn't receive
   // or LP it. Re-checked 2026-07-21: a USDG→SPCX swap now LANDS in faithful

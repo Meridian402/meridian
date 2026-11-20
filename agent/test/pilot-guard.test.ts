@@ -27,9 +27,16 @@ test("with below-band management switched off, a seat below its band holds for t
   assert.equal(outOfRangeManaged(true, false), false);
 });
 
-test("above the band (all USDG, nothing to realize) the fast re-center always runs", () => {
+test("above the band (all USDG, nothing to realize) the fast re-center runs by default, whatever the below-band switch says", () => {
   assert.equal(outOfRangeManaged(false, false), true);
   assert.equal(outOfRangeManaged(false, true), true);
+});
+
+test("with above-band re-centers switched off, an unfilled bid is not chased, and the below side is untouched", () => {
+  assert.equal(outOfRangeManaged(false, true, false), false, "above the band: held where it was placed");
+  assert.equal(outOfRangeManaged(false, false, false), false);
+  assert.equal(outOfRangeManaged(true, true, false), true, "below the band: still the below-band switch's call");
+  assert.equal(outOfRangeManaged(true, false, false), false);
 });
 
 // ── the re-center bid (2026-09-01): never re-buy the top ─────────────────────
@@ -433,4 +440,20 @@ test("moveStats: median absolute hourly move and the trailing-hour move from pri
   assert.ok(Math.abs(m.medianAbsHourlyPct - 6) < 0.01, `median of 8,4,8,4,8,4 is 6: ${m.medianAbsHourlyPct}`);
   assert.ok(Math.abs(m.last60mPct - -4) < 0.01, `last hour fell 4%: ${m.last60mPct}`);
   assert.ok(Number.isNaN(moveStats(samples.slice(-3), now, 6).medianAbsHourlyPct), "one usable bucket: no median");
+});
+
+// ── seat-kept refusals (2026-11-20) ──────────────────────────────────────────
+
+test("auto-entry: a venue the seat-kept check refuses is skipped with its reason, and the next venue is taken", () => {
+  const c = [
+    cand({ symbol: "ORBIO", feeUsdPerHour: 9, keptRefusal: "a $1350 seat here kept $-4.10 over the last day" }),
+    cand({ symbol: "HBTC", feeUsdPerHour: 0.5 }),
+  ];
+  const v = autoEntryVerdict({ ...baseArgs, minFeeUsdPerHour: 0, candidates: c });
+  assert.ok(v.act);
+  assert.equal(v.act && v.symbol, "HBTC", "the higher-ranked venue was refused on what its seat kept");
+  const none = autoEntryVerdict({ ...baseArgs, minFeeUsdPerHour: 0, candidates: [c[0]] });
+  assert.ok(!none.act && /ORBIO: a \$1350 seat here kept \$-4\.10 over the last day/.test(none.reason), none.act ? "" : none.reason);
+  const untouched = autoEntryVerdict({ ...baseArgs, minFeeUsdPerHour: 0, candidates: [cand({ symbol: "ORBIO", feeUsdPerHour: 9 })] });
+  assert.ok(untouched.act, "with no refusal set, nothing changes");
 });
